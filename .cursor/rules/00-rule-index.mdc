@@ -1,0 +1,50 @@
+---
+description: "Always apply. Minimal project context and rule selection guide for the LLM trading bot."
+alwaysApply: true
+---
+
+# Rule Index — Minimal Always-On Context
+
+This is an LLM-based paper-trading automation project. The LLM decides; Python validates, logs, and executes paper orders.
+
+Non-negotiables:
+- Do not create live trading code paths unless explicitly requested.
+- Do not let LLM output bypass Python validation. Python-owned `ExecutionMode` may bypass LLM-control filters only when explicitly in `REBALANCING`, `EMERGENCY_TRIGGER`, or `MDD_KILLSWITCH`.
+- Do not use performance targets inside LLM prompts.
+- Date-ID evidence is required for investment decisions.
+- Debug.md is for technical/operational events such as malformed LLM output, schema failure, execution/API/fill errors, and gold trade policy blocks; it does not store Postmortem `error_tags` and never feeds Top 3 investment tags.
+- Runtime trading mode is controlled only by typed `config.toml`; default is paper mode. Long-horizon paper performance is owned by the internal PaperBroker ledger, not by a KIS mock account.
+- Final target runtime is macOS on the user's Mac; avoid Linux/Windows-only assumptions. Mac mini Pro arrival is now near-term, so model/runtime assumptions must be verified by local Ollama benchmarks before being treated as stable.
+
+Before coding, open only the relevant rule file:
+- Architecture: `01-architecture-boundaries.mdc`
+- Domain models: `02-domain-models-and-state.mdc`
+- LLM prompts/schemas: `03-llm-json-schema-and-prompts.mdc`
+- Date-ID/Scout: `04-scout-date-id-and-data.mdc`
+- Allocator: `05-allocator.mdc`
+- Orders/risk: `06-risk-filters-and-orders.mdc`
+- Scheduler: `07-scheduler-and-market-calendar.mdc`
+- Emergency triggers: `12-emergency-triggers.mdc`
+- macOS runtime: `13-macos-runtime-environment.mdc`
+- Logs/Postmortem: `08-logs-debug-postmortem.mdc`
+- Tests: `09-testing-paper-trading.mdc`
+- Python style: `10-python-style.mdc`
+- Runtime config / paper-live switch: `11-runtime-config-and-mode.mdc`
+- Broker/API/account/PaperBroker: `14-broker-api-and-paper-broker.mdc`
+- PR hardening: `99-forbidden-patterns.mdc`
+
+
+## MVP implementation order
+
+1. Config loader and domain models.
+2. LLM JSON schemas and validators.
+3. Date-ID storage, existence validation, and stale validation.
+4. PaperBrokerAdapter, internal paper ledger, and replayable DecisionSnapshot/event log.
+5. Allocator parser/validator.
+6. Risk filters and OrderIntent.
+7. Scheduler.
+8. Weekly/Monthly Postmortem.
+9. KIS mock broker API rehearsal.
+10. Emergency triggers.
+
+Emergency triggers are intentionally late. Do not implement them before parser, validator, paper broker, and replay tests are stable.

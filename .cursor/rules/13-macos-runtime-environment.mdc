@@ -1,0 +1,50 @@
+---
+description: "USE WHEN implementing runtime setup, local services, Ollama integration, scheduling deployment, file paths, or environment variables for the final Mac runtime."
+alwaysApply: false
+---
+
+# macOS Runtime Environment
+
+Final target runtime is the user's Mac/macOS environment. The Mac mini has arrived, and Ollama/local model setup is now the immediate implementation focus.
+
+## Requirements
+
+- Use `pathlib.Path` for all project paths.
+- Avoid Windows path assumptions.
+- Avoid Linux-only deployment assumptions such as systemd services unless the user explicitly asks.
+- Avoid CUDA-only code paths. Local LLM execution is expected through Ollama or another macOS-compatible runtime.
+- Environment variables must be loaded and validated in a macOS shell-compatible way.
+- File writes must be atomic where practical because logs such as Date.md, DailySummary, Debug.md, and Postmortem files are stateful.
+- Do not store secrets in repo files; use environment variables or ignored config files.
+
+## Scheduling
+
+- Strategy logic uses Asia/Seoul time for trading decisions.
+- US market sessions must use exchange calendars with DST conversion.
+- Do not implement a background daemon or launchd plist unless explicitly requested. Keep scheduler code testable as a normal Python process first.
+
+## Local LLM
+
+- Do not assume cloud LLM APIs.
+- Make Ollama endpoint/model configurable.
+- Keep prompts and JSON parsing deterministic and temperature=0-compatible.
+
+
+## Ollama baseline procedure
+
+Before treating a model/runtime as stable, record:
+
+- Ollama version
+- model name/tag
+- model digest
+- Modelfile/template if available
+- prompt/schema version
+- num_ctx
+- temperature
+- seed if supported
+- latency for 1K/5K/15K/30K inputs
+- JSON parse success rate
+- Pydantic validation success rate
+- RAM/swap behavior
+
+Do not use `latest` as the operating model tag after the first stable benchmark. Promote updated models through candidate testing only.

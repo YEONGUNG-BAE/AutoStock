@@ -1,0 +1,126 @@
+---
+description: "USE WHEN defining Pydantic models, enums, persistent state, portfolio state, IDs, or percentage semantics."
+alwaysApply: false
+---
+
+# Domain Models and State
+
+## Percent basis must be explicit
+
+There are two percentage bases:
+
+1. `cash_target_percent`
+   - Basis: total account value.
+   - Range: 10~30 in normal operation.
+
+2. `target_weights.kr/us/gold`
+   - Basis: invested assets only, excluding cash.
+   - Sum must be exactly 100.
+
+Example:
+
+```text
+Total account = 30,000,000 KRW
+cash_target_percent = 20
+Invested assets = 24,000,000 KRW
+KR/US/Gold = 50/30/20
+Actual total-account targets = Cash 20, KR 40, US 24, Gold 16
+```
+
+## Single-stock 5% rule
+
+The 5% cap is not current market weight. It is cumulative buy-cost weight.
+
+Use separate fields:
+
+```python
+cumulative_buy_weight_pct  # buy-cost basis
+current_market_weight_pct  # mark-to-market basis
+remaining_buy_capacity_pct = max(0, 5 - cumulative_buy_weight_pct)
+```
+
+If a stock was bought at 3% and rises to 10%, up to 2% additional buy-cost capacity remains.
+
+## Required IDs
+
+- `DateId`: format `YYMMDD-N`, stored in Date.md.
+- `DecisionId`: stable ID for every LLM decision or order intent.
+- `OrderIntentId`: generated before paper execution.
+
+## Suggested enums
+
+```text
+Market = KR | US | GLOBAL
+AssetClass = KR | US | GOLD | CASH
+Action = BUY | SELL | HOLD | MAINTAIN | INCREASE | DECREASE
+RiskRegime = RISK_ON | NEUTRAL | RISK_OFF | CRISIS_WATCH
+ExecutionMode = NORMAL | REBALANCING | EMERGENCY_TRIGGER | MDD_KILLSWITCH | MANUAL
+ReviewStatus = OPEN | WEEKLY_REVIEWABLE | WEEKLY_REVIEWED | CLOSED_REVIEWED
+```
+
+
+
+## ExecutionMode semantics
+
+Use `ExecutionMode` to decide which filters are strict and which are temporarily bypassable.
+
+| Mode | Meaning |
+|---|---|
+| `NORMAL` | Regular LLM-driven analysis/order flow. Apply invested floor, allocation soft bands, Date-ID validation, and directional slippage normally. |
+| `REBALANCING` | Allocator target adjustment or order sequencing. Cash/invested bands may be temporarily breached and must be logged for recovery review. |
+| `EMERGENCY_TRIGGER` | STOCK_DROP, INDEX_CRASH, PORTFOLIO_LOSS, or urgent PROFIT_RUN handling. Damaged positions may be reduced even if the invested floor falls below 70%. |
+| `MDD_KILLSWITCH` | Python-only staged liquidation. Bypasses LLM analysis and LLM-control filters, but never broker/exchange/order-availability checks. |
+| `MANUAL` | Operator-owned override. Requires explicit audit log with reason and portfolio before/after state. |
+
+Persist transient breaches explicitly:
+
+```python
+below_invested_min: bool
+below_min_reason: str | None  # e.g. "REBALANCING", "EMERGENCY_TRIGGER", "MDD_KILLSWITCH"
+requires_recovery_review: bool
+recovery_review_after: str | None  # e.g. "next_regular_analysis", "next_allocator"
+```
+
+## State ownership
+
+Python owns:
+
+- previous targets
+- current actual weights
+- target deltas
+- cash deltas
+- validation results
+- trade counts
+- order/fill state
+
+LLM owns:
+
+- reasoning
+- summary_one_liner
+- intended actions
+- target weights
+- reason text tied to Date-ID
+- reason_codes
+
+
+## Account roles and combined NAV
+
+When multiple project accounts are enabled, persist account role explicitly:
+
+```text
+AccountRole = KR_TAX_ADVANTAGED | US_REGULAR | CASH_BUFFER
+```
+
+Default routing:
+
+- `KR_TAX_ADVANTAGED`: ISA account for KR stocks and ACE KRX Gold Spot ETF, after smoke test.
+- `US_REGULAR`: regular domestic/foreign stock account for US stocks.
+- `CASH_BUFFER`: CMA or non-trading cash account; do not submit orders from it.
+
+Portfolio risk state must be calculated from combined project NAV, not from one account:
+
+```text
+total_nav_krw = isa_nav_krw + regular_account_nav_krw + project_cash_krw
+```
+
+Persist account id/role on orders, fills, positions, and cash ledger entries.

@@ -1,0 +1,63 @@
+---
+description: "USE WHEN implementing intraday polling, urgent analysis triggers, MDD events, trigger cooldowns, or PROFIT_RUN monitoring."
+alwaysApply: false
+---
+
+# Emergency Triggers
+
+Use this rule when implementing 1-minute polling, urgent analysis calls, or event-driven risk handling.
+
+## Trigger table
+
+| Trigger | Condition | LLM call | Scope |
+|---|---:|---|---|
+| STOCK_DROP | held stock intraday return <= -3% | yes | that stock + same-sector holdings |
+| INDEX_CRASH | market index intraday return <= -1.5% | yes | holdings in that market |
+| PORTFOLIO_LOSS | portfolio intraday return <= -2% | yes | top 3 loss contributors |
+| MDD_KILLSWITCH | account MDD reaches -10/-15/-20% | no | Python-only liquidation |
+| PROFIT_RUN | single-stock current market weight reaches 10/15/20% | staged | that stock |
+
+## Priority
+
+When triggers collide, priority is:
+
+```text
+MDD_KILLSWITCH > PORTFOLIO_LOSS > INDEX_CRASH > STOCK_DROP > PROFIT_RUN
+```
+
+## MDD_KILLSWITCH
+
+MDD bypasses LLM entirely and uses `06-risk-filters-and-orders.mdc` liquidation rules. `bypass_llm=True` skips LLM analysis and LLM-control filters, not broker/exchange/order-availability checks.
+Record the event in DailySummary and the MDD event log. Do not record it in Debug.md unless it was caused by malformed/hallucinated LLM output.
+
+
+
+## Execution mode for emergency orders
+
+Emergency-trigger orders must use `ExecutionMode.EMERGENCY_TRIGGER` except MDD, which uses `ExecutionMode.MDD_KILLSWITCH`.
+
+Emergency-trigger selling may reduce invested assets below the normal 70% floor. This is intentional: the system must be able to sell damaged positions first and decide whether to re-enter later.
+
+Required behavior after a transient invested-floor breach:
+
+1. execute the emergency reduction if the trigger decision passes its mode-specific checks
+2. mark `below_invested_min = true`
+3. set `below_min_reason = "EMERGENCY_TRIGGER"`
+4. set `requires_recovery_review = true`
+5. inject a recovery-review warning into the next regular analysis or Allocator prompt
+
+Do not force immediate rebuy solely to restore the invested floor.
+
+## PROFIT_RUN stages
+
+| Current market weight | Handling |
+|---:|---|
+| 10% | Add monitoring alert to regular analysis |
+| 15% | Prioritize evaluation and actively review partial sell |
+| 20% | Trigger urgent analysis outside regular schedule |
+
+The single-stock 5% cap is buy-cost based. PROFIT_RUN uses current market weight and does not force a return to 5%.
+
+## Cooldowns and duplicate suppression
+
+Implement per-trigger, per-market, and per-symbol cooldowns to avoid repeated LLM calls on the same event. MDD stage rules are separate and stricter.

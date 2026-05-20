@@ -1,0 +1,55 @@
+---
+description: "USE WHEN creating or changing architecture, services, orchestration, pipeline boundaries, or module responsibilities."
+alwaysApply: false
+---
+
+# Architecture Boundaries
+
+## Core boundary
+
+LLM output is advisory. Python is authoritative.
+
+- LLM produces structured decisions.
+- Python validates schema, evidence, percentages, market state, and execution rules.
+- Execution code must never trust LLM-calculated quantities without recalculation.
+
+## Recommended modules
+
+```text
+src/domain      # models, enums, value objects
+src/data        # analysis-data collectors, Date-ID, market/macro/disclosure/news data
+src/scout       # raw data → structured evidence
+src/llm         # Ollama client, JSON parser, prompt runner
+src/prompts     # prompt templates only
+src/allocator   # cash + asset allocation pipeline
+src/analysis    # KR/US stock decision pipeline
+src/risk        # filters, MDD, slippage, soft-band checks
+src/broker      # BrokerAdapter interface, PaperBroker, KIS mock/live adapters
+src/execution   # OrderIntent, paper fills, order simulator/orchestrator
+src/scheduler   # KST + exchange calendar jobs
+src/logs        # DailySummary, Debug.md, records
+src/postmortem  # weekly/monthly 오답노트
+```
+
+## Instance separation
+
+- Scout, Analysis, Allocator, Postmortem are separate calls.
+- Ollama calls are stateless.
+- Never pass raw prior `reasoning` into validation calls.
+- Use `summary_one_liner`, action, weights, and Date-ID references instead.
+
+## Information flow
+
+```text
+Data collectors → Date.md → Scout summary → Analysis/Allocator LLM → Python validation → OrderIntent → BrokerAdapter → paper execution/logging → Postmortem
+```
+
+## Do not mix responsibilities
+
+- `analysis/` does not decide asset allocation.
+- `allocator/` does not decide individual stock selection.
+- `execution/` does not call LLM.
+- `analysis/` and `allocator/` do not import concrete KIS clients.
+- `broker/` does not interpret LLM reasoning; it accepts validated OrderIntent only.
+- `risk/` does not interpret news; it enforces rules.
+- `postmortem/` does not execute trades.

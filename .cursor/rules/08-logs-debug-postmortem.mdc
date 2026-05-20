@@ -1,0 +1,95 @@
+---
+description: "USE WHEN implementing DailySummary, Debug.md, WeeklyPostmortem, MonthlyPostmortem, error tags, or review storage."
+alwaysApply: false
+---
+
+# Logs, Debug, and Postmortem
+
+## DailySummary
+
+DailySummary is the daily operational log. Do not create a separate DailyReview file.
+
+Record:
+
+- actions attempted/executed
+- fills or paper fills
+- current portfolio state
+- asset/cash weights
+- range violations
+- Allocator fallback
+- important market observations
+
+DailySummary is not an 오답노트. It does not finalize investment error tags.
+
+## Debug.md
+
+Debug.md is a single technical/operational failure log. Do not split monthly unless the user later requests it.
+
+Record Debug.md events for:
+
+- malformed LLM JSON
+- schema validation failure
+- hallucinated invalid weights
+- missing Date-ID
+- enum violation
+- Python validation rejection caused by malformed, missing, contradictory, or hallucinated LLM output
+- broker API errors, order fill errors, partial-fill handling errors, and paper-broker simulation errors
+- gold trade blocks caused by monthly/quarterly frequency limits, micro-adjustment suppression, or asymmetric gold adjustment policy
+- implementation/runtime exceptions that need code or parser fixes
+
+Debug.md must not store Postmortem `error_tags`. Use a single `event_code` from `docs/DEBUG_EVENT_CODES.md` plus `severity` and detail fields for technical classification. These fields are never used for Top 3 investment error tags.
+
+`docs/DEBUG_EVENT_CODES.md` is a human-only debugging reference. Do not inject that file, Debug.md, Debug event codes, Debug event counts, or Debug event summaries into runtime LLM prompts. Runtime LLM feedback must come from Weekly/Monthly Postmortem investment error tags only.
+
+Market-analysis mistakes belong in Weekly/Monthly Postmortem, not Debug.md.
+
+## Postmortem purpose
+
+Postmortem is the 오답노트. Its goal is to identify recurring decision mistakes and extract tags for future prompt injection.
+
+## Weekly Postmortem
+
+- Separate KR and US files.
+- Written after current week close.
+- Evaluates previous week, not current week.
+- Uses DailySummary, Date.md, TodayThink, fill logs, and portfolio logs.
+
+## Monthly Postmortem
+
+- Separate KR and US files.
+- Written after current month close.
+- Evaluates previous month.
+- Focuses on repeated patterns, Allocator quality, gold/cash decisions, and system behavior.
+
+## Tag extraction block
+
+Every Postmortem must end with a machine-readable tag summary.
+
+```json
+{
+  "market": "KR",
+  "period": "2026-W20",
+  "source": "WeeklyPostmortem",
+  "error_tags": {
+    "#정보_과신": 2,
+    "#추격_매수": 1
+  },
+  "top_error_tags": ["#정보_과신", "#추격_매수"]
+}
+```
+
+Only Postmortem tag summaries feed Top 3 Error Tags. Debug.md `event_code` values are excluded and are human-only debugging data.
+
+## Evaluation criteria
+
+Do not mark a trade wrong purely because price fell.
+
+Evaluate:
+
+1. price result
+2. benchmark-relative result
+3. evidence validity
+4. Date-ID interpretation accuracy
+5. reasoning/action consistency
+6. Python rule violation or rejection
+7. whether the original thesis remained valid

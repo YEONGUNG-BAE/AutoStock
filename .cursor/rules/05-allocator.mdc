@@ -1,0 +1,174 @@
+---
+description: "USE WHEN implementing Allocator prompts, schemas, validation, cash policy, gold policy, or asset allocation records."
+alwaysApply: false
+---
+
+# Allocator Rules
+
+## Purpose
+
+Allocator decides:
+
+1. total-account cash target
+2. invested-assets KR/US/Gold target weights
+3. gold adjustment intent
+
+Allocator does not select individual stocks.
+
+## Sequential reasoning order
+
+The Allocator prompt must follow this order:
+
+```text
+0. Signal Summary
+1. Cash Manager
+2. Asset Allocator
+3. Consistency Checker
+4. Final JSON
+```
+
+### Signal Summary
+
+Summarize KR/US market Scout, DailySummary, and macro/gold evidence. Do not decide weights yet.
+
+### Cash Manager
+
+- Decide `cash_policy.cash_target_percent` on total account basis.
+- Normal range: 10~30%.
+- MDD killswitch is Python-owned. Allocator must not instruct panic liquidation.
+
+### Asset Allocator
+
+- Decide `target_weights.kr/us/gold` on invested-assets basis.
+- Sum must be 100.
+- Gold normal band: 18~22.
+- Gold exceptional band: 15~25.
+
+### Consistency Checker
+
+Check:
+
+- cash and target weights do not contradict reasoning
+- target_weights sum to 100
+- action and adjust_percent sign match
+- Date-ID exists in every reason
+
+Python still performs final validation.
+
+## LLM output schema
+
+```json
+{
+  "allocator_decision": {
+    "summary_one_liner": "",
+    "reasoning": "",
+    "cash_policy": {
+      "cash_target_percent": 20,
+      "action": "MAINTAIN",
+      "adjust_percent": 0,
+      "reasons": [
+        { "reason": "", "date_id": "YYMMDD-N" }
+      ],
+      "final_decision": ""
+    },
+    "target_weights": {
+      "kr": 50,
+      "us": 30,
+      "gold": 20
+    },
+    "asset_policies": {
+      "kr": {
+        "action": "MAINTAIN",
+        "adjust_percent": 0,
+        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
+        "final_decision": ""
+      },
+      "us": {
+        "action": "MAINTAIN",
+        "adjust_percent": 0,
+        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
+        "final_decision": ""
+      },
+      "gold": {
+        "action": "MAINTAIN",
+        "adjust_percent": 0,
+        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
+        "final_decision": ""
+      }
+    },
+    "reason_codes": ["STEADY_STATE"]
+  }
+}
+```
+
+## Initial reason_codes allowlist
+
+Allowed initial `reason_codes`:
+
+- `STEADY_STATE`
+- `MACRO_RISK_ON`
+- `MACRO_RISK_OFF`
+- `VIX_SPIKE`
+- `RATE_CHANGE`
+- `DXY_SHIFT`
+- `FX_KRW_WEAKNESS`
+- `KR_INDEX_DROP`
+- `US_INDEX_DROP`
+- `GOLD_MOMENTUM`
+
+Reject unknown `reason_codes` unless the user explicitly expands the code set.
+
+## Python wrapper fields
+
+Python wraps LLM output into `allocator_record` with:
+
+- schema_version
+- decision_date
+- previous_cash_target
+- current_cash_weight
+- cash_delta_from_previous
+- previous_targets
+- current_actual_weights
+- target_deltas_from_previous
+- validation results
+- rejected/fallback status
+
+## Rejection rules
+
+Reject the entire Allocator response and keep previous targets when:
+
+- JSON malformed
+- target_weights sum != 100
+- cash target outside 10~30
+- gold target < 15 or > 25
+- Date-ID missing or unknown
+- action and adjust_percent sign contradict
+- reason_codes empty or invalid
+- critical field missing
+
+Do not partially keep KR/US if gold output is clearly invalid. The response credibility is broken.
+
+## Gold rules
+
+- 18~22: normal band.
+- 23~25: only with risk-off evidence and reason_codes.
+- 15~17: only with clear risk-on/strong market evidence.
+- <15 or >25: reject entire Allocator output.
+- Micro-adjustment rules and trade count enforcement are Python-owned.
+
+## Gold trading frequency
+
+Python counts gold trades; the LLM must not calculate trade counts.
+
+- Target frequency: 0~2 gold trades per month.
+- Quarterly soft limit: 4 gold trades.
+- If the monthly/quarterly limit is exceeded, inject a warning into the Allocator prompt.
+- If gold trade is blocked by Python frequency policy, do not execute gold adjustment even if LLM requests it.
+- Ignore micro-adjustments below 3%p by converting them to MAINTAIN in Python post-processing.
+- Gold INCREASE is normally capped at +5%p per decision.
+- Gold DECREASE is normally capped at -2%p per decision.
+
+## Allocator tolerance
+
+Analysis instances receive Allocator targets with ±5%p allowance unless config changes it.
+Gold is controlled by Allocator/gold policy rather than free stock-analysis drift.

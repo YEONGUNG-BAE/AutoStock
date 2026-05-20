@@ -1,0 +1,63 @@
+---
+description: "USE WHEN reviewing or finalizing code, PRs, refactors, high-risk logic, or suspected rule violations."
+alwaysApply: false
+---
+
+# Forbidden Patterns
+
+Do not implement these patterns.
+
+## Trading safety
+
+- Live orders reachable by default.
+- `LIVE_TRADING = True` or similar top-level switches in `main.py`.
+- LLM directly calling broker API.
+- LLM output bypassing Python validation. Only Python-owned `ExecutionMode` may bypass LLM-control filters, and only for `REBALANCING`, `EMERGENCY_TRIGGER`, or `MDD_KILLSWITCH`.
+- Using LLM-provided position sizes without Python recalculation.
+- Ignoring MDD killswitch logic or its staged -10/-15/-20 thresholds.
+- Calculating MDD from only one account when ISA and regular accounts are both part of the project portfolio.
+- Committing KIS/FRED/DART/news API keys, account numbers, or access tokens.
+- Routing automated ISA orders before ISA balance/order/fill smoke tests pass.
+- Resetting internal paper performance history because a KIS mock account expired or changed.
+- Using a KIS mock/virtual account as the long-term paper trading source of truth.
+
+- Treating `bypass_llm=True` as permission to skip broker/exchange/order-availability checks, live-mode gates, or audit logs.
+- Blocking MDD or emergency-trigger liquidation solely because the normal invested floor would fall below 70%.
+- Forcing immediate rebuy solely to restore the invested floor after emergency liquidation.
+
+## Prompt/data safety
+
+- Injecting performance targets into LLM prompts.
+- Passing raw prior reasoning into validation calls.
+- Using uncited claims in investment decisions.
+- Accepting missing Date-ID evidence.
+- Treating Debug.md `event_code` values as Top 3 investment error tags or runtime LLM feedback.
+- Storing Postmortem `error_tags` inside Debug.md.
+- Treating execution/API/fill errors as investment-thesis mistakes.
+
+## Allocator safety
+
+- Partial-accepting Allocator output after a critical invalid field.
+- Accepting gold target below 15 or above 25.
+- Treating `target_weights` as total-account basis.
+- Treating `cash_target_percent` as invested-assets basis.
+- Reasking Allocator repeatedly after deterministic validation failure.
+
+## Scheduler safety
+
+- Hardcoding US market open/close as fixed KST.
+- Hardcoding emergency trigger thresholds outside config/domain constants.
+- Running US market jobs without exchange calendar/DST conversion.
+- Evaluating current-week trades in WeeklyPostmortem.
+
+## Code quality
+
+- Broad `except Exception` without structured error handling.
+- Silent clamps of LLM output.
+- Hidden mutable global portfolio state.
+- External API calls in unit tests.
+- Mixing logs, validation, and execution in one function.
+
+- Using LLM self-reported confidence as an MVP hard order filter.
+- Calling broker APIs directly from parsed LLM analysis without OrderIntent.
+- Accepting stale Date-ID evidence as current context.

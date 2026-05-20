@@ -1,0 +1,101 @@
+---
+description: "USE WHEN implementing data collection, Scout, Date.md, evidence validation, news filtering, or macro/gold data input."
+alwaysApply: false
+---
+
+# Scout, Date-ID, and Data Rules
+
+## Date-ID is the source of truth
+
+Any fact used by Analysis or Allocator must be stored in Date.md as `[YYMMDD-N]`.
+
+LLM outputs must cite Date-ID through `reasons[].date_id` or equivalent schema fields.
+
+## Scout responsibilities
+
+Scout transforms raw data into structured evidence. It does not decide trades.
+
+Required classes of evidence:
+
+- disclosures
+- price/indicator data
+- macro/sentiment data
+- B-grade-or-better news
+
+## News filtering
+
+Use whitelist/quality filters. Exclude low-quality social/community sources in the initial version.
+
+Rules:
+
+- recent 7 days for stock-specific news
+- max 5 articles per symbol before summarization
+- summarize before LLM context injection
+- mark speculative language as low confidence
+
+## Allocator Scout hybrid principle
+
+Allocator does not rescout individual stocks.
+
+- Reuse KR/US market Scout summaries and DailySummary.
+- Separately provide macro/gold data needed for allocation:
+  - VIX
+  - DXY
+  - US 10Y
+  - international gold price or gold futures
+  - USD/KRW
+  - V-KOSPI
+  - major index flow if not already available
+
+## Validation
+
+Python must verify:
+
+- Date-ID exists in Date.md.
+- numerical facts match source within configured tolerance.
+- no decision uses an unknown Date-ID.
+- no Date-ID from stale context is silently reused for a new fact.
+
+
+## Date-ID stale validation
+
+Existence is not enough. Python must prevent old Date-ID facts from being reused as if they were current.
+
+Each Date-ID record should carry at least:
+
+- `date_id`
+- `source_timestamp`
+- `fact_type`
+- `source_name`
+- extracted fact/value
+
+Initial staleness defaults:
+
+| fact_type | default max age | Notes |
+|---|---:|---|
+| `PRICE` | 24h | market price, index level, ETF price |
+| `FLOW` | 24h | foreign/institution flow, volume, market breadth |
+| `FX` | 24h | USD/KRW and similar fast market data |
+| `NEWS` | 7d | company/industry news |
+| `DISCLOSURE` | 90d | filings and official disclosures |
+| `MACRO` | config-driven | use the release/update cycle of the metric |
+
+If a Date-ID is stale for the decision context, reject the LLM output and record a Debug.md event. Do not silently downgrade stale evidence.
+
+
+## Data API source policy
+
+Separate broker APIs from analysis-data APIs.
+
+| Source | Role |
+|---|---|
+| KIS Developers | broker/account/fill/order and optional broker quote data |
+| FRED | US macro such as DGS10 and other macro inputs |
+| DART/OpenDART | KR disclosures and financial filings |
+| yfinance | price/index/FX/gold futures backup and prototyping data |
+| edgartools/SEC | US filings when implemented |
+| Naver/Finnhub/news RSS | news input, after MVP stability |
+
+MVP priority: KIS read-only where needed, FRED, DART/OpenDART, yfinance. News APIs should be added only after Date-ID and JSON validation are stable.
+
+Do not rely on KIS as the only analysis source. KIS is the broker API, not the full research data pipeline.

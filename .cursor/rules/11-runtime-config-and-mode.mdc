@@ -1,0 +1,96 @@
+---
+description: "USE WHEN implementing app startup, config loading, trading mode, broker selection, environment gates, or main.py."
+alwaysApply: false
+---
+
+# Runtime Config and Trading Mode
+
+## Single source of truth
+
+Trading mode must be controlled only by `config.toml` through the typed config loader.
+Do not define paper/live mode as a mutable constant at the top of `main.py`.
+
+Allowed modes:
+
+```text
+paper
+live
+```
+
+Default mode must be `paper`.
+
+## Required live-trading gates
+
+Live trading must never become active from `mode = "live"` alone.
+Live trading requires all gates below:
+
+1. `trading.mode = "live"`
+2. `trading.allow_live_trading = true`
+3. environment variable confirmation, for example:
+   - `LIVE_TRADING_CONFIRM=ENABLE_LIVE_TRADING`
+4. broker credentials are present
+5. startup safety check passes
+
+If any gate fails, startup must raise a clear error before any broker connection or scheduler job starts.
+
+## Startup pattern
+
+`main.py` should be thin:
+
+```text
+load config → assert runtime safety → build services → run scheduler
+```
+
+Do not put business rules or trading constants in `main.py`.
+
+## Broker selection
+
+Broker implementation is selected from config:
+
+```text
+paper mode + broker.adapter = "paper"    → PaperBrokerAdapter
+paper mode + broker.adapter = "kis_mock" → KisMockBrokerAdapter for API rehearsal only
+live mode  + broker.adapter = "kis_live" → KisLiveBrokerAdapter, only after live gates pass
+```
+
+Risk filters and validators must run in both modes.
+Paper and live execution must share the same `OrderIntent` interface.
+
+## Config rules
+
+- `cash_target_percent` is total-account basis.
+- `target_weights` are invested-assets basis and sum to 100.
+- Risk thresholds live in config but must not be changed by LLM output. Include MDD, slippage, allocator tolerance, and gold trading frequency thresholds in config.
+- Config values are loaded once at startup and passed explicitly through dependency injection.
+- Avoid hidden mutable global config.
+
+## Forbidden
+
+- `LIVE_TRADING = True` in `main.py`.
+- Hardcoded broker choice in execution code.
+- Falling back to live mode on config parse failure.
+- Printing secrets or broker credentials.
+- Allowing LLM output to modify runtime config.
+
+
+## Account and secret config
+
+Committed config may contain only environment variable names and non-secret routing preferences.
+
+Recommended broker config concepts:
+
+```toml
+[broker]
+adapter = "paper"  # paper | kis_mock | kis_live
+
+[broker.account_roles]
+use_isa_for_kr_and_gold = true
+use_cma_for_order_execution = false
+kr_tax_advantaged_account_env = "KIS_ISA_ACCOUNT"
+us_regular_account_env = "KIS_US_REGULAR_ACCOUNT"
+cash_buffer_account_env = "KIS_CMA_ACCOUNT"
+```
+
+Do not hardcode KIS app keys, app secrets, account numbers, or access tokens.
+
+`kis_mock` is allowed only for API rehearsal and must not be treated as the long-term paper performance ledger.

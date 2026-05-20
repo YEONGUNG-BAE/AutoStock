@@ -1,0 +1,66 @@
+---
+description: "USE WHEN writing Python code, modules, tests, config, validators, or storage adapters."
+alwaysApply: false
+---
+
+# Python Style
+
+## Baseline
+
+- Python 3.11+.
+- Use type hints everywhere.
+- Use Pydantic v2 for external/LLM-facing schemas.
+- Use dataclasses only for internal immutable helpers when Pydantic is unnecessary.
+- Prefer pure functions for validators.
+
+## Money and percentages
+
+- Use Decimal or integer minor units for money.
+- Percent values may be Decimal or bounded numeric types, but basis must be explicit in field names.
+- Do not silently mix total-account basis and invested-assets basis.
+
+## Error handling
+
+- No bare `except`.
+- Validation failure should return structured rejection records.
+- Log raw invalid LLM output to a controlled file path, not stdout.
+- Do not silently clamp invalid LLM output unless the rule explicitly says so.
+
+## Config
+
+Use typed settings for:
+
+- paper/live mode
+- model name
+- temperature
+- broker API credentials
+- market calendar settings
+- tolerance thresholds
+- data paths
+
+Never hardcode secrets.
+
+## Logging
+
+Use structured logs. Each significant event should include:
+
+- timestamp
+- market
+- decision_id or order_intent_id
+- source component
+- validation status
+
+## Module boundaries
+
+- Validators should not call LLM.
+- Prompts should not import broker clients.
+- Execution should not interpret natural language.
+- Schedulers should call orchestrators, not contain business logic.
+
+
+## macOS target runtime
+
+- Final runtime is macOS on the user's Mac.
+- Use `pathlib.Path` and POSIX-safe file handling.
+- Do not write CUDA-only, Linux systemd-only, or Windows path-dependent code unless explicitly requested.
+- Prefer portable Python libraries and test file permissions/env var loading on macOS.

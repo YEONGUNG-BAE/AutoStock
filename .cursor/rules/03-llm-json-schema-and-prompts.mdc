@@ -1,0 +1,75 @@
+---
+description: "USE WHEN writing prompts, parsing LLM output, defining JSON schemas, or creating validators for LLM responses."
+alwaysApply: false
+---
+
+# LLM JSON Schemas and Prompt Rules
+
+## Output rules
+
+Every LLM decision prompt must require:
+
+- JSON only.
+- No markdown fences.
+- No extra prose.
+- Enum values only.
+- Date-ID references in every evidence-based reason.
+
+If output is malformed, record a Debug.md event and reject the response.
+
+## Do not ask LLM to output Python-owned fields
+
+Do not request these from LLM:
+
+- `schema_version`
+- `decision_date`
+- `previous_targets`
+- `current_actual_weights`
+- `target_deltas_from_previous`
+- validation booleans
+- `gold_trade_allowed_by_python`
+- derived allowed ranges
+
+Python computes and wraps these.
+
+## Date-ID evidence format
+
+Prefer object form, not string concatenation.
+
+```json
+{
+  "reason": "VIX 상승으로 위험 회피 심리가 강화됐다.",
+  "date_id": "260505-1"
+}
+```
+
+Do not use strings like `"VIX 상승\\260505-1"`.
+
+## Reasoning reuse rule
+
+Store `reasoning`, but do not pass raw `reasoning` back into verification calls. Verification calls should receive only:
+
+- `summary_one_liner`
+- action/weights
+- relevant Date-ID references
+- violated rule summary
+
+## Prompt role style
+
+Use sequential roles when the output is complex:
+
+- Analysis: Bear → Bull → Risk Manager → Fund Manager
+- Allocator: Signal Summary → Cash Manager → Asset Allocator → Consistency Checker → Final JSON
+
+## Temperature
+
+Use `temperature=0`. Still validate everything. Temperature 0 does not eliminate schema breakage or hallucinated rule violations.
+
+
+## Confidence fields
+
+Initial MVP must not use LLM self-reported confidence as a hard order filter.
+
+- Do not require `confidence_percent` in Analysis or Allocator output.
+- If a future experiment adds confidence, store it as diagnostic metadata only.
+- Do not block or approve orders based on LLM self-confidence until the user explicitly enables a researched confidence policy.

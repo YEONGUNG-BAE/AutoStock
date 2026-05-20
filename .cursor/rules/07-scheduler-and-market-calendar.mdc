@@ -1,0 +1,59 @@
+---
+description: "USE WHEN implementing schedules, market calendar logic, timezone conversion, daily/weekly/monthly jobs, or US market timing."
+alwaysApply: false
+---
+
+# Scheduler and Market Calendar
+
+## Timezone
+
+Project operational timezone: Asia/Seoul.
+
+## KST-fixed jobs
+
+These are fixed in KST:
+
+- KR market analysis windows
+- KR DailySummary close record
+- Allocator finalization target time
+- Weekly/monthly review jobs
+- KR Weekly/Monthly Postmortem
+
+## US exchange-calendar jobs
+
+These must use NYSE/Nasdaq calendar and DST-aware conversion:
+
+- US market analysis
+- US DailySummary close record
+- US Weekly/Monthly Postmortem
+
+Do not hardcode US market hours as fixed KST strings.
+
+## US analysis frequency
+
+US analysis runs 4 times per US trading day within regular session window. Do not increase frequency unless the user explicitly changes strategy.
+
+## Allocator timing
+
+- Tue~Fri: final decision target 08:30 KST.
+- Monday: after weekly/monthly review and recent postmortem summary, target 06:00 KST.
+- Saturday: no Allocator.
+
+Allocator pipeline may start earlier to allow Scout, validation, and fallback:
+
+```text
+07:50 Allocator Scout
+08:05 Allocator LLM
+08:15 Python validation
+08:30 Final allocation record
+```
+
+## Weekly Postmortem timing
+
+- KR: Friday KR close, evaluate previous week.
+- US: after US Friday close, evaluate previous week.
+
+## Monthly Postmortem timing
+
+- Evaluate previous month, not current month.
+- Separate KR and US market postmortems.

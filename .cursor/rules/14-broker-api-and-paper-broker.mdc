@@ -1,0 +1,154 @@
+---
+description: "USE WHEN implementing broker adapters, KIS API integration, account routing, secrets, or paper trading ledger."
+alwaysApply: false
+---
+
+# Broker API, Accounts, and PaperBroker
+
+## API role separation
+
+Do not treat KIS as the whole data system.
+
+- KIS Developers is the single broker API for order/account/fill/broker-market-data integration.
+- FRED, DART/OpenDART, yfinance, edgartools/SEC, and news APIs are analysis-data sources.
+- Broker APIs and analysis-data APIs must be wrapped behind separate modules.
+
+Recommended modules:
+
+```text
+src/broker      # BrokerAdapter interfaces and KIS/Paper implementations
+src/data        # market/macro/disclosure/news collectors
+src/execution   # OrderIntent, fills, paper execution, broker orchestration
+```
+
+## Broker adapter roles
+
+Use one common interface and three implementations:
+
+```text
+PaperBrokerAdapter     # long-horizon paper trading source of truth
+KisMockBrokerAdapter   # KIS virtual/mock account rehearsal only
+KisLiveBrokerAdapter   # live order path, disabled by default
+```
+
+Required flow:
+
+```text
+LLM Decision → ParsedDecision → ValidationResult → RiskApprovedDecision → OrderIntent → BrokerAdapter.place_order()
+```
+
+Forbidden:
+
+- LLM output directly calling KIS.
+- Analysis code importing a concrete KIS client.
+- Using KIS mock account as the long-term paper performance ledger.
+- Sharing order/fill logic that behaves differently across paper/mock/live for the same `OrderIntent` unless explicitly documented and tested.
+
+## KIS scope
+
+KIS is the preferred single broker for:
+
+- KR stock orders
+- US stock orders
+- ACE KRX Gold Spot ETF `411060` through the KR stock/ETF route
+- account balance and positions
+- order/fill inquiry
+- broker read-only quotes where useful
+
+Do not add Kiwoom/LS/Daishin broker integrations during MVP.
+
+## Account routing
+
+Account roles must be explicit in config/state:
+
+| Role | Intended use |
+|---|---|
+| `kr_tax_advantaged` | ISA account for KR stocks and ACE KRX Gold Spot ETF, only after smoke test |
+| `us_regular` | regular domestic/foreign stock account for US stocks |
+| `cash_buffer` | CMA or other non-trading cash buffer; not an order execution account |
+
+Risk calculations use combined NAV across all project accounts:
+
+```text
+Total NAV = ISA NAV + regular account NAV + project cash
+```
+
+MDD, cash weight, invested weight, and asset-class weights must not be calculated from a single account if multiple project accounts are enabled.
+
+## ISA smoke test gate
+
+Do not route automated KR/Gold orders to ISA until these pass:
+
+1. token issuance
+2. ISA balance query
+3. KR quote query
+4. KR stock/ETF order request in a safe rehearsal path
+5. fill inquiry
+6. cancel/correction path, where supported
+
+If ISA support is uncertain or fails, route KR/Gold to the regular account or keep ISA excluded from automated trading.
+
+## KIS mock account principle
+
+KIS virtual/mock accounts can expire or be recreated. Therefore:
+
+- Use KIS mock for API rehearsal only.
+- Do not use KIS mock as the performance source of truth.
+- Do not reset paper performance when KIS mock account changes.
+- Log KIS mock account changes as Debug.md technical events.
+
+## PaperBroker ledger
+
+Long-horizon paper trading must use an internal ledger.
+
+Minimum stores:
+
+```text
+paper_orders
+paper_fills
+paper_positions
+paper_cash_ledger
+paper_nav_snapshots
+paper_risk_events
+paper_decisions
+```
+
+Paper fills must include:
+
+- fill price
+- quantity
+- commission
+- tax
+- slippage
+- fill policy
+- source order id
+
+Initial fill model may be simple and conservative:
+
+```text
+KR BUY  = current_price * 1.001
+KR SELL = current_price * 0.999
+US BUY  = current_price * 1.0005
+US SELL = current_price * 0.9995
+```
+
+Later, upgrade to quote-based fills:
+
+```text
+BUY  → ask1
+SELL → bid1
+```
+
+Do not overbuild partial-fill simulation before the basic replayable ledger is stable.
+
+## Secrets
+
+Never commit:
+
+- KIS app key / app secret
+- account numbers
+- access tokens
+- HTS password
+- FRED/DART/news API keys
+
+Committed config may contain only environment variable names. Use `.env`, macOS Keychain, or a password manager outside the repo.

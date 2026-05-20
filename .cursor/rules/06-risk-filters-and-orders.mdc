@@ -1,0 +1,163 @@
+---
+description: "USE WHEN implementing risk filters, order intents, paper execution, slippage, MDD, soft-band violations, or position sizing."
+alwaysApply: false
+---
+
+# Risk Filters and Orders
+
+## Hard filter vs soft band vs execution mode
+
+Hard filters are Python-enforced and cannot be overridden by LLM.
+
+Soft bands may trigger validation/fallback logic, but Python remains authoritative.
+
+Some filters exist to constrain LLM-driven normal trading. Those filters may be bypassed only by Python-owned `ExecutionMode`, not by LLM output.
+
+## ExecutionMode
+
+Every order validation path must carry one explicit mode:
+
+```text
+NORMAL | REBALANCING | EMERGENCY_TRIGGER | MDD_KILLSWITCH | MANUAL
+```
+
+| Filter/check | NORMAL | REBALANCING | EMERGENCY_TRIGGER | MDD_KILLSWITCH |
+|---|---:|---:|---:|---:|
+| LLM JSON schema | apply | apply when LLM output exists | apply when LLM output exists | not applicable |
+| Date-ID validation | apply | apply when LLM output exists | apply when LLM output exists | not applicable |
+| Invested floor 70% | apply | temporary bypass allowed | bypass allowed | bypass |
+| KR/US/Gold 15~55 soft band | validate/ask if breached | temporary bypass allowed | bypass allowed | bypass |
+| Directional slippage | apply | apply | apply unless config explicitly relaxes | bypass |
+| Trading halt / unfillable security checks | apply | apply | apply | apply |
+| Broker/API/order availability checks | apply | apply | apply | apply |
+| Runtime live-mode gates | apply | apply | apply | apply |
+| Debug/audit logging | apply | apply | apply | apply |
+
+## Hard filters
+
+- Default runtime mode is paper.
+- Live trading may exist only behind `config.toml` gates and must never be the default.
+- Single-stock cumulative buy-cost cap: 5%.
+- Operating invested portion lower bound: production target 70% in `NORMAL` mode only. Paper observation mode may explicitly lower this to 50% through config only.
+- Cash target normal band: 10~30 in `NORMAL` Allocator output.
+- Liquidity and fillability filters. MDD may ignore spread but must not ignore suspended/unfillable securities.
+- Directional slippage filter, except Python-owned MDD bypass.
+- MDD killswitch.
+
+## Soft operating bands
+
+- KR/US/Gold allocation bands.
+- Allocator ±5% allowance for analysis instances.
+- `NORMAL` violation requires Python simulation before order intent approval.
+- `REBALANCING` and `EMERGENCY_TRIGGER` may temporarily breach bands, but must record the breach and recovery-review requirement.
+
+## Single-stock cap
+
+Check cumulative buy-cost basis, not current market weight.
+
+```python
+remaining_capacity = max(0, 5 - cumulative_buy_weight_pct)
+requested_buy_pct <= remaining_capacity
+```
+
+## Directional slippage
+
+Default tolerances are config-driven:
+
+- KR: 0.5%
+- US: 0.2%
+
+BUY:
+- block when current price is worse above tolerance.
+
+SELL:
+- allow further downside movement to avoid delayed stop.
+- block only if price rebounded above tolerance and reanalysis is needed.
+
+MDD_KILLSWITCH bypasses normal slippage. Other emergency triggers still use directional slippage unless config explicitly relaxes it.
+
+## MDD killswitch
+
+- Python-only.
+- LLM must not trigger it. MDD is detected and executed by Python only.
+- `bypass_llm=True` means skip LLM analysis and LLM-control filters; it does not skip broker/exchange/order-availability checks or audit logs.
+- MDD events invalidate normal Allocator targets until next Allocator cycle.
+
+Stages:
+
+| Account MDD | Target cash | Notes |
+|---:|---:|---|
+| -10% | 50% | Level 1 |
+| -15% | 80% | Level 2 |
+| -20% | 95% | Level 3; halt trading after further decline/manual intervention |
+
+Rules:
+
+- Same stage may trigger at most once per day.
+- Different stages may trigger on the same day.
+- Use a 4-hour cooldown between Level 1 and Level 2 unless Level 3 is hit.
+- Level 3 ignores cooldown.
+- Do not reset historical_peak after liquidation.
+- Bypass normal slippage with `emergency=True`.
+
+Liquidation sequence:
+
+1. Exclude suspended/unfillable securities.
+2. Sell loss positions first by `pnl_vs_cost` descending loss severity.
+3. If needed, sell profitable positions proportionally until target cash is reached.
+4. Ignore 1~3% residual mismatch in MDD liquidation.
+
+## Invested floor transient breach
+
+In `NORMAL` mode, a SELL that would push invested assets below the configured minimum must be blocked without LLM revalidation.
+
+In `REBALANCING`, `EMERGENCY_TRIGGER`, or `MDD_KILLSWITCH`, the invested floor may be breached because reducing damaged exposure is the purpose of the mode.
+
+When this happens, persist at least:
+
+```text
+below_invested_min = true
+below_min_reason = REBALANCING | EMERGENCY_TRIGGER | MDD_KILLSWITCH
+requires_recovery_review = true
+recovery_review_after = next_regular_analysis | next_allocator
+```
+
+Next regular analysis or Allocator prompt should include a recovery-review warning, but must also state that forced re-entry is prohibited when market damage remains unresolved.
+
+## Cash target vs execution transient
+
+`cash_target_percent` is the final target and must remain 10~30 in normal Allocator output.
+Order sequencing/rebalancing may temporarily move cash below 10%, and emergency/MDD selling may temporarily push invested assets below 70%. These are not normal target states; record the reason and queue recovery review unless MDD halt/manual intervention supersedes it.
+
+## Order intent
+
+LLM never directly creates broker orders. Pipeline:
+
+```text
+LLM decision → Python validation → OrderIntent → paper broker → fill log
+```
+
+For MVP, use paper broker only. If live broker code is added later, it must share this interface and pass the config gates in `11-runtime-config-and-mode.mdc`.
+
+
+## Confidence policy
+
+Initial MVP does not use LLM self-reported confidence as a hard filter.
+
+Order approval is based on:
+
+- valid JSON schema
+- valid and non-stale Date-ID evidence
+- position sizing rules
+- liquidity rules
+- slippage rules
+- MDD and emergency safety rules
+
+Do not add a hard confidence threshold unless the user explicitly reintroduces it after paper-trading evidence.
+
+
+## Paper observation invested floor
+
+The planning document keeps 70% invested as the production target. During early paper trading, the bot's natural risk appetite may be observed with a lower floor, configured as `paper_observation_invested_min_percent` (default 50).
+
+This relaxation is paper-only and must not silently apply to live trading.

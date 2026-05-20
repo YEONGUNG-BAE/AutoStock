@@ -1,0 +1,145 @@
+# LLM trading bot runtime configuration.
+# Copy this file to config/config.toml and edit values there.
+# Never commit real broker credentials.
+
+[trading]
+# Valid values: "paper", "live".
+# Default must remain "paper" during MVP and paper-trading phases.
+mode = "paper"
+
+# Live trading requires BOTH mode = "live" and allow_live_trading = true.
+# It also requires the LIVE_TRADING_CONFIRM environment variable.
+allow_live_trading = false
+live_confirmation_env_var = "LIVE_TRADING_CONFIRM"
+live_confirmation_phrase = "ENABLE_LIVE_TRADING"
+
+# Paper account seed capital.
+initial_paper_cash_krw = 30000000
+
+[llm]
+provider = "ollama"
+model = "qwen3.6:35b-a3b"
+temperature = 0.0
+
+[risk]
+# Total-account basis.
+cash_min_percent = 10
+cash_max_percent = 30
+invested_min_percent = 70
+# Paper-only observation floor. Use this to watch the bot's natural risk appetite in MVP.
+paper_observation_invested_min_percent = 50
+invested_max_percent = 90
+
+# Invested-assets basis. KR/US/Gold target_weights must sum to 100.
+asset_min_percent = 15
+asset_max_percent = 55
+
+# Gold target is invested-assets basis.
+gold_normal_min_percent = 18
+gold_normal_max_percent = 22
+gold_exception_min_percent = 15
+gold_exception_max_percent = 25
+
+single_stock_cumulative_buy_cost_cap_percent = 5
+
+[allocator]
+# Analysis instances may operate within allocator target ± this percentage point range.
+analysis_tolerance_percent = 5
+
+[slippage]
+# Directional slippage tolerance. BUY blocks unfavorable upward movement; SELL blocks rebound only.
+kr_tolerance_percent = 0.5
+us_tolerance_percent = 0.2
+emergency_bypass = true
+
+[mdd]
+level_1_drawdown_percent = -10
+level_1_target_cash_percent = 50
+level_2_drawdown_percent = -15
+level_2_target_cash_percent = 80
+level_3_drawdown_percent = -20
+level_3_target_cash_percent = 95
+stage_cooldown_hours = 4
+same_stage_max_triggers_per_day = 1
+halt_trading_after_level_3 = true
+
+[gold_trading]
+monthly_trade_soft_limit = 2
+quarterly_trade_soft_limit = 4
+micro_adjust_ignore_below_percent = 3
+increase_max_percent = 5
+decrease_max_percent = 2
+
+[emergency_triggers]
+stock_drop_percent = -3.0
+index_crash_percent = -1.5
+portfolio_loss_percent = -2.0
+profit_run_levels_percent = [10, 15, 20]
+
+[date_id_staleness]
+# Date-ID existence is not enough; stale evidence must be rejected by fact type.
+price_max_age_hours = 24
+flow_max_age_hours = 24
+fx_max_age_hours = 24
+news_max_age_hours = 168
+disclosure_max_age_hours = 2160
+macro_default_max_age_hours = 168
+
+[korea_market]
+exchange = "KRX"
+timezone = "Asia/Seoul"
+
+[us_market]
+exchange = "NYSE"
+timezone = "America/New_York"
+analysis_slots_per_session = 4
+
+[paths]
+data_dir = "memory"
+date_file = "memory/Date.md"
+daily_summary_dir = "memory/daily"
+debug_file = "memory/debug/Debug.md"
+weekly_postmortem_dir = "memory/postmortem/weekly"
+monthly_postmortem_dir = "memory/postmortem/monthly"
+
+[broker]
+# paper = internal PaperBrokerAdapter. kis_mock = KIS virtual/mock API rehearsal. kis_live = live KIS path.
+adapter = "paper"
+
+[broker.account_roles]
+use_isa_for_kr_and_gold = true
+use_cma_for_order_execution = false
+kr_tax_advantaged_account_env = "KIS_ISA_ACCOUNT"
+us_regular_account_env = "KIS_US_REGULAR_ACCOUNT"
+cash_buffer_account_env = "KIS_CMA_ACCOUNT"
+
+[broker.paper]
+name = "paper"
+fill_model = "last_price"
+kr_buy_slippage_bps = 10
+kr_sell_slippage_bps = 10
+us_buy_slippage_bps = 5
+us_sell_slippage_bps = 5
+
+[broker.kis_mock]
+name = "kis_mock"
+endpoint = "https://openapivts.koreainvestment.com:29443"
+app_key_env = "KIS_MOCK_APP_KEY"
+app_secret_env = "KIS_MOCK_APP_SECRET"
+account_id_env = "KIS_MOCK_ACCOUNT"
+
+[broker.live]
+# Keep empty in committed config.
+name = ""
+endpoint = "https://openapi.koreainvestment.com:9443"
+account_id_env = "KIS_LIVE_ACCOUNT"
+app_key_env = "KIS_LIVE_APP_KEY"
+app_secret_env = "KIS_LIVE_APP_SECRET"
+
+
+[data_apis]
+fred_api_key_env = "FRED_API_KEY"
+dart_api_key_env = "DART_API_KEY"
+finnhub_api_key_env = "FINNHUB_API_KEY"  # later phase
+naver_client_id_env = "NAVER_CLIENT_ID"  # later phase
+naver_client_secret_env = "NAVER_CLIENT_SECRET"  # later phase

@@ -1,0 +1,139 @@
+---
+description: "USE WHEN writing tests, paper trading, replay, fixtures, or validation harnesses."
+alwaysApply: false
+---
+
+# Testing and Paper Trading
+
+## MVP must default to paper-only
+
+Do not make live order submission reachable by default. If broker clients exist, wrap them behind interfaces and default to paper mode. Live mode must require the `config.toml` gates described in `11-runtime-config-and-mode.mdc`.
+
+## Test priorities
+
+1. Pydantic schema validation
+2. Date-ID existence validation
+3. Allocator rejection/fallback
+4. PaperBroker internal ledger invariants
+5. cash/target percentage basis
+6. single-stock 5% cumulative buy-cost cap
+7. gold 15~25 validation
+8. directional slippage
+9. scheduler DST handling
+10. Postmortem tag extraction
+11. Debug.md exclusion from Top 3 tags
+12. config loader fails closed for missing/invalid config
+13. live mode requires mode + allow flag + environment confirmation
+14. MDD staged liquidation thresholds and cooldowns
+15. emergency trigger threshold detection
+16. gold trade frequency and micro-adjust handling
+17. KIS mock adapter smoke tests isolated from PaperBroker performance ledger
+
+## Golden tests
+
+Create golden fixture files for:
+
+- valid Allocator JSON
+- malformed Allocator JSON
+- gold >25 rejection
+- missing Date-ID rejection
+- valid analysis decision
+- single-stock overbuy rejection
+- Postmortem tag summary parsing
+- config.toml paper mode startup
+- config.toml live mode blocked without confirmation
+- MDD -10/-15/-20 staged events
+- STOCK_DROP/INDEX_CRASH/PORTFOLIO_LOSS trigger detection
+- gold monthly/quarterly trade limit warning and block
+
+## Replay testing
+
+Build replay tests from stored DailySummary and Date.md records. A replay must produce the same validation/fallback/order-intent result.
+
+## Determinism
+
+- Use fixed timestamps in tests.
+- Mock market calendars.
+- Mock LLM responses.
+- Do not call external APIs in unit tests.
+
+## Assertions
+
+Prefer explicit invariant assertions:
+
+```python
+assert sum(target_weights.values()) == 100
+assert 10 <= cash_target_percent <= 30
+assert 15 <= gold_target <= 25
+assert config.trading.mode == TradingMode.PAPER
+assert order_intent.mode == "paper"
+```
+
+
+## DecisionSnapshot and replay tests
+
+Every trading decision must be reproducible. Persist a DecisionSnapshot containing:
+
+- decision_id
+- timestamp
+- market
+- input_snapshot_hash
+- date_ids_used
+- llm_raw_output_path
+- parsed_decision
+- validation_result
+- risk_filter_result
+- order_intent
+- paper_fill
+- portfolio_before
+- portfolio_after
+
+Required replay invariant:
+
+```text
+same Date.md
+same DailySummary
+same LLM raw output
+same portfolio snapshot
+→ same validation_result
+→ same order_intent
+```
+
+Do not implement analysis → broker.buy() direct flows. The pipeline must be:
+
+```text
+LLM Decision → ParsedDecision → ValidationResult → RiskApprovedDecision → OrderIntent → PaperBroker.fill()
+```
+
+
+## PaperBroker is the long-term paper source of truth
+
+Use the internal PaperBroker ledger for long-horizon paper trading. KIS mock/virtual accounts are only API rehearsals.
+
+Required PaperBroker invariants:
+
+```text
+OrderIntent accepted → paper_order recorded
+paper_order filled → paper_fill recorded
+paper_fill recorded → position and cash ledger updated
+position/cash updated → nav snapshot reproducible
+same snapshot + same order → same fill result
+```
+
+KIS mock account reset, expiration, or recreation must not reset internal paper performance history.
+
+## Adapter test boundaries
+
+- Unit tests must mock all external APIs.
+- PaperBroker tests must not call KIS.
+- KIS mock tests must be integration tests gated by environment variables.
+- KIS live tests must be read-only unless the user explicitly enables live smoke testing.
+
+Add golden fixtures for:
+
+- simple KR BUY paper fill
+- simple KR SELL paper fill
+- simple US BUY paper fill
+- paper NAV snapshot after fill
+- paper MDD calculation across ISA + regular account roles
+- KIS mock account replacement recorded as Debug event
