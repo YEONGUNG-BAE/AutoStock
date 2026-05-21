@@ -22,7 +22,6 @@ class TradingMode(StrEnum):
 
 class BrokerAdapterName(StrEnum):
     PAPER = "paper"
-    KIS_MOCK = "kis_mock"
     KIS_LIVE = "kis_live"
 
 
@@ -196,15 +195,6 @@ class BrokerSettings(StrictBaseModel):
     adapter: BrokerAdapterName = BrokerAdapterName.PAPER
     account_roles: AccountRoleSettings = Field(default_factory=AccountRoleSettings)
     paper: PaperBrokerSettings = Field(default_factory=PaperBrokerSettings)
-    kis_mock: KisBrokerSettings = Field(
-        default_factory=lambda: KisBrokerSettings(
-            name="kis_mock",
-            endpoint="https://openapivts.koreainvestment.com:29443",
-            account_id_env="KIS_MOCK_ACCOUNT",
-            app_key_env="KIS_MOCK_APP_KEY",
-            app_secret_env="KIS_MOCK_APP_SECRET",
-        )
-    )
     live: KisBrokerSettings = Field(
         default_factory=lambda: KisBrokerSettings(
             name="kis_live",
@@ -243,6 +233,8 @@ class AppConfig(StrictBaseModel):
     def assert_runtime_safety(self) -> None:
         """Fail closed before any scheduler, broker, or order component starts."""
         if self.trading.mode == TradingMode.PAPER:
+            if self.trading.allow_live_trading:
+                raise RuntimeError("Paper mode cannot set allow_live_trading=true. Real-money orders are only valid in live mode with kis_live.")
             if self.broker.adapter == BrokerAdapterName.KIS_LIVE:
                 raise RuntimeError("Paper mode cannot use the KIS live broker adapter.")
             return

@@ -852,6 +852,7 @@ MDD 발동 시 Allocator 권장 비중은 무효. MDD 청산 후 운용 부분 �
 - 국내주식, 미국주식, 국내 상장 ETF(ACE KRX금현물 411060)를 같은 브로커 어댑터 계층에서 다룬다.
 - 키움 OpenAPI+, LS xingAPI, CYBOSPlus처럼 Windows COM/OCX 기반 API는 본 프로젝트에서 제외한다.
 - 다중 증권사 주문 연결은 MVP에서 금지한다. 증권사를 둘 이상 연결하면 OrderIntent 인터페이스, 자금 배분, 계좌 통합 NAV, MDD 계산이 모두 복잡해지므로 KIS 단일 브로커로 시작한다.
+- **KIS 모의투자 adapter는 MVP 기본 경로에서 제외한다.** KIS 모의투자 adapter는 3개월 제한과 재발급 이슈가 있어 장기 페이퍼 원장으로 부적합하고, 현재 단계에서는 자체 PaperBroker와 KIS live read-only/극소액 수동 테스트만으로 충분하다.
 
 **API 역할 분리:**
 
@@ -868,7 +869,7 @@ MDD 발동 시 Allocator 권장 비중은 무효. MDD 청산 후 운용 부분 �
 
 **초기 API 신청 우선순위:**
 
-1. KIS Developers — 실전 키와 모의투자 키를 모두 발급하되, 실전 키는 보관만 하고 초기에는 사용하지 않는다.
+1. KIS Developers — 실전 계좌 API 키를 발급하되, 초기에는 `allow_live_trading=false`로 두고 read-only/smoke test 또는 극소액 수동 승인 전까지 주문 경로를 열지 않는다.
 2. FRED API — 매크로 6종 중 US 10Y 및 기타 미국 지표 수집용.
 3. DART OpenAPI — 한국 공시 Date-ID 근거 수집용.
 4. 뉴스 API — 초기 MVP에서는 보류하고, Scout/Date-ID/JSON 검증이 안정화된 뒤 도입한다.
@@ -877,7 +878,7 @@ MDD 발동 시 Allocator 권장 비중은 무효. MDD 청산 후 운용 부분 �
 
 | 계좌 | 역할 | 자동매매 연결 |
 |---|---|---:|
-| 중개형 ISA | 국내주식, 국내 상장 ETF, ACE KRX금현물(411060) | KIS ISA API smoke test 통과 후 사용 가능 |
+| 중개형 ISA | 국내주식, 국내 상장 ETF, ACE KRX금현물(411060) | KIS ISA smoke test 통과 후 사용 가능 |
 | 일반 국내/해외주식 종합매매계좌 | 미국주식, ISA 한도 초과분, ISA API 문제 시 백업 | 미장 기본 계좌 |
 | CMA | 프로젝트 외 대기 현금, 입출금 관리 | 직접 주문 계좌로 사용하지 않음 |
 
@@ -897,9 +898,8 @@ KIS Developers에서 ISA 계좌 선택 및 조회/주문이 가능하더라도, 
 2. access token 발급
 3. ISA 잔고 조회
 4. 국내주식 현재가/호가 조회
-5. 국내주식/ETF 주문 가능 여부 확인
+5. 국내주식/ETF 주문 가능 여부 확인 — 실제 주문 전까지는 극소액 수동 승인 테스트만 허용
 6. 체결조회/정정/취소 endpoint 동작 확인
-7. 실제 주문 전까지는 mock 또는 극소액 수동 승인 테스트만 수행
 
 ISA API smoke test가 실패하면 국내주식/금 ETF도 일반 종합매매계좌에서 운용하고, ISA는 자동매매 대상에서 제외한다.
 
@@ -908,20 +908,19 @@ ISA API smoke test가 실패하면 국내주식/금 ETF도 일반 종합매매�
 - App Key, App Secret, 계좌번호, HTS ID, 토큰은 GitHub에 커밋하지 않는다.
 - `.env`, macOS Keychain, 1Password/Bitwarden 등 외부 비밀 저장소를 사용한다.
 - committed config에는 환경변수 이름만 둔다.
-- 실전 키와 모의 키는 분리 저장한다.
-- KIS 모의투자 계좌 또는 API 키가 만료/재발급되더라도 paper ledger는 초기화하지 않는다.
+- 실전 계좌 키는 read-only 검증 단계까지 보관만 하고, `allow_live_trading=true`와 확인 환경변수가 동시에 설정되기 전에는 주문 경로를 열지 않는다.
+- API 키가 만료/재발급되더라도 paper ledger는 초기화하지 않는다.
 
 ### 2.7 Paper Trading 및 BrokerAdapter 구조
 
-장기 모의투자는 증권사 모의투자 계좌가 아니라 **시스템 내부 PaperBrokerAdapter와 자체 paper ledger**를 기준으로 수행한다. KIS 모의투자 계좌는 기간 제한 및 계좌 재발급 가능성이 있으므로, 3~6개월 이상의 전략 성과 평가 원장으로 사용하지 않는다.
+장기 모의투자는 증권사 모의투자 계좌가 아니라 **시스템 내부 PaperBrokerAdapter와 자체 paper ledger**를 기준으로 수행한다. KIS 모의투자 adapter는 기간 제한 및 계좌 재발급 가능성이 있으므로, MVP 기본 경로에서 제외한다.
 
 **역할 분리:**
 
 | 구성요소 | 역할 |
 |---|---|
 | `PaperBrokerAdapter` | 장기 페이퍼 트레이딩 본체. 내부 ledger 기준으로 주문·체결·현금·포지션·NAV·MDD를 기록 |
-| `KisMockBrokerAdapter` | KIS 모의투자 API 리허설. access token, 주문 endpoint, 체결조회, ISA 계좌 지원 여부 검증 |
-| `KisLiveBrokerAdapter` | 실전 주문. live gate와 수동 승인 정책 통과 후에만 사용 |
+| `KisLiveBrokerAdapter` | KIS 실전 계좌 경로. 초기에는 read-only 검증만 허용하고, 주문은 live gate + 극소액 수동 승인 이후에만 허용 |
 
 **표준 인터페이스:**
 
@@ -968,7 +967,7 @@ LLM Decision → ParsedDecision → ValidationResult → RiskApprovedDecision �
 | 국내주식/ETF | 현재가 × 1.001 | 현재가 × 0.999 |
 | 미국주식 | 현재가 × 1.0005 | 현재가 × 0.9995 |
 
-이후 KIS 호가 조회가 안정화되면 호가 기반 체결로 고도화한다.
+이후 KIS read-only 호가 조회가 안정화되면 paper 체결 모델을 호가 기반으로 고도화한다.
 
 ```text
 BUY  → 매도1호가 기준 체결
@@ -977,30 +976,27 @@ SELL → 매수1호가 기준 체결
 
 그 다음 단계에서 거래대금·스프레드·부분체결 모델을 추가한다. 단, 초기 MVP에서 부분체결 모델을 과도하게 정교화하지 않는다.
 
-**KIS 모의투자의 위치:**
+**KIS 모의투자 제외 원칙:**
 
-KIS 모의투자는 장기 페이퍼 트레이딩 본체가 아니라 브로커 연동 리허설이다.
+KIS 모의투자 adapter는 더 이상 MVP 기본 adapter가 아니다. 이유는 다음과 같다.
 
-| 목적 | 사용 대상 |
-|---|---|
-| LLM 판단 품질 검증 | 자체 PaperBrokerAdapter |
-| 장기 NAV/MDD/성과 검증 | 자체 paper ledger |
-| 주문 endpoint 형식 검증 | KIS 모의투자 |
-| 정정/취소/체결조회 검증 | KIS 모의투자 |
-| ISA API 지원 여부 확인 | KIS 모의투자 또는 극소액 수동 승인 테스트 |
-| 실전 전환 최종 리허설 | KIS 모의투자 2~4주 + 실전 read-only |
+- 3개월 제한과 재신청/계좌 변경 이슈가 있어 장기 페이퍼 성과 원장으로 부적합하다.
+- 자체 PaperBrokerAdapter가 이미 장기 모의투자 원장을 담당한다.
+- KIS API 리허설의 대부분은 실전 계좌 read-only 조회와 mock HTTP contract test로 검증할 수 있다.
+- 실제 주문 endpoint 검증은 실전 전환 직전 **극소액 수동 승인 tiny-live** 단계에서 수행한다.
+
+따라서 MVP의 브로커 adapter는 `paper`와 `kis_live`만 둔다. KIS 모의투자 adapter가 다시 필요해지면 Phase 10 이후 별도 optional feature로 추가하며, 기본 설정·기획서·Cursor rules에는 포함하지 않는다.
 
 **권장 전환 순서:**
 
 ```text
 Phase A: 자체 PaperBrokerAdapter 3~6개월
-Phase B: KIS 모의투자 API 리허설 2~4주
-Phase C: KIS 실전 계좌 read-only 검증
-Phase D: 극소액 live + 수동 승인
-Phase E: 제한적 자동 live 검토
+Phase B: KIS live read-only 검증 — access token, 잔고조회, 현재가/호가, ISA 계좌 조회
+Phase C: 극소액 manual tiny-live — LLM 자동 주문 금지, 수동 OrderIntent만 허용
+Phase D: 제한적 자동 live 검토
 ```
 
-KIS 모의투자 계좌가 만료되거나 재발급되면 해당 사실은 Debug.md에 기술 이벤트로 기록하되, 장기 paper ledger는 이어서 사용한다.
+API 키 만료·재발급·계좌 변경은 Debug.md에 기술 이벤트로 기록하되, 장기 paper ledger는 이어서 사용한다.
 
 ---
 
@@ -1727,7 +1723,7 @@ DailySummary가 누적된 데이터를 압축하여 중장기 흐름을 인지�
 | Mac Mini 단일 장비 SPOF | 시스템 장애 시 핸드폰 긴급 알림 + 증권사 서버 측 기본 스톱로스 주문 이중화 |
 | LLM 긍정 편향 | Bear First 순서 + 인지적 단절 프롬프트로 구조적 차단 |
 | Scout 정보 누락 | 균형 쿼터 시스템으로 긍정/부정 균형 강제 |
-| KIS 모의투자 3개월 제한 | 장기 페이퍼 트레이딩 원장으로 사용하지 않고, `PaperBrokerAdapter` 자체 ledger를 장기 성과 기준으로 사용. KIS 모의투자는 주문/체결 API 리허설로 한정 |
+| KIS 모의투자 3개월 제한 | KIS 모의투자 adapter를 MVP 기본 경로에서 제외. 장기 페이퍼 트레이딩은 `PaperBrokerAdapter` 자체 ledger를 기준으로 수행하고, KIS API 검증은 live read-only와 극소액 수동 tiny-live로 단계화 |
 | KIS/데이터 API 키 만료·재발급 | SecretsManifest와 환경변수로만 관리, 만료 30/14/7일 전 알림, 키 교체는 Debug.md 기술 이벤트로 기록 |
 | ISA API 지원 불확실성 | ISA 잔고/주문/체결조회 smoke test 통과 전까지 ISA 자동 주문 금지. 실패 시 일반 종합매매계좌로 fallback |
 | 자체 PaperBroker 체결 과대평가 | 현재가에 보수적 슬리피지 적용, 이후 KIS 호가 기반 체결로 고도화, replay test로 재현성 검증 |
@@ -1796,8 +1792,8 @@ DailySummary가 누적된 데이터를 압축하여 중장기 흐름을 인지�
 | 5/17 | LLM/Ollama 버전 거버넌스 도입 — stable/candidate 모델 분리, RunManifest 기록, `latest` 운용 금지, 업데이트 검증 후 승격 원칙 확정 |
 | 5/19 | API 역할 분리 확정 — 브로커 API는 KIS Developers 단일 채택, 분석 데이터는 FRED/DART/yfinance/뉴스 API로 분리. 뉴스 API는 MVP 이후 단계적 도입 |
 | 5/19 | 계좌 구조 확정 — 국내주식·ACE KRX금현물은 ISA 우선, 미국주식은 일반 종합매매계좌, CMA는 대기 현금. 리스크 계산은 계좌별이 아니라 통합 NAV 기준 |
-| 5/19 | KIS 모의투자 위치 재정의 — 3개월 제한 때문에 장기 페이퍼 원장으로 쓰지 않고, KIS 주문/체결/잔고/ISA API 리허설 용도로 한정 |
-| 5/19 | 자체 PaperBrokerAdapter 도입 — 장기 모의투자는 내부 paper ledger 기준으로 수행, `PaperBrokerAdapter / KisMockBrokerAdapter / KisLiveBrokerAdapter` 3계층으로 분리 |
+| 5/19 | KIS 모의투자 adapter 제외 — 3개월 제한과 운영 복잡성 때문에 MVP 기본 경로에서 제거하고, 자체 PaperBroker + KIS live read-only/tiny-live 단계로 단순화 |
+| 5/19 | 자체 PaperBrokerAdapter 도입 — 장기 모의투자는 내부 paper ledger 기준으로 수행, 브로커 adapter는 MVP에서 `PaperBrokerAdapter / KisLiveBrokerAdapter` 2계층으로 단순화 |
 | 5/19 | Mac mini 도착 후 초기 검증 절차 반영 — Ollama 설치 후 모델 digest, JSON 안정성, Pydantic 검증률, latency, RAM/swap을 RunManifest 기준으로 기록 |
 | 4/28 | Allocator 인스턴스 신설 — 자산군 비중 결정을 분석 인스턴스 fund_manager에서 분리. 매일 08:30 KST 호출, 보수적 운영 원칙(±3%p 이상 조정 금지), tolerance ±5% 허용 |
 | 4/28 | 분석 인스턴스 fund_manager에서 macro_logic 제거 — 자산군 비중 결정은 Allocator 전담, 분석 인스턴스는 Allocator 권장 ±5% 내 종목 매매만 결정 |
@@ -1846,10 +1842,10 @@ DailySummary가 누적된 데이터를 압축하여 중장기 흐름을 인지�
 
 1. **Phase 0 — Mac/Ollama 기준선 확정 (현재):** Ollama 설치, 모델 pull, digest 기록, JSON-only 출력 안정성, Pydantic 검증률, latency, RAM/swap 측정. 통과 조합을 `stable baseline` 후보로 기록한다.
 2. **Phase 1 — Config + Domain + JSON Schema:** `config.toml`, `ExecutionMode`, `OrderIntent`, `DecisionSnapshot`, LLM 출력 스키마, Date-ID 검증, RunManifest/SecretsManifest 골격 구현.
-3. **Phase 2 — 자체 PaperBrokerAdapter:** 내부 paper ledger 기반 주문·체결·현금·포지션·NAV·MDD 기록 구현. KIS 모의투자 계좌에 의존하지 않는 장기 페이퍼 트레이딩 루프를 먼저 완성한다.
+3. **Phase 2 — 자체 PaperBrokerAdapter:** 내부 paper ledger 기반 주문·체결·현금·포지션·NAV·MDD 기록 구현. KIS 모의투자 adapter에 의존하지 않는 장기 페이퍼 트레이딩 루프를 먼저 완성한다.
 4. **Phase 3 — 데이터 API 연결:** FRED, DART, yfinance를 read-only로 연결하고, Date-ID 저장·stale 검증·Scout 입력 생성을 구현한다. 뉴스 API는 이 단계 이후로 미룬다.
 5. **Phase 4 — Allocator + Analysis 연결:** Allocator JSON 검증, Analysis 4역할 JSON 검증, RiskFilter, OrderIntent 생성, PaperBroker 체결까지 end-to-end로 연결한다.
-6. **Phase 5 — KIS API 리허설:** KIS 모의투자와 read-only 실전 계좌로 access token, 잔고조회, 현재가/호가, 주문/정정/취소/체결조회, ISA API 지원 여부를 검증한다. KIS 모의투자 계좌는 장기 성과 원장이 아니라 브로커 어댑터 리허설로만 사용한다.
+6. **Phase 5 — KIS live read-only 및 tiny-live 리허설:** 실전 계좌를 `allow_live_trading=false` 상태에서 read-only로 연결해 access token, 잔고조회, 현재가/호가, ISA API 지원 여부를 검증한다. 주문 endpoint 검증은 실전 전환 직전 극소액 수동 승인 tiny-live에서만 수행한다.
 7. **Phase 6 — 장기 페이퍼 트레이딩:** 자체 paper ledger 기준으로 3~6개월 누적 성과, MDD, 자산군 비중, 금 매매 빈도, Postmortem error_tags를 검증한다.
 8. **Phase 7 — 극소액 live 검토:** live gate, 수동 승인, 실전 계좌 read-only 검증, KIS live adapter smoke test를 통과한 뒤에만 극소액 실전 전환을 검토한다.
 9. **Phase 8 — 정기 리뷰:** 6개월 시점에 MDD 킬스위치 임계값(-10/-15/-20%, 50/80/95%), 체결 모델, 자산군 밴드, Allocator tolerance를 paper ledger 데이터 기반으로 조정 검토한다.

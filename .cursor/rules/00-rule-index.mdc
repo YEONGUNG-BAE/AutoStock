@@ -13,7 +13,7 @@ Non-negotiables:
 - Do not use performance targets inside LLM prompts.
 - Date-ID evidence is required for investment decisions.
 - Debug.md is for technical/operational events such as malformed LLM output, schema failure, execution/API/fill errors, and gold trade policy blocks; it does not store Postmortem `error_tags` and never feeds Top 3 investment tags.
-- Runtime trading mode is controlled only by typed `config.toml`; default is paper mode. Long-horizon paper performance is owned by the internal PaperBroker ledger, not by a KIS mock account.
+- Runtime trading mode is controlled only by typed `config.toml`; default is paper mode. Long-horizon paper performance is owned by the internal PaperBroker ledger. KIS mock is excluded from the MVP default path.
 - Final target runtime is macOS on the user's Mac; avoid Linux/Windows-only assumptions. Mac mini Pro arrival is now near-term, so model/runtime assumptions must be verified by local Ollama benchmarks before being treated as stable.
 
 Before coding, open only the relevant rule file:
@@ -44,7 +44,7 @@ Before coding, open only the relevant rule file:
 6. Risk filters and OrderIntent.
 7. Scheduler.
 8. Weekly/Monthly Postmortem.
-9. KIS mock broker API rehearsal.
+9. KIS live read-only / tiny-live rehearsal.
 10. Emergency triggers.
 
 Emergency triggers are intentionally late. Do not implement them before parser, validator, paper broker, and replay tests are stable.

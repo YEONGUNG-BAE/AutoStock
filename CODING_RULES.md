@@ -45,7 +45,7 @@ Python은 다음 책임을 가진다.
 - 하드 필터 적용
 - 주문 의도 생성
 - 자체 PaperBrokerAdapter 기반 페이퍼 트레이딩 체결 시뮬레이션
-- KIS mock/live broker adapter와 내부 PaperBrokerAdapter 분리
+- KIS live broker adapter와 내부 PaperBrokerAdapter 분리
 - 로그 저장
 
 
@@ -90,7 +90,7 @@ src/
   allocator/           # allocator pipeline and validators
   analysis/            # KR/US stock analysis pipeline
   risk/                # hard filters, soft bands, MDD, slippage
-  broker/              # BrokerAdapter, PaperBroker, KIS mock/live adapters
+  broker/              # BrokerAdapter, PaperBroker, KIS live adapter
   execution/           # order intent, fill simulator/orchestrator
   scheduler/           # KST + exchange calendar scheduler
   logs/                # DailySummary, Debug, Postmortem writers
@@ -165,12 +165,13 @@ src/
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Postmortem용 `error_tags`를 저장하지 않으며 Top 3에서 제외
 
-### Phase 8 — KIS API rehearsal
+### Phase 8 — KIS live read-only / tiny-live rehearsal
 
-- KIS 모의투자는 장기 성과 원장이 아니라 API 리허설로만 사용
-- access token, 잔고조회, 현재가/호가, 주문/정정/취소/체결조회 검증
+- KIS 모의투자 adapter는 MVP 기본 경로에서 제외
+- live 계좌는 먼저 `allow_live_trading=false` 상태에서 read-only 조회만 검증
+- access token, 잔고조회, 현재가/호가, ISA 계좌 조회를 먼저 검증
+- 주문 endpoint 검증은 실전 전환 직전 극소액 수동 tiny-live에서만 수행
 - ISA 계좌 smoke test 통과 전까지 ISA 자동 주문 금지
-- KIS mock 계좌 변경은 Debug.md 기술 이벤트로 기록하고 paper ledger는 유지
 
 ### Phase 9 — Emergency triggers
 
@@ -193,7 +194,7 @@ src/
 - [ ] LLM 자기평가식 confidence를 MVP 하드필터로 사용하지 않는가?
 - [ ] 분석 결과에서 broker를 직접 호출하지 않고 OrderIntent를 거치는가?
 - [ ] DecisionSnapshot으로 replay 가능한 로그를 남기는가?
-- [ ] KIS 모의투자를 장기 paper performance ledger로 사용하지 않는가?
+- [ ] KIS 모의투자 adapter가 MVP 기본 경로에서 제외되어 있고, 장기 paper performance ledger는 자체 PaperBroker인가?
 - [ ] ISA 자동 주문 라우팅 전 balance/order/fill smoke test를 통과했는가?
 - [ ] KIS/FRED/DART/news API 키와 계좌번호가 repo에 커밋되지 않는가?
 - [ ] 라이브 주문 경로가 기본 비활성화되어 있는가?

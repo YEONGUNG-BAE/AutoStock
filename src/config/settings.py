@@ -1,56 +1,35 @@
-"""Phase 0 runtime configuration loader.
-
-Responsibilities (Phase 0 only):
-
-- Load `config.toml` and resolve `${ENV_NAME}` placeholders against
-  the provided environment mapping.
-- Provide typed enums for trading mode, broker adapter, and execution mode.
-- Run startup safety gates before any broker/scheduler component is built.
-
-Out of scope for Phase 0:
-
-- Domain models (Percent, DateId, AllocatorDecision, ...).
-- Broker / Ollama / KIS client implementations.
-- Scheduler.
-
-Why a separate `ConfigError` instead of `ValueError` / `RuntimeError`:
-
-`config.toml`/env failures are *startup gates*, not arbitrary runtime bugs.
-A dedicated exception lets `main.py` catch and refuse to start without
-catching unrelated runtime exceptions, which is the explicit rule:
-`config.toml` parse failure must never silently fall back to paper or live.
-"""
-
 from __future__ import annotations
 
 import os
 import re
 import tomllib
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
-
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from typing import Any, TypeVar
 
 
-_ENV_PLACEHOLDER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}"
-)
+ENV_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
+DEFAULT_LIVE_CONFIRMATION_ENV_VAR = "LIVE_TRADING_CONFIRM"
+DEFAULT_LIVE_CONFIRMATION_PHRASE = "ENABLE_LIVE_TRADING"
+EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
-class ConfigError(RuntimeError):
-    """Raised when configuration loading or a startup gate fails.
-
-    Messages must include enough context (field path, env var name, or
-    mode/adapter combination) for an operator to debug from logs alone.
-    """
+class SettingsError(RuntimeError):
+    """설정 로딩과 런타임 안전 게이트 실패를 표현한다."""
 
 
-class _StrictModel(BaseModel):
-    """Base model that rejects unknown keys and is immutable after build."""
+class ConfigFileNotFoundError(SettingsError):
+    """config.toml 파일이 없을 때 live fallback 없이 즉시 실패한다."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+
+class ConfigEnvironmentError(SettingsError):
+    """config.toml의 환경변수 치환 또는 필수 환경변수 검증 실패를 표현한다."""
+
+
+class RuntimeGateError(SettingsError):
+    """paper/live 모드와 브로커 조합의 안전 게이트 실패를 표현한다."""
 
 
 class TradingMode(StrEnum):
@@ -60,18 +39,10 @@ class TradingMode(StrEnum):
 
 class BrokerAdapterName(StrEnum):
     PAPER = "paper"
-    KIS_MOCK = "kis_mock"
     KIS_LIVE = "kis_live"
 
 
 class ExecutionMode(StrEnum):
-    """Order-validation runtime mode.
-
-    Phase 0 only *defines* this enum so later phases (risk filters, MDD
-    killswitch, emergency triggers) can import a single source of truth.
-    Phase 0 does not branch on it.
-    """
-
     NORMAL = "normal"
     REBALANCING = "rebalancing"
     EMERGENCY_TRIGGER = "emergency_trigger"
@@ -79,259 +50,272 @@ class ExecutionMode(StrEnum):
     MANUAL = "manual"
 
 
-class TradingSettings(_StrictModel):
+@dataclass(frozen=True)
+class TradingSettings:
     mode: TradingMode = TradingMode.PAPER
     allow_live_trading: bool = False
-    live_confirmation_env_var: str = "LIVE_TRADING_CONFIRM"
-    live_confirmation_phrase: str = "ENABLE_LIVE_TRADING"
+    live_confirmation_env_var: str = DEFAULT_LIVE_CONFIRMATION_ENV_VAR
+    live_confirmation_phrase: str = DEFAULT_LIVE_CONFIRMATION_PHRASE
 
 
-class KisCredentialEnvSettings(_StrictModel):
-    """Environment variable *names* for KIS credentials.
-
-    Only env var names live in `config.toml`. The actual secret values must
-    never be written to disk, committed, or printed.
-    """
-
-    app_key_env: str
-    app_secret_env: str
-    account_env: str
+@dataclass(frozen=True)
+class KisLiveSettings:
+    account_env: str = "KIS_LIVE_ACCOUNT"
+    app_key_env: str = "KIS_LIVE_APP_KEY"
+    app_secret_env: str = "KIS_LIVE_APP_SECRET"
 
 
-def _default_kis_mock_env() -> KisCredentialEnvSettings:
-    return KisCredentialEnvSettings(
-        app_key_env="KIS_MOCK_APP_KEY",
-        app_secret_env="KIS_MOCK_APP_SECRET",
-        account_env="KIS_MOCK_ACCOUNT",
-    )
-
-
-def _default_kis_live_env() -> KisCredentialEnvSettings:
-    return KisCredentialEnvSettings(
-        app_key_env="KIS_LIVE_APP_KEY",
-        app_secret_env="KIS_LIVE_APP_SECRET",
-        account_env="KIS_LIVE_ACCOUNT",
-    )
-
-
-class BrokerSettings(_StrictModel):
+@dataclass(frozen=True)
+class BrokerSettings:
     adapter: BrokerAdapterName = BrokerAdapterName.PAPER
-    kis_mock: KisCredentialEnvSettings = Field(default_factory=_default_kis_mock_env)
-    kis_live: KisCredentialEnvSettings = Field(default_factory=_default_kis_live_env)
+    live: KisLiveSettings = field(default_factory=KisLiveSettings)
 
 
-class Settings(_StrictModel):
-    trading: TradingSettings = Field(default_factory=TradingSettings)
-    broker: BrokerSettings = Field(default_factory=BrokerSettings)
+@dataclass(frozen=True)
+class AppSettings:
+    trading: TradingSettings = field(default_factory=TradingSettings)
+    broker: BrokerSettings = field(default_factory=BrokerSettings)
 
 
 def load_settings(
-    config_path: str | Path,
+    config_path: str | Path = "config/config.toml",
     *,
-    env: Mapping[str, str] | None = None,
-) -> Settings:
-    """Load and validate Phase 0 runtime settings.
+    environ: Mapping[str, str] | None = None,
+) -> AppSettings:
+    """config.toml을 읽고 환경변수 치환과 런타임 안전 게이트를 검증한다."""
 
-    Parameters
-    ----------
-    config_path:
-        Path to a TOML file. The file must exist; Phase 0 refuses to boot
-        with defaults or to fall back to live mode on missing/invalid config.
-    env:
-        Optional mapping used for `${ENV_NAME}` resolution and gate checks.
-        Defaults to `os.environ`. Tests pass an explicit dict to stay
-        isolated from the host shell environment.
-    """
-
-    env_view: Mapping[str, str] = env if env is not None else os.environ
-    path = Path(config_path)
-
-    if not path.is_file():
-        raise ConfigError(
-            f"Config file not found: '{path}'. "
-            "Phase 0 will not boot with built-in defaults nor fall back to live mode."
-        )
-
-    try:
-        with path.open("rb") as fh:
-            raw: dict[str, Any] = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"Failed to parse TOML at '{path}': {exc}") from exc
-
-    resolved = _resolve_env_placeholders(raw, env=env_view)
-
-    try:
-        settings = Settings.model_validate(resolved)
-    except ValidationError as exc:
-        raise ConfigError(
-            f"Invalid config schema in '{path}': {exc.errors()}"
-        ) from exc
-
-    _assert_runtime_safety(settings, env=env_view)
+    raw_config = read_config_file(config_path)
+    expanded_config = expand_environment_variables(raw_config, environ=environ)
+    settings = parse_settings(expanded_config)
+    assert_runtime_safety(settings, environ=environ)
     return settings
 
 
-def _resolve_env_placeholders(
+def read_config_file(config_path: str | Path) -> dict[str, Any]:
+    """설정 파일이 없거나 파싱할 수 없으면 기본값 부팅 없이 실패한다."""
+
+    path = Path(config_path)
+    if not path.exists():
+        raise ConfigFileNotFoundError(
+            f"Config file not found: config_path={path}. Provide config.toml explicitly; no default or live fallback is allowed."
+        )
+
+    try:
+        with path.open("rb") as file:
+            config = tomllib.load(file)
+    except tomllib.TOMLDecodeError as exc:
+        raise SettingsError(f"Invalid TOML in config_path={path}: {exc}") from exc
+
+    return config
+
+
+def expand_environment_variables(
     value: Any,
     *,
-    env: Mapping[str, str],
-    path: tuple[str, ...] = (),
+    environ: Mapping[str, str] | None = None,
+    field_path: str = "config",
 ) -> Any:
-    """Recursively replace `${ENV_NAME}` in string leaves of a TOML tree.
+    """문자열 안의 ${ENV_NAME}을 치환하고 누락 시 필드 경로와 변수명을 포함해 실패한다."""
 
-    Missing env vars raise `ConfigError` rather than silently substituting
-    an empty string, so the failure is anchored to a specific config field
-    instead of bubbling up as a confusing downstream validation error.
-    """
+    source = os.environ if environ is None else environ
 
-    if isinstance(value, Mapping):
+    if isinstance(value, dict):
         return {
-            key: _resolve_env_placeholders(item, env=env, path=path + (str(key),))
-            for key, item in value.items()
+            key: expand_environment_variables(nested_value, environ=source, field_path=f"{field_path}.{key}")
+            for key, nested_value in value.items()
         }
+
     if isinstance(value, list):
         return [
-            _resolve_env_placeholders(item, env=env, path=path + (f"[{idx}]",))
-            for idx, item in enumerate(value)
+            expand_environment_variables(item, environ=source, field_path=f"{field_path}[{index}]")
+            for index, item in enumerate(value)
         ]
+
     if isinstance(value, str):
-        return _substitute_string(value, env=env, path=path)
+        return _expand_string_environment_variables(value, environ=source, field_path=field_path)
+
     return value
 
 
-def _substitute_string(
-    value: str,
-    *,
-    env: Mapping[str, str],
-    path: tuple[str, ...],
-) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        name = match.group("name")
-        if name not in env:
-            location = ".".join(path) if path else "<root>"
-            raise ConfigError(
-                f"Config field '{location}' references environment variable "
-                f"'${{{name}}}', but the variable is not set."
-            )
-        return env[name]
+def parse_settings(config: Mapping[str, Any]) -> AppSettings:
+    """config.toml의 Phase 0 설정을 명시적인 타입으로 변환한다."""
 
-    return _ENV_PLACEHOLDER_PATTERN.sub(_replace, value)
+    trading_section = _optional_table(config, "trading", "config.trading")
+    broker_section = _optional_table(config, "broker", "config.broker")
+    live_section = _optional_table(broker_section, "live", "config.broker.live")
 
+    _assert_allowed_keys(
+        trading_section,
+        allowed_keys={"mode", "allow_live_trading", "live_confirmation_env_var", "live_confirmation_phrase"},
+        field_path="config.trading",
+    )
+    _assert_allowed_keys(broker_section, allowed_keys={"adapter", "live"}, field_path="config.broker")
+    _assert_allowed_keys(
+        live_section,
+        allowed_keys={"account_env", "app_key_env", "app_secret_env"},
+        field_path="config.broker.live",
+    )
 
-def _assert_runtime_safety(settings: Settings, *, env: Mapping[str, str]) -> None:
-    """Run all Phase 0 startup gates.
-
-    Gate matrix:
-
-    | trading.mode | broker.adapter | result                                    |
-    |--------------|----------------|-------------------------------------------|
-    | paper        | paper          | OK, no secrets required                   |
-    | paper        | kis_mock       | requires KIS_MOCK_* env vars              |
-    | paper        | kis_live       | always fails (adapter/mode mismatch)      |
-    | live         | paper          | always fails (adapter/mode mismatch)      |
-    | live         | kis_mock       | always fails (adapter/mode mismatch)      |
-    | live         | kis_live       | requires allow_live_trading + confirm env |
-    |              |                | phrase + KIS_LIVE_* env vars              |
-    """
-
-    mode = settings.trading.mode
-    adapter = settings.broker.adapter
-
-    if mode is TradingMode.PAPER:
-        _gate_paper_mode(settings, env=env, adapter=adapter)
-        return
-
-    _gate_live_mode(settings, env=env, adapter=adapter)
-
-
-def _gate_paper_mode(
-    settings: Settings,
-    *,
-    env: Mapping[str, str],
-    adapter: BrokerAdapterName,
-) -> None:
-    if adapter is BrokerAdapterName.KIS_LIVE:
-        raise ConfigError(
-            "Adapter/mode mismatch: trading.mode='paper' must not use "
-            "broker.adapter='kis_live'. Allowed paper adapters: 'paper', 'kis_mock'."
-        )
-
-    if adapter is BrokerAdapterName.KIS_MOCK:
-        _require_env_present(
-            env=env,
-            env_names=(
-                settings.broker.kis_mock.app_key_env,
-                settings.broker.kis_mock.app_secret_env,
-                settings.broker.kis_mock.account_env,
+    return AppSettings(
+        trading=TradingSettings(
+            mode=_parse_enum(
+                trading_section.get("mode", TradingMode.PAPER.value),
+                TradingMode,
+                field_path="config.trading.mode",
             ),
-            context=(
-                "trading.mode='paper' with broker.adapter='kis_mock' "
-                "requires KIS mock credentials"
+            allow_live_trading=_parse_bool(
+                trading_section.get("allow_live_trading", False),
+                field_path="config.trading.allow_live_trading",
             ),
-        )
-
-
-def _gate_live_mode(
-    settings: Settings,
-    *,
-    env: Mapping[str, str],
-    adapter: BrokerAdapterName,
-) -> None:
-    if adapter is not BrokerAdapterName.KIS_LIVE:
-        raise ConfigError(
-            "Adapter/mode mismatch: trading.mode='live' requires "
-            f"broker.adapter='kis_live', got broker.adapter='{adapter.value}'."
-        )
-
-    if not settings.trading.allow_live_trading:
-        raise ConfigError(
-            "Live trading blocked: trading.allow_live_trading is false. "
-            "Live mode requires an explicit `allow_live_trading = true` in config.toml."
-        )
-
-    confirm_env_name = settings.trading.live_confirmation_env_var
-    expected_phrase = settings.trading.live_confirmation_phrase
-    actual_phrase = env.get(confirm_env_name)
-    if actual_phrase != expected_phrase:
-        observed = "<unset>" if actual_phrase is None else "<mismatched-value>"
-        raise ConfigError(
-            f"Live trading blocked: environment variable '{confirm_env_name}' "
-            f"must equal trading.live_confirmation_phrase (got {observed})."
-        )
-
-    _require_env_present(
-        env=env,
-        env_names=(
-            settings.broker.kis_live.app_key_env,
-            settings.broker.kis_live.app_secret_env,
-            settings.broker.kis_live.account_env,
+            live_confirmation_env_var=_parse_str(
+                trading_section.get("live_confirmation_env_var", DEFAULT_LIVE_CONFIRMATION_ENV_VAR),
+                field_path="config.trading.live_confirmation_env_var",
+            ),
+            live_confirmation_phrase=_parse_str(
+                trading_section.get("live_confirmation_phrase", DEFAULT_LIVE_CONFIRMATION_PHRASE),
+                field_path="config.trading.live_confirmation_phrase",
+            ),
         ),
-        context=(
-            "trading.mode='live' with broker.adapter='kis_live' "
-            "requires KIS live credentials"
+        broker=BrokerSettings(
+            adapter=_parse_enum(
+                broker_section.get("adapter", BrokerAdapterName.PAPER.value),
+                BrokerAdapterName,
+                field_path="config.broker.adapter",
+            ),
+            live=KisLiveSettings(
+                account_env=_parse_str(
+                    live_section.get("account_env", "KIS_LIVE_ACCOUNT"),
+                    field_path="config.broker.live.account_env",
+                ),
+                app_key_env=_parse_str(
+                    live_section.get("app_key_env", "KIS_LIVE_APP_KEY"),
+                    field_path="config.broker.live.app_key_env",
+                ),
+                app_secret_env=_parse_str(
+                    live_section.get("app_secret_env", "KIS_LIVE_APP_SECRET"),
+                    field_path="config.broker.live.app_secret_env",
+                ),
+            ),
         ),
     )
 
 
-def _require_env_present(
-    *,
-    env: Mapping[str, str],
-    env_names: tuple[str, ...],
-    context: str,
-) -> None:
-    missing = [name for name in env_names if not env.get(name)]
-    if missing:
-        raise ConfigError(f"{context}; missing environment variables: {missing}.")
+def _optional_table(config: Mapping[str, Any], key: str, field_path: str) -> Mapping[str, Any]:
+    value = config.get(key, {})
+    if not isinstance(value, dict):
+        raise SettingsError(f"Invalid settings type: field_path={field_path} must be a TOML table.")
+    return value
 
 
-__all__ = [
-    "BrokerAdapterName",
-    "BrokerSettings",
-    "ConfigError",
-    "ExecutionMode",
-    "KisCredentialEnvSettings",
-    "Settings",
-    "TradingMode",
-    "TradingSettings",
-    "load_settings",
-]
+def _assert_allowed_keys(config: Mapping[str, Any], *, allowed_keys: set[str], field_path: str) -> None:
+    unknown_keys = sorted(set(config) - allowed_keys)
+    if unknown_keys:
+        raise SettingsError(f"Unknown settings keys: field_path={field_path}, keys={', '.join(unknown_keys)}.")
+
+
+def _parse_enum(value: Any, enum_type: type[EnumT], *, field_path: str) -> EnumT:
+    if not isinstance(value, str):
+        raise SettingsError(f"Invalid enum value: field_path={field_path} must be a string; got {type(value).__name__}.")
+
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        allowed_values = ", ".join(item.value for item in enum_type)
+        raise SettingsError(
+            f"Invalid enum value: field_path={field_path}, value={value}, allowed_values={allowed_values}."
+        ) from exc
+
+
+def _parse_bool(value: Any, *, field_path: str) -> bool:
+    if not isinstance(value, bool):
+        raise SettingsError(f"Invalid boolean value: field_path={field_path} must be true or false.")
+    return value
+
+
+def _parse_str(value: Any, *, field_path: str) -> str:
+    if not isinstance(value, str):
+        raise SettingsError(f"Invalid string value: field_path={field_path} must be a string.")
+    if value == "":
+        raise SettingsError(f"Invalid string value: field_path={field_path} must not be empty.")
+    return value
+
+
+def assert_runtime_safety(settings: AppSettings, *, environ: Mapping[str, str] | None = None) -> None:
+    """브로커 연결이나 스케줄러 시작 전에 paper/live 안전 조건을 fail-closed로 검증한다."""
+
+    source = os.environ if environ is None else environ
+
+    if settings.trading.mode == TradingMode.PAPER:
+        _assert_paper_runtime_safety(settings)
+        return
+
+    _assert_live_runtime_safety(settings, environ=source)
+
+
+def _expand_string_environment_variables(value: str, *, environ: Mapping[str, str], field_path: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        env_name = match.group("name")
+        if env_name not in environ:
+            raise ConfigEnvironmentError(
+                f"Missing environment variable for config substitution: field_path={field_path}, env_var={env_name}."
+            )
+        return environ[env_name]
+
+    return ENV_PATTERN.sub(replace_match, value)
+
+
+def _assert_paper_runtime_safety(settings: AppSettings) -> None:
+    if settings.trading.allow_live_trading:
+        raise RuntimeGateError(
+            "Invalid paper gate: trading.mode=paper cannot set trading.allow_live_trading=true."
+        )
+
+    if settings.broker.adapter != BrokerAdapterName.PAPER:
+        raise RuntimeGateError(
+            "Invalid paper gate: trading.mode=paper requires broker.adapter=paper; "
+            f"got broker.adapter={settings.broker.adapter}."
+        )
+
+
+def _assert_live_runtime_safety(settings: AppSettings, *, environ: Mapping[str, str]) -> None:
+    if settings.broker.adapter != BrokerAdapterName.KIS_LIVE:
+        raise RuntimeGateError(
+            "Invalid live gate: trading.mode=live requires broker.adapter=kis_live; "
+            f"got broker.adapter={settings.broker.adapter}."
+        )
+
+    if not settings.trading.allow_live_trading:
+        raise RuntimeGateError(
+            "Invalid live gate: broker.adapter=kis_live requires trading.allow_live_trading=true."
+        )
+
+    _assert_live_confirmation(settings, environ=environ)
+    _assert_live_credentials(settings, environ=environ)
+
+
+def _assert_live_confirmation(settings: AppSettings, *, environ: Mapping[str, str]) -> None:
+    env_var = settings.trading.live_confirmation_env_var
+    expected_phrase = settings.trading.live_confirmation_phrase
+    actual_phrase = environ.get(env_var)
+
+    if actual_phrase != expected_phrase:
+        raise ConfigEnvironmentError(
+            "Invalid live confirmation: "
+            f"trading.mode=live, broker.adapter=kis_live, env_var={env_var}, expected={expected_phrase}."
+        )
+
+
+def _assert_live_credentials(settings: AppSettings, *, environ: Mapping[str, str]) -> None:
+    required_envs = (
+        settings.broker.live.account_env,
+        settings.broker.live.app_key_env,
+        settings.broker.live.app_secret_env,
+    )
+    missing_envs = [env_name for env_name in required_envs if not environ.get(env_name)]
+
+    if missing_envs:
+        raise ConfigEnvironmentError(
+            "Missing live broker credentials: "
+            "trading.mode=live, broker.adapter=kis_live, "
+            f"required_env_vars={', '.join(missing_envs)}."
+        )

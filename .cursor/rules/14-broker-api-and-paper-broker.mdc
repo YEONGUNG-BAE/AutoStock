@@ -23,13 +23,14 @@ src/execution   # OrderIntent, fills, paper execution, broker orchestration
 
 ## Broker adapter roles
 
-Use one common interface and three implementations:
+Use one common interface and two MVP implementations:
 
 ```text
-PaperBrokerAdapter     # long-horizon paper trading source of truth
-KisMockBrokerAdapter   # KIS virtual/mock account rehearsal only
-KisLiveBrokerAdapter   # live order path, disabled by default
+PaperBrokerAdapter   # long-horizon paper trading source of truth
+KisLiveBrokerAdapter # KIS live account path; read-only first, tiny-live only after gates
 ```
+
+KIS mock/virtual adapter is excluded from the MVP default path. Do not implement or configure `kis_mock` unless a later explicit phase reintroduces it as an optional feature.
 
 Required flow:
 
@@ -41,8 +42,9 @@ Forbidden:
 
 - LLM output directly calling KIS.
 - Analysis code importing a concrete KIS client.
-- Using KIS mock account as the long-term paper performance ledger.
-- Sharing order/fill logic that behaves differently across paper/mock/live for the same `OrderIntent` unless explicitly documented and tested.
+- Using any external brokerage mock account as the long-term paper performance ledger.
+- Reintroducing `kis_mock` into config, scaffold, tests, or runtime modes without an explicit later-phase request.
+- Sharing order/fill logic that behaves differently across paper/live for the same `OrderIntent` unless explicitly documented and tested.
 
 ## KIS scope
 
@@ -82,20 +84,24 @@ Do not route automated KR/Gold orders to ISA until these pass:
 1. token issuance
 2. ISA balance query
 3. KR quote query
-4. KR stock/ETF order request in a safe rehearsal path
+4. tiny manual order request, only when explicitly approved and capped
 5. fill inquiry
 6. cancel/correction path, where supported
 
 If ISA support is uncertain or fails, route KR/Gold to the regular account or keep ISA excluded from automated trading.
 
-## KIS mock account principle
+## KIS live read-only and tiny-live stages
 
-KIS virtual/mock accounts can expire or be recreated. Therefore:
+KIS integration progresses in stages:
 
-- Use KIS mock for API rehearsal only.
-- Do not use KIS mock as the performance source of truth.
-- Do not reset paper performance when KIS mock account changes.
-- Log KIS mock account changes as Debug.md technical events.
+```text
+Stage 1: PaperBroker only
+Stage 2: KIS live read-only — token, balance, positions, quotes; no order placement
+Stage 3: tiny-live manual order — capped amount, manual OrderIntent only, no LLM-triggered orders
+Stage 4: limited automated live review — only after paper/replay evidence
+```
+
+`allow_live_trading=false` must block every live order path even if `broker.adapter="kis_live"` and credentials are present.
 
 ## PaperBroker ledger
 

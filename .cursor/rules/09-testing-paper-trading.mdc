@@ -27,7 +27,7 @@ Do not make live order submission reachable by default. If broker clients exist,
 14. MDD staged liquidation thresholds and cooldowns
 15. emergency trigger threshold detection
 16. gold trade frequency and micro-adjust handling
-17. KIS mock adapter smoke tests isolated from PaperBroker performance ledger
+17. KIS live read-only/tiny-live smoke tests isolated from PaperBroker performance ledger
 
 ## Golden tests
 
@@ -108,7 +108,7 @@ LLM Decision → ParsedDecision → ValidationResult → RiskApprovedDecision �
 
 ## PaperBroker is the long-term paper source of truth
 
-Use the internal PaperBroker ledger for long-horizon paper trading. KIS mock/virtual accounts are only API rehearsals.
+Use the internal PaperBroker ledger for long-horizon paper trading. KIS mock/virtual adapters are excluded from the MVP default path.
 
 Required PaperBroker invariants:
 
@@ -120,14 +120,14 @@ position/cash updated → nav snapshot reproducible
 same snapshot + same order → same fill result
 ```
 
-KIS mock account reset, expiration, or recreation must not reset internal paper performance history.
+KIS account/API key changes must not reset internal paper performance history.
 
 ## Adapter test boundaries
 
 - Unit tests must mock all external APIs.
 - PaperBroker tests must not call KIS.
-- KIS mock tests must be integration tests gated by environment variables.
-- KIS live tests must be read-only unless the user explicitly enables live smoke testing.
+- KIS live tests must be read-only unless the user explicitly enables tiny-live smoke testing.
+- Tiny-live order tests must be manual, capped, and never LLM-triggered.
 
 Add golden fixtures for:
 
@@ -136,4 +136,4 @@ Add golden fixtures for:
 - simple US BUY paper fill
 - paper NAV snapshot after fill
 - paper MDD calculation across ISA + regular account roles
-- KIS mock account replacement recorded as Debug event
+- KIS API key/account replacement recorded as Debug event

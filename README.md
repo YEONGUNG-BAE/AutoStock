@@ -1,6 +1,6 @@
 # LLM 자동 주식 매매 프로젝트 — Cursor Rules 패키지
 
-이 패키지는 `auto_trading_report_final_v8_api_paper_final.md` 기준으로 구현을 시작하기 위한 코딩 규칙과 Cursor Project Rules를 분리한 것이다.
+이 패키지는 `auto_trading_report_final_v9_no_kis_mock.md` 기준으로 구현을 시작하기 위한 코딩 규칙과 Cursor Project Rules를 분리한 것이다.
 
 ## 설치
 
@@ -46,7 +46,7 @@ Cursor는 공식적으로 프로젝트 규칙을 `.cursor/rules` 디렉터리의
 | `11-runtime-config-and-mode.mdc` | config.toml, paper/live 모드, 안전 게이트 |
 | `12-emergency-triggers.mdc` | 긴급 트리거, PROFIT_RUN, MDD 이벤트 우선순위 |
 | `13-macos-runtime-environment.mdc` | 최종 실행 환경(macOS/Mac), Ollama 기준선 검증 |
-| `14-broker-api-and-paper-broker.mdc` | KIS API, 계좌 라우팅, 자체 PaperBroker ledger, KIS mock 리허설 |
+| `14-broker-api-and-paper-broker.mdc` | KIS API, 계좌 라우팅, 자체 PaperBroker ledger, KIS live read-only/tiny-live 단계 |
 | `99-forbidden-patterns.mdc` | 금지 패턴, PR 전 점검 |
 | `docs/DEBUG_EVENT_CODES.md` | 사람 전용 Debug.md 이벤트 코드 목록. 런타임 LLM 프롬프트에 주입 금지 |
 
@@ -71,7 +71,7 @@ Important:
 6. Risk filter와 OrderIntent, ExecutionMode별 검증 정책
 7. Scheduler
 8. Weekly/Monthly Postmortem
-9. KIS mock API rehearsal
+9. KIS live read-only / tiny-live rehearsal
 10. Emergency triggers
 
 긴급 트리거는 초기부터 붙이지 않는다. parser/validator/replay test가 먼저 안정화된 뒤 구현한다.
@@ -108,6 +108,6 @@ Live mode requires an explicit config flag and environment confirmation. See `11
 
 - Broker API는 KIS Developers 단일 채택을 기본값으로 한다.
 - 분석 데이터는 FRED, DART/OpenDART, yfinance, edgartools/SEC, 뉴스 API를 별도 계층으로 둔다.
-- 장기 페이퍼 트레이딩은 KIS 모의투자가 아니라 내부 `PaperBrokerAdapter`와 자체 ledger가 기준이다.
-- KIS 모의투자는 주문/정정/취소/체결조회/ISA 지원 여부를 확인하는 API 리허설 용도로만 사용한다.
+- 장기 페이퍼 트레이딩은 내부 `PaperBrokerAdapter`와 자체 ledger가 기준이다.
+- KIS 모의투자 adapter는 MVP 기본 경로에서 제외한다. KIS API 검증은 live read-only와 극소액 수동 tiny-live 단계로 진행한다.
 - ISA 계좌는 smoke test 통과 전까지 자동 주문 라우팅 대상이 아니다.

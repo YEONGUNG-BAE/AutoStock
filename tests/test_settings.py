@@ -1,381 +1,277 @@
-"""Phase 0 startup-gate tests for `src.config.settings`.
-
-Test isolation contract:
-
-- An `autouse` fixture deletes every env var the loader can touch, so the
-  host shell never bleeds into the test (no real KIS keys are read).
-- Tests that need credentials use `DUMMY_*` / `TEST_*` placeholder values
-  only. No real API keys, secrets, or account numbers appear in this file.
-- We additionally pass `env=...` explicitly to `load_settings` in most
-  tests to make the contract obvious and resilient to fixture changes.
-"""
-
 from __future__ import annotations
 
-import textwrap
+import sys
 from pathlib import Path
 
 import pytest
 
-from src.config.settings import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import config
+from config.settings import (
     BrokerAdapterName,
-    ConfigError,
+    ConfigEnvironmentError,
+    ConfigFileNotFoundError,
     ExecutionMode,
+    SettingsError,
     TradingMode,
     load_settings,
 )
 
 
-_TOUCHED_ENV_VARS: tuple[str, ...] = (
+LIVE_ENV_VARS = (
     "LIVE_TRADING_CONFIRM",
-    "KIS_MOCK_APP_KEY",
-    "KIS_MOCK_APP_SECRET",
-    "KIS_MOCK_ACCOUNT",
+    "KIS_LIVE_ACCOUNT",
     "KIS_LIVE_APP_KEY",
     "KIS_LIVE_APP_SECRET",
-    "KIS_LIVE_ACCOUNT",
-    "AUTOSTOCK_TEST_VAR",
+    "TEST_LIVE_ACCOUNT",
+    "TEST_LIVE_APP_KEY",
+    "TEST_LIVE_APP_SECRET",
+    "TEST_ACCOUNT_ENV_NAME",
+    "TEST_MISSING_ENV",
 )
 
 
 @pytest.fixture(autouse=True)
-def _scrub_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove every env var the loader could read before each test."""
-    for name in _TOUCHED_ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
+def isolate_live_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 테스트가 사용자의 실제 셸 환경변수에 의존하지 않도록 라이브 관련 값을 모두 지운다.
+    for env_var in LIVE_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
 
 
-def _write_config(tmp_path: Path, body: str) -> Path:
+def write_config(tmp_path: Path, content: str) -> Path:
     config_path = tmp_path / "config.toml"
-    config_path.write_text(textwrap.dedent(body), encoding="utf-8")
+    config_path.write_text(content, encoding="utf-8")
     return config_path
 
 
-def _mock_creds_env() -> dict[str, str]:
-    return {
-        "KIS_MOCK_APP_KEY": "DUMMY_MOCK_APP_KEY",
-        "KIS_MOCK_APP_SECRET": "DUMMY_MOCK_APP_SECRET",
-        "KIS_MOCK_ACCOUNT": "DUMMY_MOCK_ACCOUNT",
-    }
+def test_minimal_config_defaults_to_paper_mode(tmp_path: Path) -> None:
+    settings = load_settings(write_config(tmp_path, ""))
 
-
-def _live_creds_env() -> dict[str, str]:
-    return {
-        "KIS_LIVE_APP_KEY": "DUMMY_LIVE_APP_KEY",
-        "KIS_LIVE_APP_SECRET": "DUMMY_LIVE_APP_SECRET",
-        "KIS_LIVE_ACCOUNT": "DUMMY_LIVE_ACCOUNT",
-    }
-
-
-def test_minimal_config_defaults_to_paper(tmp_path: Path) -> None:
-    config_path = _write_config(tmp_path, "")
-
-    settings = load_settings(config_path, env={})
-
-    assert settings.trading.mode is TradingMode.PAPER
-    assert settings.broker.adapter is BrokerAdapterName.PAPER
+    assert settings.trading.mode == TradingMode.PAPER
+    assert settings.broker.adapter == BrokerAdapterName.PAPER
     assert settings.trading.allow_live_trading is False
 
 
-def test_missing_config_file_raises_explicit_error(tmp_path: Path) -> None:
-    missing_path = tmp_path / "does-not-exist.toml"
+def test_missing_config_file_fails_without_fallback(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing-config.toml"
 
-    with pytest.raises(ConfigError, match="Config file not found"):
-        load_settings(missing_path, env={})
+    with pytest.raises(ConfigFileNotFoundError, match="Config file not found.*no default or live fallback"):
+        load_settings(missing_path)
 
 
-def test_paper_with_paper_adapter_needs_no_secrets(tmp_path: Path) -> None:
-    config_path = _write_config(
+def test_paper_mode_with_paper_adapter_passes_without_secrets(tmp_path: Path) -> None:
+    config_path = write_config(
         tmp_path,
         """
-        [trading]
-        mode = "paper"
+[trading]
+mode = "paper"
 
-        [broker]
-        adapter = "paper"
-        """,
+[broker]
+adapter = "paper"
+""",
     )
-
-    settings = load_settings(config_path, env={})
-
-    assert settings.broker.adapter is BrokerAdapterName.PAPER
-
-
-def test_paper_with_kis_mock_passes_when_creds_present(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-
-        [broker]
-        adapter = "kis_mock"
-        """,
-    )
-
-    settings = load_settings(config_path, env=_mock_creds_env())
-
-    assert settings.broker.adapter is BrokerAdapterName.KIS_MOCK
-
-
-def test_paper_with_kis_mock_fails_without_creds(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-
-        [broker]
-        adapter = "kis_mock"
-        """,
-    )
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_settings(config_path, env={})
-
-    message = str(exc_info.value)
-    assert "kis_mock" in message
-    assert "KIS_MOCK_APP_KEY" in message
-
-
-def test_paper_with_kis_live_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    fully_loaded_env = {
-        "LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING",
-        **_live_creds_env(),
-    }
-    with pytest.raises(ConfigError, match="paper.*kis_live"):
-        load_settings(config_path, env=fully_loaded_env)
-
-
-def test_live_with_paper_adapter_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "paper"
-        """,
-    )
-
-    with pytest.raises(ConfigError, match="kis_live"):
-        load_settings(
-            config_path,
-            env={"LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING", **_live_creds_env()},
-        )
-
-
-def test_live_with_kis_mock_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "kis_mock"
-        """,
-    )
-
-    with pytest.raises(ConfigError, match="kis_live"):
-        load_settings(
-            config_path,
-            env={
-                "LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING",
-                **_mock_creds_env(),
-                **_live_creds_env(),
-            },
-        )
-
-
-def test_live_kis_live_without_allow_flag_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = false
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    with pytest.raises(ConfigError, match="allow_live_trading"):
-        load_settings(
-            config_path,
-            env={"LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING", **_live_creds_env()},
-        )
-
-
-def test_live_kis_live_missing_credentials_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_settings(
-            config_path,
-            env={"LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING"},
-        )
-
-    message = str(exc_info.value)
-    assert "KIS_LIVE_APP_KEY" in message
-    assert "KIS_LIVE_APP_SECRET" in message
-    assert "KIS_LIVE_ACCOUNT" in message
-
-
-def test_live_kis_live_wrong_confirmation_phrase_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    with pytest.raises(ConfigError, match="LIVE_TRADING_CONFIRM"):
-        load_settings(
-            config_path,
-            env={"LIVE_TRADING_CONFIRM": "WRONG_PHRASE", **_live_creds_env()},
-        )
-
-
-def test_live_kis_live_missing_confirmation_env_fails(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    with pytest.raises(ConfigError, match="LIVE_TRADING_CONFIRM"):
-        load_settings(config_path, env=_live_creds_env())
-
-
-def test_live_kis_live_passes_when_every_gate_satisfied(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "live"
-        allow_live_trading = true
-
-        [broker]
-        adapter = "kis_live"
-        """,
-    )
-
-    settings = load_settings(
-        config_path,
-        env={"LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING", **_live_creds_env()},
-    )
-
-    assert settings.trading.mode is TradingMode.LIVE
-    assert settings.broker.adapter is BrokerAdapterName.KIS_LIVE
-    assert settings.trading.allow_live_trading is True
-
-
-def test_env_placeholder_substitution_resolves(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-        live_confirmation_phrase = "${AUTOSTOCK_TEST_VAR}"
-
-        [broker]
-        adapter = "paper"
-        """,
-    )
-
-    settings = load_settings(
-        config_path,
-        env={"AUTOSTOCK_TEST_VAR": "TEST_VALUE_42"},
-    )
-
-    assert settings.trading.live_confirmation_phrase == "TEST_VALUE_42"
-
-
-def test_env_placeholder_missing_variable_fails_with_location(tmp_path: Path) -> None:
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-        live_confirmation_phrase = "${AUTOSTOCK_TEST_VAR}"
-        """,
-    )
-
-    with pytest.raises(ConfigError) as exc_info:
-        load_settings(config_path, env={})
-
-    message = str(exc_info.value)
-    assert "AUTOSTOCK_TEST_VAR" in message
-    assert "trading.live_confirmation_phrase" in message
-
-
-def test_uses_os_environ_when_env_not_passed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`load_settings` without explicit env falls back to `os.environ`.
-
-    This proves the production code path works with real `os.environ`
-    while still being driven by `monkeypatch.setenv` in tests.
-    """
-
-    config_path = _write_config(
-        tmp_path,
-        """
-        [trading]
-        mode = "paper"
-
-        [broker]
-        adapter = "kis_mock"
-        """,
-    )
-    monkeypatch.setenv("KIS_MOCK_APP_KEY", "DUMMY_MOCK_APP_KEY")
-    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "DUMMY_MOCK_APP_SECRET")
-    monkeypatch.setenv("KIS_MOCK_ACCOUNT", "DUMMY_MOCK_ACCOUNT")
 
     settings = load_settings(config_path)
 
-    assert settings.broker.adapter is BrokerAdapterName.KIS_MOCK
+    assert settings.trading.mode == TradingMode.PAPER
+    assert settings.broker.adapter == BrokerAdapterName.PAPER
 
 
-def test_execution_mode_enum_exposes_all_phase0_values() -> None:
-    """Phase 0 owns the canonical `ExecutionMode` enum for later phases."""
+def test_paper_mode_with_allow_live_trading_true_fails(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "paper"
+allow_live_trading = true
+
+[broker]
+adapter = "paper"
+""",
+    )
+
+    with pytest.raises(SettingsError, match="trading.mode=paper.*trading.allow_live_trading=true"):
+        load_settings(config_path)
+
+
+def test_paper_mode_with_kis_live_adapter_fails(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "paper"
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    with pytest.raises(SettingsError, match="trading.mode=paper requires broker.adapter=paper"):
+        load_settings(config_path)
+
+
+def test_live_mode_with_paper_adapter_fails(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "paper"
+""",
+    )
+
+    with pytest.raises(SettingsError, match="trading.mode=live requires broker.adapter=kis_live"):
+        load_settings(config_path)
+
+
+def test_live_kis_live_with_allow_live_trading_false_fails(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = false
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    with pytest.raises(SettingsError, match="broker.adapter=kis_live requires trading.allow_live_trading=true"):
+        load_settings(config_path)
+
+
+def test_live_kis_live_with_missing_credentials_fails(
+    tmp_path: Path,
+) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    with pytest.raises(ConfigEnvironmentError, match="KIS_LIVE_ACCOUNT.*KIS_LIVE_APP_KEY.*KIS_LIVE_APP_SECRET"):
+        load_settings(config_path, environ={"LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING"})
+
+
+def test_live_kis_live_with_confirmation_mismatch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVE_TRADING_CONFIRM", "TEST_WRONG_CONFIRMATION")
+    monkeypatch.setenv("KIS_LIVE_ACCOUNT", "TEST_ACCOUNT")
+    monkeypatch.setenv("KIS_LIVE_APP_KEY", "TEST_APP_KEY")
+    monkeypatch.setenv("KIS_LIVE_APP_SECRET", "TEST_APP_SECRET")
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    with pytest.raises(ConfigEnvironmentError, match="env_var=LIVE_TRADING_CONFIRM.*expected=ENABLE_LIVE_TRADING"):
+        load_settings(config_path)
+
+
+def test_live_kis_live_with_missing_confirmation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KIS_LIVE_ACCOUNT", "TEST_ACCOUNT")
+    monkeypatch.setenv("KIS_LIVE_APP_KEY", "TEST_APP_KEY")
+    monkeypatch.setenv("KIS_LIVE_APP_SECRET", "TEST_APP_SECRET")
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    with pytest.raises(ConfigEnvironmentError, match="env_var=LIVE_TRADING_CONFIRM.*expected=ENABLE_LIVE_TRADING"):
+        load_settings(config_path)
+
+
+def test_live_kis_live_passes_only_when_all_gates_pass(
+    tmp_path: Path,
+) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "kis_live"
+""",
+    )
+
+    settings = load_settings(
+        config_path,
+        environ={
+            "LIVE_TRADING_CONFIRM": "ENABLE_LIVE_TRADING",
+            "KIS_LIVE_ACCOUNT": "TEST_ACCOUNT",
+            "KIS_LIVE_APP_KEY": "TEST_APP_KEY",
+            "KIS_LIVE_APP_SECRET": "TEST_APP_SECRET",
+        },
+    )
+
+    assert settings.trading.mode == TradingMode.LIVE
+    assert settings.broker.adapter == BrokerAdapterName.KIS_LIVE
+
+
+def test_config_environment_substitution_works(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_ACCOUNT_ENV_NAME", "TEST_LIVE_ACCOUNT")
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.live]
+account_env = "${TEST_ACCOUNT_ENV_NAME}"
+""",
+    )
+
+    settings = load_settings(config_path)
+
+    assert settings.broker.live.account_env == "TEST_LIVE_ACCOUNT"
+
+
+def test_missing_config_environment_substitution_fails_with_field_path_and_env_name(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.live]
+app_key_env = "${TEST_MISSING_ENV}"
+""",
+    )
+
+    with pytest.raises(ConfigEnvironmentError, match="field_path=config.broker.live.app_key_env.*env_var=TEST_MISSING_ENV"):
+        load_settings(config_path)
+
+
+def test_execution_mode_enum_contains_required_values() -> None:
     assert {mode.value for mode in ExecutionMode} == {
         "normal",
         "rebalancing",
@@ -383,3 +279,29 @@ def test_execution_mode_enum_exposes_all_phase0_values() -> None:
         "mdd_killswitch",
         "manual",
     }
+
+
+def test_config_package_exports_only_phase_0_public_api() -> None:
+    assert set(config.__all__) == {
+        "AppSettings",
+        "BrokerAdapterName",
+        "BrokerSettings",
+        "ConfigEnvironmentError",
+        "ConfigFileNotFoundError",
+        "ExecutionMode",
+        "KisLiveSettings",
+        "RuntimeGateError",
+        "SettingsError",
+        "TradingMode",
+        "TradingSettings",
+        "load_settings",
+    }
+
+
+def test_forbidden_mock_adapter_and_environment_names_are_not_present() -> None:
+    forbidden_adapter = "kis" + "_mock"
+    forbidden_env = "KIS" + "_MOCK"
+    settings_source = Path("src/config/settings.py").read_text(encoding="utf-8")
+
+    assert forbidden_adapter not in settings_source
+    assert forbidden_env not in settings_source

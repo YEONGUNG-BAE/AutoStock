@@ -49,9 +49,10 @@ Broker implementation is selected from config:
 
 ```text
 paper mode + broker.adapter = "paper"    → PaperBrokerAdapter
-paper mode + broker.adapter = "kis_mock" → KisMockBrokerAdapter for API rehearsal only
 live mode  + broker.adapter = "kis_live" → KisLiveBrokerAdapter, only after live gates pass
 ```
+
+`kis_mock` is intentionally excluded from the MVP default path. Long-horizon paper trading uses PaperBrokerAdapter only. KIS API verification uses `kis_live` in read-only mode first, and only later a capped manual tiny-live path.
 
 Risk filters and validators must run in both modes.
 Paper and live execution must share the same `OrderIntent` interface.
@@ -81,7 +82,7 @@ Recommended broker config concepts:
 
 ```toml
 [broker]
-adapter = "paper"  # paper | kis_mock | kis_live
+adapter = "paper"  # paper | kis_live
 
 [broker.account_roles]
 use_isa_for_kr_and_gold = true
@@ -93,4 +94,4 @@ cash_buffer_account_env = "KIS_CMA_ACCOUNT"
 
 Do not hardcode KIS app keys, app secrets, account numbers, or access tokens.
 
-`kis_mock` is allowed only for API rehearsal and must not be treated as the long-term paper performance ledger.
+KIS mock/virtual adapters are not part of the MVP default path. Do not reintroduce them without an explicit later phase.

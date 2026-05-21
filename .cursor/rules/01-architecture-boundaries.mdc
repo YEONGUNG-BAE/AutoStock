@@ -24,7 +24,7 @@ src/prompts     # prompt templates only
 src/allocator   # cash + asset allocation pipeline
 src/analysis    # KR/US stock decision pipeline
 src/risk        # filters, MDD, slippage, soft-band checks
-src/broker      # BrokerAdapter interface, PaperBroker, KIS mock/live adapters
+src/broker      # BrokerAdapter interface, PaperBroker, KIS live adapter
 src/execution   # OrderIntent, paper fills, order simulator/orchestrator
 src/scheduler   # KST + exchange calendar jobs
 src/logs        # DailySummary, Debug.md, records

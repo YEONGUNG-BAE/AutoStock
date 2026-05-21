@@ -18,8 +18,9 @@ Do not implement these patterns.
 - Calculating MDD from only one account when ISA and regular accounts are both part of the project portfolio.
 - Committing KIS/FRED/DART/news API keys, account numbers, or access tokens.
 - Routing automated ISA orders before ISA balance/order/fill smoke tests pass.
-- Resetting internal paper performance history because a KIS mock account expired or changed.
-- Using a KIS mock/virtual account as the long-term paper trading source of truth.
+- Resetting internal paper performance history because a KIS/API key/account changed.
+- Using any external brokerage mock/virtual account as the long-term paper trading source of truth.
+- Reintroducing `kis_mock` as an MVP runtime adapter without an explicit later-phase request.
 
 - Treating `bypass_llm=True` as permission to skip broker/exchange/order-availability checks, live-mode gates, or audit logs.
 - Blocking MDD or emergency-trigger liquidation solely because the normal invested floor would fall below 70%.

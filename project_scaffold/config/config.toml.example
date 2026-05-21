@@ -103,7 +103,7 @@ weekly_postmortem_dir = "memory/postmortem/weekly"
 monthly_postmortem_dir = "memory/postmortem/monthly"
 
 [broker]
-# paper = internal PaperBrokerAdapter. kis_mock = KIS virtual/mock API rehearsal. kis_live = live KIS path.
+# paper = internal PaperBrokerAdapter. kis_live = live KIS path, read-only first and tiny-live only after gates.
 adapter = "paper"
 
 [broker.account_roles]
@@ -121,16 +121,10 @@ kr_sell_slippage_bps = 10
 us_buy_slippage_bps = 5
 us_sell_slippage_bps = 5
 
-[broker.kis_mock]
-name = "kis_mock"
-endpoint = "https://openapivts.koreainvestment.com:29443"
-app_key_env = "KIS_MOCK_APP_KEY"
-app_secret_env = "KIS_MOCK_APP_SECRET"
-account_id_env = "KIS_MOCK_ACCOUNT"
 
 [broker.live]
-# Keep empty in committed config.
-name = ""
+# Keep endpoint and environment variable names only; never commit actual secrets.
+name = "kis_live"
 endpoint = "https://openapi.koreainvestment.com:9443"
 account_id_env = "KIS_LIVE_ACCOUNT"
 app_key_env = "KIS_LIVE_APP_KEY"
