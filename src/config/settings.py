@@ -72,9 +72,24 @@ class BrokerSettings:
 
 
 @dataclass(frozen=True)
+class LlmSettings:
+    provider: str = "ollama"
+    model: str = "qwen3.6:35b"
+    host: str = "http://localhost:11434"
+    temperature: float = 0
+    seed: int = 42
+    keep_alive: str = "24h"
+    default_num_ctx: int = 4096
+    default_think: bool = False
+    timeout_seconds: float = 120
+    retry_count: int = 0
+
+
+@dataclass(frozen=True)
 class AppSettings:
     trading: TradingSettings = field(default_factory=TradingSettings)
     broker: BrokerSettings = field(default_factory=BrokerSettings)
+    llm: LlmSettings = field(default_factory=LlmSettings)
 
 
 def load_settings(
@@ -143,6 +158,7 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
     trading_section = _optional_table(config, "trading", "config.trading")
     broker_section = _optional_table(config, "broker", "config.broker")
     live_section = _optional_table(broker_section, "live", "config.broker.live")
+    llm_section = _optional_table(config, "llm", "config.llm")
 
     _assert_allowed_keys(
         trading_section,
@@ -154,6 +170,22 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
         live_section,
         allowed_keys={"account_env", "app_key_env", "app_secret_env"},
         field_path="config.broker.live",
+    )
+    _assert_allowed_keys(
+        llm_section,
+        allowed_keys={
+            "provider",
+            "model",
+            "host",
+            "temperature",
+            "seed",
+            "keep_alive",
+            "default_num_ctx",
+            "default_think",
+            "timeout_seconds",
+            "retry_count",
+        },
+        field_path="config.llm",
     )
 
     return AppSettings(
@@ -197,6 +229,33 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
                 ),
             ),
         ),
+        llm=LlmSettings(
+            provider=_parse_str(llm_section.get("provider", "ollama"), field_path="config.llm.provider"),
+            model=_parse_str(llm_section.get("model", "qwen3.6:35b"), field_path="config.llm.model"),
+            host=_parse_str(llm_section.get("host", "http://localhost:11434"), field_path="config.llm.host"),
+            temperature=_parse_zero_temperature(
+                llm_section.get("temperature", 0),
+                field_path="config.llm.temperature",
+            ),
+            seed=_parse_int(llm_section.get("seed", 42), field_path="config.llm.seed"),
+            keep_alive=_parse_str(llm_section.get("keep_alive", "24h"), field_path="config.llm.keep_alive"),
+            default_num_ctx=_parse_positive_int(
+                llm_section.get("default_num_ctx", 4096),
+                field_path="config.llm.default_num_ctx",
+            ),
+            default_think=_parse_bool(
+                llm_section.get("default_think", False),
+                field_path="config.llm.default_think",
+            ),
+            timeout_seconds=_parse_positive_number(
+                llm_section.get("timeout_seconds", 120),
+                field_path="config.llm.timeout_seconds",
+            ),
+            retry_count=_parse_non_negative_int(
+                llm_section.get("retry_count", 0),
+                field_path="config.llm.retry_count",
+            ),
+        ),
     )
 
 
@@ -238,6 +297,48 @@ def _parse_str(value: Any, *, field_path: str) -> str:
     if value == "":
         raise SettingsError(f"Invalid string value: field_path={field_path} must not be empty.")
     return value
+
+
+def _parse_number(value: Any, *, field_path: str) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise SettingsError(f"Invalid number value: field_path={field_path} must be a number.")
+    return value
+
+
+def _parse_zero_temperature(value: Any, *, field_path: str) -> float:
+    parsed_value = _parse_number(value, field_path=field_path)
+    if parsed_value != 0:
+        raise SettingsError(
+            f"Invalid temperature value: field_path={field_path} must be 0 for deterministic trading decisions."
+        )
+    return parsed_value
+
+
+def _parse_positive_number(value: Any, *, field_path: str) -> float:
+    parsed_value = _parse_number(value, field_path=field_path)
+    if parsed_value <= 0:
+        raise SettingsError(f"Invalid number value: field_path={field_path} must be greater than 0.")
+    return parsed_value
+
+
+def _parse_int(value: Any, *, field_path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SettingsError(f"Invalid integer value: field_path={field_path} must be an integer.")
+    return value
+
+
+def _parse_positive_int(value: Any, *, field_path: str) -> int:
+    parsed_value = _parse_int(value, field_path=field_path)
+    if parsed_value <= 0:
+        raise SettingsError(f"Invalid integer value: field_path={field_path} must be greater than 0.")
+    return parsed_value
+
+
+def _parse_non_negative_int(value: Any, *, field_path: str) -> int:
+    parsed_value = _parse_int(value, field_path=field_path)
+    if parsed_value < 0:
+        raise SettingsError(f"Invalid integer value: field_path={field_path} must be greater than or equal to 0.")
+    return parsed_value
 
 
 def assert_runtime_safety(settings: AppSettings, *, environ: Mapping[str, str] | None = None) -> None:

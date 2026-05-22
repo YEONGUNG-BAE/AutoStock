@@ -53,6 +53,32 @@ def test_minimal_config_defaults_to_paper_mode(tmp_path: Path) -> None:
     assert settings.trading.allow_live_trading is False
 
 
+def test_minimal_config_defaults_to_ollama_smoke_settings(tmp_path: Path) -> None:
+    settings = load_settings(write_config(tmp_path, ""))
+
+    assert settings.llm.provider == "ollama"
+    assert settings.llm.model == "qwen3.6:35b"
+    assert settings.llm.default_think is False
+    assert settings.llm.temperature == 0
+    assert settings.llm.seed == 42
+
+
+def test_llm_temperature_must_be_zero_for_deterministic_decisions(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[llm]
+temperature = 1
+""",
+    )
+
+    with pytest.raises(
+        SettingsError,
+        match="field_path=config.llm.temperature.*must be 0 for deterministic trading decisions",
+    ):
+        load_settings(config_path)
+
+
 def test_missing_config_file_fails_without_fallback(tmp_path: Path) -> None:
     missing_path = tmp_path / "missing-config.toml"
 
