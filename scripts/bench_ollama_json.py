@@ -12,7 +12,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from llm.json_runner import JsonRunner, JsonRunnerOptions
-from llm.ollama_client import OllamaApiError, OllamaClient
+from llm.ollama_client import OllamaApiError, OllamaClient, OllamaClientError
 from llm.run_manifest import RunManifest
 from schemas.llm_smoke import LlmSmokeResponse
 
@@ -118,14 +118,26 @@ def _safe_show_model(client: OllamaClient, model: str) -> dict[str, object]:
     try:
         return client.show_model(model)
     except OllamaApiError as exc:
-        return {"error": str(exc), "payload": exc.error_payload}
+        return {
+            "error": str(exc),
+            "payload": exc.error_payload,
+            "raw_response": exc.raw_response,
+        }
+    except OllamaClientError as exc:
+        return {"error": str(exc), "payload": None}
 
 
 def _safe_get_version(client: OllamaClient) -> dict[str, object]:
     try:
         return client.get_version()
     except OllamaApiError as exc:
-        return {"error": str(exc), "payload": exc.error_payload}
+        return {
+            "error": str(exc),
+            "payload": exc.error_payload,
+            "raw_response": exc.raw_response,
+        }
+    except OllamaClientError as exc:
+        return {"error": str(exc), "payload": None}
 
 
 def _is_parse_success(error_type: str | None) -> bool:
