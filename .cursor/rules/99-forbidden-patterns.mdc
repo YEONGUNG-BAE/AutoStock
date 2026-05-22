@@ -62,3 +62,24 @@ Do not implement these patterns.
 - Using LLM self-reported confidence as an MVP hard order filter.
 - Calling broker APIs directly from parsed LLM analysis without OrderIntent.
 - Accepting stale Date-ID evidence as current context.
+
+## Do not weaken existing safety invariants
+
+When rewriting, refactoring, moving, or modularizing existing code, do not drop existing validation rules, safety gates, fail-closed behavior, or deterministic-execution constraints.
+
+Examples of safety invariants that must be preserved:
+- `temperature = 0` for deterministic LLM execution.
+- `think` must be explicitly set for every Ollama request.
+- `llm.provider` must remain `ollama` in the MVP path unless a later phase explicitly introduces another provider.
+- `trading.mode=paper` must not allow real-money order paths.
+- `allow_live_trading=true` is invalid outside the live + kis_live gate.
+- `kis_mock` / `KIS_MOCK_*` must not be reintroduced in the MVP path.
+- `config.toml` absence must fail closed; never fallback into live mode.
+- LLM markdown/code-fence output must fail validation unless a later rule explicitly allows a sanitizer.
+- `parse_settings()` must not silently ignore unknown keys in known sections.
+- Runtime safety gates must remain fail-closed.
+- Benchmark success metrics must not count API/client errors as JSON parse success.
+
+Before reporting completion, explicitly state whether existing safety invariants were preserved.
+
+If an invariant is intentionally changed, the change must be explicitly justified, tested, and called out as a safety-affecting design change.

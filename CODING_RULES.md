@@ -206,3 +206,5 @@ src/
 ## Debug event code rule
 
 Use `docs/DEBUG_EVENT_CODES.md` for human-only Debug.md event codes. These are not Postmortem `error_tags`, are not Top 3 Error Tag inputs, and must not be injected into runtime LLM prompts.
+
+- When refactoring or rewriting existing code, preserve all existing validation rules and safety invariants. Do not silently weaken gates such as temperature=0, live trading gates, fail-closed config loading, or kis_mock exclusion. Report explicitly that existing safety invariants were preserved.
