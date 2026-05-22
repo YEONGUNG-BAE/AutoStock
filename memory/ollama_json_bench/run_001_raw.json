@@ -1,0 +1,16 @@
+{
+  "model": "qwen3.6:35b",
+  "created_at": "2026-05-22T12:32:30.315272Z",
+  "message": {
+    "role": "assistant",
+    "content": "{\"ok\": true, \"action\": \"HOLD\", \"summary_one_liner\": \"smoke test\"}"
+  },
+  "done": true,
+  "done_reason": "stop",
+  "total_duration": 7037746875,
+  "load_duration": 5655181625,
+  "prompt_eval_count": 109,
+  "prompt_eval_duration": 473542875,
+  "eval_count": 24,
+  "eval_duration": 842419251
+}

@@ -105,11 +105,19 @@ def _smoke_messages() -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": "Return only one JSON object matching the requested schema.",
+            "content": (
+                "You are a JSON API. Return only a raw JSON object. Do not use markdown. "
+                "Do not use code fences. Do not wrap the JSON in a json code block. "
+                "Do not add explanations. The first character of your response must be { "
+                "and the last character must be }."
+            ),
         },
         {
             "role": "user",
-            "content": '{"ok": true, "action": "HOLD", "summary_one_liner": "smoke test"}',
+            "content": (
+                'Return this exact raw JSON object, without markdown or code fences: '
+                '{"ok": true, "action": "HOLD", "summary_one_liner": "smoke test"}'
+            ),
         },
     ]
 
