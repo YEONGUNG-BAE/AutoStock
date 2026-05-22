@@ -6,7 +6,9 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from domain._datetime import require_timezone_aware_datetime
 from domain._decimal import to_decimal, to_optional_decimal
+from domain._strings import normalize_required_string
 from domain.position import CashSnapshot, Position
 
 
@@ -18,7 +20,7 @@ class PortfolioSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    snapshot_id: str = Field(min_length=1)
+    snapshot_id: str
     as_of: datetime
     positions: tuple[Position, ...]
     cash: tuple[CashSnapshot, ...]
@@ -26,6 +28,16 @@ class PortfolioSnapshot(BaseModel):
     cash_krw: Decimal = Field(ge=Decimal("0"))
     invested_percent: Decimal
     mdd_percent: Decimal | None = None
+
+    @field_validator("snapshot_id", mode="before")
+    @classmethod
+    def validate_snapshot_id(cls, value: Any) -> str:
+        return normalize_required_string(value, field_name="snapshot_id")
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def validate_as_of(cls, value: Any) -> datetime:
+        return require_timezone_aware_datetime(value, field_name="as_of")
 
     @field_validator("total_nav_krw", "cash_krw", "invested_percent", mode="before")
     @classmethod
@@ -53,13 +65,23 @@ class NavSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    snapshot_id: str = Field(min_length=1)
+    snapshot_id: str
     as_of: datetime
     total_nav_krw: Decimal = Field(ge=Decimal("0"))
     cash_krw: Decimal = Field(ge=Decimal("0"))
     invested_krw: Decimal = Field(ge=Decimal("0"))
     daily_return_percent: Decimal | None = None
     mdd_percent: Decimal | None = None
+
+    @field_validator("snapshot_id", mode="before")
+    @classmethod
+    def validate_snapshot_id(cls, value: Any) -> str:
+        return normalize_required_string(value, field_name="snapshot_id")
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def validate_as_of(cls, value: Any) -> datetime:
+        return require_timezone_aware_datetime(value, field_name="as_of")
 
     @field_validator("total_nav_krw", "cash_krw", "invested_krw", mode="before")
     @classmethod

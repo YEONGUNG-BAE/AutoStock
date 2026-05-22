@@ -6,7 +6,9 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from domain._datetime import require_timezone_aware_datetime
 from domain._decimal import to_decimal, to_optional_decimal
+from domain._strings import normalize_required_string
 from domain.enums import AccountRole, AssetClass, Currency, Market
 
 
@@ -15,7 +17,7 @@ class Position(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    symbol: str = Field(min_length=1)
+    symbol: str
     market: Market
     asset_class: AssetClass
     account_role: AccountRole
@@ -23,6 +25,11 @@ class Position(BaseModel):
     avg_cost: Decimal = Field(ge=Decimal("0"))
     currency: Currency
     market_price: Decimal | None = None
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def validate_symbol(cls, value: Any) -> str:
+        return normalize_required_string(value, field_name="symbol")
 
     @field_validator("quantity", "avg_cost", mode="before")
     @classmethod
@@ -61,3 +68,8 @@ class CashSnapshot(BaseModel):
     @classmethod
     def validate_amount(cls, value: Any) -> Decimal:
         return to_decimal(value, field_name="amount")
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def validate_as_of(cls, value: Any) -> datetime:
+        return require_timezone_aware_datetime(value, field_name="as_of")

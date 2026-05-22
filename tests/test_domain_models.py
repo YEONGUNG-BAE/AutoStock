@@ -30,10 +30,14 @@ from domain import (
     OrderType,
     PortfolioSnapshot,
     Position,
+    TimeInForce,
 )
 
 
 NOW = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+
+
+NAIVE_NOW = datetime(2026, 5, 22, 12, 0)
 
 
 def test_money_preserves_decimal_amount_and_currency() -> None:
@@ -65,9 +69,52 @@ def test_market_price_rejects_non_finite_price() -> None:
         )
 
 
+def test_market_price_rejects_naive_as_of() -> None:
+    with pytest.raises(ValidationError, match="as_of must be a timezone-aware datetime"):
+        MarketPrice(
+            symbol="005930",
+            market=Market.KR,
+            currency=Currency.KRW,
+            price=Decimal("100"),
+            as_of=NAIVE_NOW,
+        )
+
+
+def test_market_price_rejects_blank_symbol() -> None:
+    with pytest.raises(ValidationError, match="symbol must not be blank"):
+        MarketPrice(
+            symbol=" ",
+            market=Market.KR,
+            currency=Currency.KRW,
+            price=Decimal("100"),
+            as_of=NOW,
+        )
+
+
 def test_order_intent_requires_quantity_or_target_weight_percent() -> None:
-    with pytest.raises(ValidationError, match="quantity or target_weight_percent"):
+    with pytest.raises(ValidationError, match="exactly one of quantity or target_weight_percent"):
         _order_intent(quantity=None, target_weight_percent=None)
+
+
+def test_order_intent_rejects_both_quantity_and_target_weight_percent() -> None:
+    with pytest.raises(ValidationError, match="exactly one of quantity or target_weight_percent"):
+        _order_intent(quantity=Decimal("10"), target_weight_percent=Decimal("5"))
+
+
+def test_order_intent_defaults_time_in_force_to_day() -> None:
+    intent = _order_intent()
+
+    assert intent.time_in_force == TimeInForce.DAY
+
+
+def test_order_intent_rejects_naive_created_at() -> None:
+    with pytest.raises(ValidationError, match="created_at must be a timezone-aware datetime"):
+        _order_intent(created_at=NAIVE_NOW)
+
+
+def test_order_intent_rejects_blank_order_id() -> None:
+    with pytest.raises(ValidationError, match="order_id must not be blank"):
+        _order_intent(order_id=" ")
 
 
 def test_order_intent_rejects_non_positive_quantity() -> None:
@@ -128,6 +175,16 @@ def test_fill_rejects_negative_commission_or_tax() -> None:
         _fill(tax=Money(amount=Decimal("-1"), currency=Currency.KRW))
 
 
+def test_fill_rejects_naive_filled_at() -> None:
+    with pytest.raises(ValidationError, match="filled_at must be a timezone-aware datetime"):
+        _fill(filled_at=NAIVE_NOW)
+
+
+def test_fill_rejects_blank_fill_id() -> None:
+    with pytest.raises(ValidationError, match="fill_id must not be blank"):
+        _fill(fill_id=" ")
+
+
 def test_position_market_value_prefers_market_price() -> None:
     position = Position(
         symbol="005930",
@@ -166,6 +223,16 @@ def test_cash_snapshot_rejects_negative_amount() -> None:
         )
 
 
+def test_cash_snapshot_rejects_naive_as_of() -> None:
+    with pytest.raises(ValidationError, match="as_of must be a timezone-aware datetime"):
+        CashSnapshot(
+            currency=Currency.KRW,
+            amount=Decimal("1000"),
+            account_role=AccountRole.PAPER,
+            as_of=NAIVE_NOW,
+        )
+
+
 def test_portfolio_snapshot_rejects_invested_percent_outside_range() -> None:
     with pytest.raises(ValidationError, match="invested_percent must be between 0 and 100"):
         PortfolioSnapshot(
@@ -193,6 +260,32 @@ def test_portfolio_snapshot_rejects_positive_mdd_percent() -> None:
         )
 
 
+def test_portfolio_snapshot_rejects_naive_as_of() -> None:
+    with pytest.raises(ValidationError, match="as_of must be a timezone-aware datetime"):
+        PortfolioSnapshot(
+            snapshot_id="snap-1",
+            as_of=NAIVE_NOW,
+            positions=(),
+            cash=(),
+            total_nav_krw=Decimal("1000000"),
+            cash_krw=Decimal("200000"),
+            invested_percent=Decimal("80"),
+        )
+
+
+def test_portfolio_snapshot_rejects_blank_snapshot_id() -> None:
+    with pytest.raises(ValidationError, match="snapshot_id must not be blank"):
+        PortfolioSnapshot(
+            snapshot_id=" ",
+            as_of=NOW,
+            positions=(),
+            cash=(),
+            total_nav_krw=Decimal("1000000"),
+            cash_krw=Decimal("200000"),
+            invested_percent=Decimal("80"),
+        )
+
+
 def test_nav_snapshot_rejects_total_nav_mismatch_beyond_tolerance() -> None:
     with pytest.raises(ValidationError, match="total_nav_krw must match cash_krw \\+ invested_krw"):
         NavSnapshot(
@@ -201,6 +294,17 @@ def test_nav_snapshot_rejects_total_nav_mismatch_beyond_tolerance() -> None:
             total_nav_krw=Decimal("1000"),
             cash_krw=Decimal("300"),
             invested_krw=Decimal("600"),
+        )
+
+
+def test_nav_snapshot_rejects_naive_as_of() -> None:
+    with pytest.raises(ValidationError, match="as_of must be a timezone-aware datetime"):
+        NavSnapshot(
+            snapshot_id="nav-1",
+            as_of=NAIVE_NOW,
+            total_nav_krw=Decimal("1000"),
+            cash_krw=Decimal("300"),
+            invested_krw=Decimal("700"),
         )
 
 
@@ -252,13 +356,15 @@ def test_domain_package_exports_only_stable_public_types() -> None:
 
 def _order_intent(
     *,
+    order_id: str = "order-1",
     quantity: Decimal | None = Decimal("10"),
     target_weight_percent: Decimal | None = None,
     order_type: OrderType = OrderType.MARKET,
     limit_price: Decimal | None = None,
+    created_at: datetime = NOW,
 ) -> OrderIntent:
     return OrderIntent(
-        order_id="order-1",
+        order_id=order_id,
         correlation_id="corr-1",
         symbol="005930",
         market=Market.KR,
@@ -270,19 +376,21 @@ def _order_intent(
         quantity=quantity,
         target_weight_percent=target_weight_percent,
         limit_price=limit_price,
-        created_at=NOW,
+        created_at=created_at,
     )
 
 
 def _fill(
     *,
+    fill_id: str = "fill-1",
     quantity: Decimal = Decimal("10"),
     fill_price: Decimal = Decimal("100"),
     commission: Money = Money(amount=Decimal("1"), currency=Currency.KRW),
     tax: Money = Money(amount=Decimal("0"), currency=Currency.KRW),
+    filled_at: datetime = NOW,
 ) -> Fill:
     return Fill(
-        fill_id="fill-1",
+        fill_id=fill_id,
         order_id="order-1",
         symbol="005930",
         market=Market.KR,
@@ -291,5 +399,5 @@ def _fill(
         fill_price=fill_price,
         commission=commission,
         tax=tax,
-        filled_at=NOW,
+        filled_at=filled_at,
     )
