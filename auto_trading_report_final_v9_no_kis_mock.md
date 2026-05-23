@@ -1919,7 +1919,7 @@ KIS 모의투자에 의존하지 않는 자체 장기 paper trading ledger를 �
 - cash mutation public path는 `apply_cash_change()`로 제한
 - 현재 테스트 baseline: `125 passed`
 
-### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [NEXT]
+### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [DONE]
 
 LLM 판단 결과를 replay 가능한 구조로 저장하기 위한 schema와 snapshot 기반을 만든다.
 
@@ -1938,7 +1938,7 @@ LLM 판단 결과를 replay 가능한 구조로 저장하기 위한 schema와 sn
 
 이 Phase에서는 외부 API, Allocator 판단 로직, Analysis 로직, RiskFilter, OrderIntent 생성은 구현하지 않는다.
 
-### Phase 5 — Date-ID Store / Evidence Source Layer
+### Phase 5 — Date-ID Store / Evidence Source Layer [NEXT]
 
 LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 근거 저장 계층을 만든다.
 

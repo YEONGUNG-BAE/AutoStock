@@ -1,6 +1,8 @@
 from config.settings import ExecutionMode
 
 from domain.decision import DecisionSnapshot, EvidenceRef
+from domain.source import DateIdSourceRecord, FactType
+from domain.staleness import StalenessPolicy
 from domain.enums import (
     AccountRole,
     AssetClass,
@@ -25,9 +27,11 @@ __all__ = [
     "CashSnapshot",
     "Currency",
     "DateId",
+    "DateIdSourceRecord",
     "DecisionId",
     "DecisionSnapshot",
     "EvidenceRef",
+    "FactType",
     "ExecutionMode",
     "Fill",
     "Market",
@@ -42,6 +46,7 @@ __all__ = [
     "Percent",
     "PortfolioSnapshot",
     "Position",
+    "StalenessPolicy",
     "TimeInForce",
     "ValidationIssue",
     "ValidationResult",

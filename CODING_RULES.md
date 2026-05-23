@@ -203,7 +203,7 @@ src/
   - transaction rollback preserves `current_cash` and `paper_cash_ledger` consistency
 - 현재 테스트 baseline: `125 passed`
 
-### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [NEXT]
+### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [DONE]
 
 목표: LLM 투자 판단과 이후 replay 가능한 실행 흐름의 기반 스키마를 만든다.
 
@@ -250,7 +250,7 @@ src/
 - Scheduler 구현 금지
 - KIS 구현 금지
 
-### Phase 5 — Date-ID Store / Evidence Source Layer
+### Phase 5 — Date-ID Store / Evidence Source Layer [NEXT]
 
 목표: LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 저장/검증 계층을 만든다.
 
