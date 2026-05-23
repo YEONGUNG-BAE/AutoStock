@@ -337,6 +337,10 @@ def test_domain_package_exports_only_stable_public_types() -> None:
         "AssetClass",
         "CashSnapshot",
         "Currency",
+        "DateId",
+        "DecisionId",
+        "DecisionSnapshot",
+        "EvidenceRef",
         "ExecutionMode",
         "Fill",
         "Market",
@@ -348,9 +352,13 @@ def test_domain_package_exports_only_stable_public_types() -> None:
         "OrderSide",
         "OrderStatus",
         "OrderType",
+        "Percent",
         "PortfolioSnapshot",
         "Position",
         "TimeInForce",
+        "ValidationIssue",
+        "ValidationResult",
+        "ValidationSeverity",
     }
 
 
