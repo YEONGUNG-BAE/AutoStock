@@ -48,10 +48,10 @@ Before coding, open only the relevant rule file:
 - **Phase 2** — Core Domain Models **[DONE]**
 - **Phase 2.1** — Domain Validation Hardening **[DONE]**
 - **Phase 3** — PaperBrokerAdapter / SQLiteLedger / Paper Ledger **[DONE]**
-- **Phase 4** — Decision Schema / DecisionSnapshot / Replay Foundation **[NEXT]**
-- **Phase 5** — Date-ID Store / Evidence Source Layer
-- **Phase 6** — Data API Read-only Adapters
-- **Phase 7** — Scout Input Builder / ScoutSummary Schema
+- **Phase 4** — Decision Schema / DecisionSnapshot / Replay Foundation **[DONE]**
+- **Phase 5** — Date-ID Store / Evidence Source Layer **[DONE]**
+- **Phase 6** — Data API Read-only Adapters **[DONE]**
+- **Phase 7** — Scout Input Builder / ScoutSummary Schema **[NEXT]**
 - **Phase 8** — Allocator Decision Schema + Validator
 - **Phase 9** — Analysis Decision Schema + Validator
 - **Phase 10** — RiskFilter + OrderIntent Generation

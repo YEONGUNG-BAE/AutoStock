@@ -1938,7 +1938,7 @@ LLM 판단 결과를 replay 가능한 구조로 저장하기 위한 schema와 sn
 
 이 Phase에서는 외부 API, Allocator 판단 로직, Analysis 로직, RiskFilter, OrderIntent 생성은 구현하지 않는다.
 
-### Phase 5 — Date-ID Store / Evidence Source Layer [NEXT]
+### Phase 5 — Date-ID Store / Evidence Source Layer [DONE]
 
 LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 근거 저장 계층을 만든다.
 
@@ -1956,7 +1956,7 @@ LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있�
 
 이 Phase에서는 실제 FRED/DART/yfinance/news 호출은 구현하지 않는다.
 
-### Phase 6 — Data API Read-only Adapters
+### Phase 6 — Data API Read-only Adapters [DONE]
 
 외부 데이터를 read-only로 수집하는 adapter 계층을 만든다.
 
@@ -1972,7 +1972,7 @@ LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있�
 
 뉴스 API는 이 단계 이후로 보류할 수 있다. Unit test에서 실제 외부 네트워크 호출은 금지한다.
 
-### Phase 7 — Scout Input Builder / ScoutSummary Schema
+### Phase 7 — Scout Input Builder / ScoutSummary Schema [NEXT]
 
 Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
 

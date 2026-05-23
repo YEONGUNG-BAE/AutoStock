@@ -250,7 +250,7 @@ src/
 - Scheduler 구현 금지
 - KIS 구현 금지
 
-### Phase 5 — Date-ID Store / Evidence Source Layer [NEXT]
+### Phase 5 — Date-ID Store / Evidence Source Layer [DONE]
 
 목표: LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 저장/검증 계층을 만든다.
 
@@ -280,7 +280,7 @@ src/
 - Analysis 구현 금지
 - RiskFilter 구현 금지
 
-### Phase 6 — Data API Read-only Adapters
+### Phase 6 — Data API Read-only Adapters [DONE]
 
 목표: 외부 데이터를 read-only로 가져오되, unit test에서는 전부 fake client로 격리한다.
 
@@ -302,7 +302,7 @@ src/
 - trading decision 구현 금지
 - broker execution과 직접 연결 금지
 
-### Phase 7 — Scout Input Builder / ScoutSummary Schema
+### Phase 7 — Scout Input Builder / ScoutSummary Schema [NEXT]
 
 목표: Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
 
