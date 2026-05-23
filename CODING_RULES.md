@@ -101,82 +101,415 @@ src/
 
 ## MVP 구현 순서
 
-### Phase 0 — 런타임 설정
+> **Phase numbering policy**
+>
+> 본 프로젝트의 Phase 번호는 이제 실제 구현 이력 기준으로 고정한다.
+> Phase 0, 1, 2, 2.1, 3은 이미 완료된 구현 단위로 간주하며 되돌리거나 재해석하지 않는다.
+> 과거 기획안 또는 legacy CODING_RULES에서 더 이른 Phase에 배치되어 있었지만 아직 구현되지 않은 항목은 Phase 4 이후로 재배치한다.
+>
+> Cursor 작업 지시에서 "Phase N"이라고 하면 아래 canonical phase numbering을 따른다.
+> legacy phase numbering과 충돌하면 아래 목록을 우선한다.
+> 이미 구현된 Phase 0~3 코드는 문서 정합성을 위해 재작성하지 않는다.
 
-- `config.toml` 작성
-- `src/config.py` typed loader 작성
-- 기본값은 `paper` 모드
-- live 모드는 `mode = "live"` + `allow_live_trading = true` + 환경변수 확인이 모두 필요
+### Phase 0 — Runtime Config / Live Gate [DONE]
 
-### Phase 1 — 스키마와 상태
+- `config.toml` 기반 typed settings loader
+- environment variable substitution
+- `trading.mode = paper | live`
+- `broker.adapter = paper | kis_live`
+- 기본값은 paper mode
+- `config.toml` 부재 시 fail-closed
+- live mode는 다음 조건을 모두 만족해야만 허용
+  - `trading.mode = live`
+  - `broker.adapter = kis_live`
+  - `allow_live_trading = true`
+  - `LIVE_TRADING_CONFIRM` 확인 문구 일치
+  - live credentials 존재
+- `kis_mock` / `KIS_MOCK_*` 제외
 
-- `Percent`, `DateId`, `DecisionId` 모델 작성
-- `AllocatorDecision`, `AnalysisDecision`, `ScoutSummary` Pydantic 모델 작성
-- `DailySummary`, `DebugEvent`, `PostmortemRecord`, `DecisionSnapshot` 저장 모델 작성
+### Phase 1 — Ollama JSON Harness / RunManifest [DONE]
 
-### Phase 2 — LLM 출력 검증
+- Ollama HTTP client
+- JSON-only runner
+- Pydantic validation runner
+- raw response / parsed JSON / validation result 분리
+- parse error / validation error / Ollama API error / Ollama client error 구분
+- markdown/code-fence output은 sanitizer 없이 실패 처리
+- `temperature = 0`만 허용
+- Ollama request payload에 `think` 명시
+- `seed = 42` 기본
+- RunManifest
+- smoke bench script
+- unit test에서 실제 Ollama/network 호출 금지
 
-- JSON-only parser
-- markdown fence 제거 방어
-- enum 검증
-- Date-ID 존재 검증
-- Date-ID stale 검증
-- `reasons[].date_id` 검증
-- 실패 시 Debug.md 기술 이벤트 기록
+### Phase 2 — Core Domain Models [DONE]
 
-### Phase 3 — Allocator
+- `Money`
+- `MarketPrice`
+- `OrderIntent`
+- `OrderResult`
+- `Fill`
+- `Position`
+- `CashSnapshot`
+- `PortfolioSnapshot`
+- `NavSnapshot`
+- `ExecutionMode`는 config enum 재사용
+- Decimal 기반 금액/수량 처리
+- finite Decimal 검증
+- price/quantity/commission/tax validation
 
-- Signal Summary → Cash Manager → Asset Allocator → Consistency Checker → Final JSON
-- `cash_policy.cash_target_percent`: 전체 계좌 기준
-- `target_weights`: 현금 제외 운용 자산 기준, KR/US/Gold 합계 100
-- 금 평상시 18~22, 예외 15~25
+### Phase 2.1 — Domain Validation Hardening [DONE]
 
-### Phase 4 — 페이퍼 실행과 리플레이
+- 모든 domain datetime은 timezone-aware 강제
+- blank string strip + reject
+- `OrderIntent.time_in_force = DAY`
+- `quantity`와 `target_weight_percent`는 정확히 하나만 허용
+- `MARKET` 주문은 `limit_price = None`
+- `LIMIT` 주문은 `limit_price > 0` 필수
 
-- OrderIntent 모델 작성
-- PaperBrokerAdapter 체결 시뮬레이션
-- `paper_orders`, `paper_fills`, `paper_positions`, `paper_cash_ledger`, `paper_nav_snapshots` ledger 작성
+### Phase 3 — PaperBrokerAdapter / SQLiteLedger / Paper Ledger [DONE]
+
+- `BrokerAdapter` Protocol
+- `PaperBrokerAdapter`
+- `SQLiteLedger`
+- `order_intents`
+- `order_results`
+- `fills`
+- `current_cash`
+- `current_positions`
+- append-only `paper_cash_ledger`
+- `nav_snapshots` 저장
+- SQLite serialization rule
+  - Decimal → string
+  - datetime → ISO 8601 string
+  - enum → value string
+- 복원 시 domain model validation 재사용
+- duplicate `order_id` 중복 체결 금지
+- rejected/pending order는 fill/cash/position side effect 금지
+- `target_weight_percent` 주문은 broker 단계에서 sizing하지 않고 reject
+- `OrderIntent`와 `MarketPrice`의 symbol/market/currency mismatch reject
+- LIMIT fill policy
+  - MARKET: `fill_price = market_price.price`
+  - BUY LIMIT: `market_price.price <= limit_price`일 때 체결, `fill_price = market_price.price`
+  - SELL LIMIT: `market_price.price >= limit_price`일 때 체결, `fill_price = market_price.price`
+  - Phase 3 단순 모델에는 bid/ask/orderbook이 없으므로 LIMIT과 MARKET의 차이는 PENDING 게이팅뿐
+- `slippage = Money.zero(currency)`
+- cash mutation public path는 `apply_cash_change()` 하나로 제한
+- post-hardening (Phase 3 cleanup, no new features)
+  - `apply_cash_change()` validates delta/balance consistency
+  - cash mutation public path is restricted to `apply_cash_change()` (`_upsert_cash`, `_append_cash_ledger_entry` are internal)
+  - insufficient position SELL does not call fee calculator
+  - cash ledger delta sum must match `current_cash`
+  - transaction rollback preserves `current_cash` and `paper_cash_ledger` consistency
+- 현재 테스트 baseline: `125 passed`
+
+### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [NEXT]
+
+목표: LLM 투자 판단과 이후 replay 가능한 실행 흐름의 기반 스키마를 만든다.
+
+구현 대상:
+
+- value objects
+  - `Percent`
+  - `DateId`
+  - `DecisionId`
+- evidence/reference model
+  - `SourceRef` 또는 `EvidenceRef`
+  - `reason`
+  - `date_id`
+  - optional source metadata
+- validation result model
+  - schema validation result
+  - Date-ID validation result
+  - stale validation result
+  - rule validation result
+- `DecisionSnapshot`
+  - `decision_id`
+  - `created_at`
+  - `schema_name`
+  - `raw_payload`
+  - `normalized_payload`
+  - `validation_result`
+  - optional `order_intent_ids`
+  - replay metadata
+- DecisionSnapshot persistence
+- deterministic replay foundation
+  - same input → same normalized payload
+  - same input → same validation_result
+  - same valid decision → same generated intent skeleton, if implemented later
+- DebugEvent skeleton, only if needed for validation failure recording
+
+금지:
+
+- 외부 API 호출 금지
+- FRED/DART/yfinance 실제 adapter 구현 금지
+- Allocator 판단 로직 구현 금지
+- Analysis 4역할 판단 로직 구현 금지
+- RiskFilter 구현 금지
+- OrderIntent 생성 로직 구현 금지
+- Scheduler 구현 금지
+- KIS 구현 금지
+
+### Phase 5 — Date-ID Store / Evidence Source Layer
+
+목표: LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 저장/검증 계층을 만든다.
+
+구현 대상:
+
+- Date-ID record model
+- Date-ID storage
+- source timestamp
+- fact type
+  - PRICE
+  - FLOW
+  - FX
+  - NEWS
+  - DISCLOSURE
+  - MACRO
+  - MANUAL
+- allowed staleness policy
+- Date-ID existence validation
+- Date-ID stale validation
+- `reasons[].date_id` validation
+- Date-ID validation failure 시 DebugEvent 기록
+
+금지:
+
+- 실제 FRED/DART/yfinance/news API 호출 금지
+- Allocator 구현 금지
+- Analysis 구현 금지
+- RiskFilter 구현 금지
+
+### Phase 6 — Data API Read-only Adapters
+
+목표: 외부 데이터를 read-only로 가져오되, unit test에서는 전부 fake client로 격리한다.
+
+구현 대상:
+
+- yfinance read-only adapter
+- FRED read-only adapter
+- DART read-only adapter
+- adapter protocol
+- fake clients for unit tests
+- fetched data → Date-ID source record 변환
+- source timestamp 저장
+- stale validation과 연결
+
+금지:
+
+- unit test에서 실제 외부 네트워크 호출 금지
+- news API는 이 Phase 이후로 보류 가능
+- trading decision 구현 금지
+- broker execution과 직접 연결 금지
+
+### Phase 7 — Scout Input Builder / ScoutSummary Schema
+
+목표: Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
+
+구현 대상:
+
+- Scout input builder
+- ScoutSummary schema
+- positive / negative / neutral factor structure
+- `summary_one_liner`
+- all reasons must cite Date-ID
+- Date-ID existence/stale validation integration
+- JSON validation failure handling
+
+금지:
+
+- 실제 종목 매매 판단 금지
+- Allocator 구현 금지
+- RiskFilter 구현 금지
+- OrderIntent 생성 금지
+
+### Phase 8 — Allocator Decision Schema + Validator
+
+목표: 자산군 배분 판단 JSON schema와 Python validator를 만든다.
+
+구현 대상:
+
+- `AllocatorDecision`
+- Signal Summary
+- Cash Manager
+- Asset Allocator
+- Consistency Checker
+- `cash_policy.cash_target_percent`
+  - 전체 계좌 기준
+- `target_weights`
+  - 현금 제외 운용 자산 기준
+  - KR/US/Gold 합계 100
+- gold rule
+  - 평상시 18~22
+  - 예외 15~25
+- action / adjust_percent sign consistency
+- all reasons require Date-ID
+- invalid Allocator output은 부분 채택하지 않고 전체 폐기
+
+금지:
+
+- 실제 주문 생성 금지
+- PaperBroker 실행 금지
+- KIS 호출 금지
+
+### Phase 9 — Analysis Decision Schema + Validator
+
+목표: 종목 분석 4역할 JSON schema와 validator를 만든다.
+
+구현 대상:
+
+- `AnalysisDecision`
+- Bear perspective
+- Bull perspective
+- Risk Manager evaluation
+- Fund Manager decision
+- `summary_one_liner`
+- action: BUY / SELL / HOLD
+- weight percent
+- Date-ID required for reasoning
+- validation failure handling
+
+금지:
+
+- Analysis 결과로 직접 broker 호출 금지
+- OrderIntent 생성은 Phase 10에서 수행
+- RiskFilter 구현 금지
+
+### Phase 10 — RiskFilter + OrderIntent Generation
+
+목표: validated Allocator/Analysis output을 Python hard filter로 검증하고 `OrderIntent`를 생성한다.
+
+구현 대상:
+
+- single position cumulative principal cap: 5%
+- invested percent rule
+  - NORMAL: production target 70~90%
+  - paper observation mode lower bound can be configured down to 50%
+- cash band: 10~30%
+- asset class soft band
+- MDD killswitch thresholds
+  - -10% → target cash 50%
+  - -15% → target cash 80%
+  - -20% → target cash 95%
+- directional slippage
+  - KR 0.5%
+  - US 0.2%
+- gold trade frequency
+  - monthly 0~2
+  - quarterly <= 4
+- LLM self-reported confidence must not be used as MVP hard filter
+- validated decision → OrderIntent generation
+
+금지:
+
+- KIS live 주문 금지
+- live mode 우회 금지
+- PaperBroker 외부 가격 조회 금지
+
+### Phase 11 — Paper E2E Loop
+
+목표: LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper loop를 연결한다.
+
+구현 대상:
+
+- ScoutSummary / AllocatorDecision / AnalysisDecision loading
+- validation result
 - DecisionSnapshot 저장
-- 같은 입력에서 같은 validation_result와 order_intent가 나오는 replay test 작성
+- RiskFilter
+- OrderIntent generation
+- PaperBrokerAdapter submit_order
+- order/fill/cash/position/nav persistence
+- replay test
+  - same input → same validation_result
+  - same input → same OrderIntent
+  - same PaperBroker input → same order/fill/cash/position effect
 
-### Phase 5 — Risk filters
+금지:
 
-- 단일 종목 누적 매수 원금 기준 5%
-- 운용 부분 프로덕션 목표 70~90% (`NORMAL` 모드 하드 필터)
-- `REBALANCING`/`EMERGENCY_TRIGGER`/`MDD_KILLSWITCH`에서는 운용 하한 일시 이탈 허용 후 복구 리뷰 기록
-- 페이퍼 관찰 모드 하한은 명시적 config로 50%까지 완화 가능
-- 현금 10~30%
-- 자산군 소프트 밴드
-- MDD 킬스위치 (-10%/50%, -15%/80%, -20%/95%)
-- 방향성 슬리피지 (KR 0.5%, US 0.2%)
-- 금 매매 빈도 (월 0~2회, 분기 4회 이하)
-- 초기 MVP에서는 LLM 자기평가식 confidence를 하드필터로 사용하지 않음
+- KIS live 주문 금지
+- external API calls in unit tests 금지
 
-### Phase 6 — 로그
+### Phase 12 — Logs / DailySummary / Debug Events
 
-- DailySummary 작성
-- Debug.md 기술/운영 이벤트 작성
-- 리플레이 가능한 이벤트 로그
+목표: 운영 및 기술 이벤트를 replay 가능한 로그로 남긴다.
 
-### Phase 7 — Postmortem
+구현 대상:
 
-- 국장/미장 WeeklyPostmortem 분리
-- 국장/미장 MonthlyPostmortem 분리
+- DailySummary
+- DebugEvent
+- Debug.md writer
+- technical event vs operational event separation
+- replayable event log
+- Debug event codes
+- Debug.md event codes are not Postmortem `error_tags`
+
+금지:
+
+- Debug.md event code를 runtime LLM prompt에 주입 금지
+- Debug.md event code를 Postmortem Top 3 Error Tags에 사용 금지
+
+### Phase 13 — Postmortem
+
+목표: 국장/미장 weekly/monthly postmortem을 분리하고 error_tags를 관리한다.
+
+구현 대상:
+
+- WeeklyPostmortem KR
+- WeeklyPostmortem US
+- MonthlyPostmortem KR
+- MonthlyPostmortem US
+- Postmortem `error_tags`
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Postmortem용 `error_tags`를 저장하지 않으며 Top 3에서 제외
 
-### Phase 8 — KIS live read-only / tiny-live rehearsal
+### Phase 14 — KIS live read-only / Tiny-live Rehearsal
 
-- KIS 모의투자 adapter는 MVP 기본 경로에서 제외
-- live 계좌는 먼저 `allow_live_trading=false` 상태에서 read-only 조회만 검증
-- access token, 잔고조회, 현재가/호가, ISA 계좌 조회를 먼저 검증
-- 주문 endpoint 검증은 실전 전환 직전 극소액 수동 tiny-live에서만 수행
-- ISA 계좌 smoke test 통과 전까지 ISA 자동 주문 금지
+목표: 실전 계좌는 read-only 검증부터 시작하고, 주문 endpoint는 극소액 수동 tiny-live 직전에만 검증한다.
 
-### Phase 9 — Emergency triggers
+구현 대상:
 
-- STOCK_DROP, INDEX_CRASH, PORTFOLIO_LOSS, PROFIT_RUN
-- 초기 parser/validator/paper broker/replay test 안정화 후 구현
+- KIS live read-only adapter
+- access token
+- balance inquiry
+- current price inquiry
+- orderbook inquiry
+- ISA account support check
+- `allow_live_trading=false` 상태에서 read-only 검증
+- tiny-live manual rehearsal
+
+금지:
+
+- KIS mock adapter 재도입 금지
+- KIS 모의투자를 장기 paper ledger로 사용 금지
+- ISA smoke test 통과 전 ISA 자동 주문 금지
+- live order endpoint 자동 호출 금지
+
+### Phase 15 — Emergency Triggers
+
+목표: parser/validator/paper broker/replay 안정화 후 긴급 트리거를 구현한다.
+
+구현 대상:
+
+- STOCK_DROP
+- INDEX_CRASH
+- PORTFOLIO_LOSS
+- PROFIT_RUN
+- TriggerPayload schema
+- throttling rule
+- emergency Scout context
+- MDD_KILLSWITCH는 Python 룰베이스
+
+### Phase 16 — Long Paper Trading Review / Parameter Review
+
+목표: 장기 paper data를 기반으로 파라미터를 검토한다.
+
+구현 대상:
+
+- 3~6개월 paper result review
+- MDD threshold review
+- execution model review
+- asset band review
+- Allocator tolerance review
 
 ## PR 체크리스트
 

@@ -1838,16 +1838,305 @@ DailySummary가 누적된 데이터를 압축하여 중장기 흐름을 인지�
 
 ---
 
-## 7. 향후 실행 계획
+## 7. 구현 로드맵
 
-1. **Phase 0 — Mac/Ollama 기준선 확정 (현재):** Ollama 설치, 모델 pull, digest 기록, JSON-only 출력 안정성, Pydantic 검증률, latency, RAM/swap 측정. 통과 조합을 `stable baseline` 후보로 기록한다.
-2. **Phase 1 — Config + Domain + JSON Schema:** `config.toml`, `ExecutionMode`, `OrderIntent`, `DecisionSnapshot`, LLM 출력 스키마, Date-ID 검증, RunManifest/SecretsManifest 골격 구현.
-3. **Phase 2 — 자체 PaperBrokerAdapter:** 내부 paper ledger 기반 주문·체결·현금·포지션·NAV·MDD 기록 구현. KIS 모의투자 adapter에 의존하지 않는 장기 페이퍼 트레이딩 루프를 먼저 완성한다.
-4. **Phase 3 — 데이터 API 연결:** FRED, DART, yfinance를 read-only로 연결하고, Date-ID 저장·stale 검증·Scout 입력 생성을 구현한다. 뉴스 API는 이 단계 이후로 미룬다.
-5. **Phase 4 — Allocator + Analysis 연결:** Allocator JSON 검증, Analysis 4역할 JSON 검증, RiskFilter, OrderIntent 생성, PaperBroker 체결까지 end-to-end로 연결한다.
-6. **Phase 5 — KIS live read-only 및 tiny-live 리허설:** 실전 계좌를 `allow_live_trading=false` 상태에서 read-only로 연결해 access token, 잔고조회, 현재가/호가, ISA API 지원 여부를 검증한다. 주문 endpoint 검증은 실전 전환 직전 극소액 수동 승인 tiny-live에서만 수행한다.
-7. **Phase 6 — 장기 페이퍼 트레이딩:** 자체 paper ledger 기준으로 3~6개월 누적 성과, MDD, 자산군 비중, 금 매매 빈도, Postmortem error_tags를 검증한다.
-8. **Phase 7 — 극소액 live 검토:** live gate, 수동 승인, 실전 계좌 read-only 검증, KIS live adapter smoke test를 통과한 뒤에만 극소액 실전 전환을 검토한다.
-9. **Phase 8 — 정기 리뷰:** 6개월 시점에 MDD 킬스위치 임계값(-10/-15/-20%, 50/80/95%), 체결 모델, 자산군 밴드, Allocator tolerance를 paper ledger 데이터 기반으로 조정 검토한다.
+> **Phase numbering policy**
+>
+> 본 프로젝트의 Phase 번호는 실제 구현 이력 기준으로 고정한다.
+> Phase 0~3은 이미 구현 및 테스트가 완료된 단위로 간주하며, 과거 기획안 또는 legacy CODING_RULES에서 더 이른 단계에 배치되어 있던 미구현 항목은 Phase 4 이후로 재배치한다.
+>
+> 기획안은 상위 로드맵을 제공하고, 세부 구현 규칙은 `CODING_RULES.md` 및 `.cursor/rules/*.mdc`를 따른다.
+
+### Phase 0 — Runtime Config / Live Gate [DONE]
+
+런타임 설정과 live trading 안전 게이트를 구현한다.
+
+완료 범위:
+
+- `config.toml` 기반 typed settings loader
+- `paper | live` trading mode
+- `paper | kis_live` broker adapter
+- config 부재 시 fail-closed
+- live mode fail-closed gate
+- `allow_live_trading`, confirmation phrase, live credentials 검증
+- `kis_mock` / `KIS_MOCK_*` 제외
+
+### Phase 1 — Ollama JSON Harness / RunManifest [DONE]
+
+로컬 Ollama 기반 JSON 출력 안정성 측정 및 검증 harness를 구현한다.
+
+완료 범위:
+
+- Ollama HTTP client
+- JSON-only runner
+- Pydantic validation runner
+- parse / validation / API / client error 구분
+- markdown/code-fence output sanitizer 없이 실패
+- `temperature=0`
+- `think` payload 명시
+- RunManifest
+- smoke bench script
+
+### Phase 2 — Core Domain Models [DONE]
+
+자동매매 시스템의 핵심 domain model을 구현한다.
+
+완료 범위:
+
+- Money
+- MarketPrice
+- OrderIntent
+- OrderResult
+- Fill
+- Position
+- CashSnapshot
+- PortfolioSnapshot
+- NavSnapshot
+- Decimal finite validation
+- timezone-aware datetime validation
+- blank string reject
+- OrderIntent sizing ambiguity 차단
+
+### Phase 3 — PaperBrokerAdapter / SQLiteLedger / Paper Ledger [DONE]
+
+KIS 모의투자에 의존하지 않는 자체 장기 paper trading ledger를 구현한다.
+
+완료 범위:
+
+- BrokerAdapter Protocol
+- PaperBrokerAdapter
+- SQLiteLedger
+- order intent/result/fill persistence
+- current cash / current positions
+- append-only `paper_cash_ledger`
+- duplicate `order_id` 중복 체결 방지
+- rejected/pending order side effect 방지
+- LIMIT fill policy
+  - MARKET과 LIMIT 모두 `fill_price = market_price.price`
+  - LIMIT은 PENDING 게이팅만 수행
+- symbol/market/currency mismatch reject
+- slippage `Money.zero(currency)` 기록
+- cash mutation public path는 `apply_cash_change()`로 제한
+- 현재 테스트 baseline: `125 passed`
+
+### Phase 4 — Decision Schema / DecisionSnapshot / Replay Foundation [NEXT]
+
+LLM 판단 결과를 replay 가능한 구조로 저장하기 위한 schema와 snapshot 기반을 만든다.
+
+목표:
+
+- Percent
+- DateId
+- DecisionId
+- EvidenceRef 또는 SourceRef
+- ValidationResult
+- DecisionSnapshot
+- DecisionSnapshot persistence
+- deterministic replay foundation
+- same input → same normalized payload
+- same input → same validation_result
+
+이 Phase에서는 외부 API, Allocator 판단 로직, Analysis 로직, RiskFilter, OrderIntent 생성은 구현하지 않는다.
+
+### Phase 5 — Date-ID Store / Evidence Source Layer
+
+LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있는 근거 저장 계층을 만든다.
+
+목표:
+
+- Date-ID record model
+- Date-ID storage
+- source timestamp
+- fact type
+- allowed staleness policy
+- Date-ID existence validation
+- Date-ID stale validation
+- `reasons[].date_id` validation
+- validation failure event 기록 기반
+
+이 Phase에서는 실제 FRED/DART/yfinance/news 호출은 구현하지 않는다.
+
+### Phase 6 — Data API Read-only Adapters
+
+외부 데이터를 read-only로 수집하는 adapter 계층을 만든다.
+
+목표:
+
+- yfinance read-only adapter
+- FRED read-only adapter
+- DART read-only adapter
+- fake client 기반 unit test
+- fetched data → Date-ID source record 변환
+- source timestamp 저장
+- stale validation과 연결
+
+뉴스 API는 이 단계 이후로 보류할 수 있다. Unit test에서 실제 외부 네트워크 호출은 금지한다.
+
+### Phase 7 — Scout Input Builder / ScoutSummary Schema
+
+Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
+
+목표:
+
+- Scout input builder
+- ScoutSummary schema
+- positive / negative / neutral factor structure
+- `summary_one_liner`
+- Date-ID 근거 필수화
+- Date-ID existence/stale validation 연동
+
+이 Phase에서는 실제 매매 판단, Allocator, RiskFilter, OrderIntent 생성은 하지 않는다.
+
+### Phase 8 — Allocator Decision Schema + Validator
+
+자산군 비중 결정을 위한 Allocator schema와 validator를 구현한다.
+
+목표:
+
+- AllocatorDecision
+- Signal Summary
+- Cash Manager
+- Asset Allocator
+- Consistency Checker
+- `cash_policy.cash_target_percent`
+- `target_weights`
+  - 현금 제외 운용 자산 기준
+  - KR/US/Gold 합계 100
+- 금 비중 룰
+  - 평상시 18~22
+  - 예외 15~25
+- action / adjust_percent sign consistency
+- Date-ID 근거 검증
+- invalid output은 부분 채택하지 않고 전체 폐기
+
+### Phase 9 — Analysis Decision Schema + Validator
+
+종목 분석 4역할 JSON schema와 validator를 구현한다.
+
+목표:
+
+- AnalysisDecision
+- Bear perspective
+- Bull perspective
+- Risk Manager evaluation
+- Fund Manager decision
+- BUY / SELL / HOLD action
+- weight percent
+- `summary_one_liner`
+- Date-ID 근거 검증
+
+이 Phase에서는 Analysis 결과가 broker를 직접 호출하지 않는다.
+
+### Phase 10 — RiskFilter + OrderIntent Generation
+
+검증된 Allocator/Analysis 결과를 Python hard filter로 검증하고 OrderIntent를 생성한다.
+
+목표:
+
+- 단일 종목 누적 매수 원금 기준 5%
+- 운용 비중 70~90%
+- paper observation mode 하한 완화 config
+- 현금 10~30%
+- 자산군 소프트 밴드
+- MDD kill switch
+- 방향성 슬리피지
+- 금 매매 빈도 제한
+- LLM confidence를 MVP hard filter로 사용하지 않음
+- validated decision → OrderIntent generation
+
+### Phase 11 — Paper E2E Loop
+
+LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를 연결한다.
+
+목표:
+
+- ScoutSummary / AllocatorDecision / AnalysisDecision loading
+- validation result
+- DecisionSnapshot 저장
+- RiskFilter
+- OrderIntent generation
+- PaperBrokerAdapter execution
+- order/fill/cash/position/nav persistence
+- replay test
+  - same input → same validation_result
+  - same input → same OrderIntent
+  - same broker input → same paper ledger effect
+
+### Phase 12 — Logs / DailySummary / Debug Events
+
+운영 로그와 기술 이벤트를 replay 가능하게 기록한다.
+
+목표:
+
+- DailySummary
+- DebugEvent
+- Debug.md writer
+- technical event / operational event 분리
+- replayable event log
+- Debug event code는 Postmortem error_tags와 분리
+
+### Phase 13 — Postmortem
+
+국장/미장 weekly/monthly postmortem과 error tag 집계를 구현한다.
+
+목표:
+
+- WeeklyPostmortem KR
+- WeeklyPostmortem US
+- MonthlyPostmortem KR
+- MonthlyPostmortem US
+- Postmortem error_tags
+- Top 3 Error Tags는 Postmortem 태그만 집계
+- Debug.md는 Top 3 집계에서 제외
+
+### Phase 14 — KIS Live Read-only / Tiny-live Rehearsal
+
+실전 계좌 연결은 read-only 검증부터 시작한다.
+
+목표:
+
+- KIS live read-only adapter
+- access token
+- balance inquiry
+- current price inquiry
+- orderbook inquiry
+- ISA account support check
+- `allow_live_trading=false` 상태에서 read-only 검증
+- tiny-live는 실전 전환 직전 극소액 수동 승인으로만 수행
+
+금지:
+
+- KIS mock adapter 재도입 금지
+- KIS 모의투자를 장기 paper ledger로 사용 금지
+- ISA smoke test 전 ISA 자동 주문 금지
+- live order endpoint 자동 호출 금지
+
+### Phase 15 — Emergency Triggers
+
+정기 분석 외 긴급 트리거를 구현한다.
+
+목표:
+
+- STOCK_DROP
+- INDEX_CRASH
+- PORTFOLIO_LOSS
+- PROFIT_RUN
+- TriggerPayload schema
+- throttling rule
+- emergency Scout context
+- MDD_KILLSWITCH는 Python rule-based로 처리
+
+### Phase 16 — Long Paper Trading Review / Parameter Review
+
+장기 paper trading 데이터를 기반으로 시스템 파라미터를 검토한다.
+
+목표:
+
+- 3~6개월 paper result review
+- MDD threshold review
+- execution model review
+- asset band review
+- Allocator tolerance review
+- live transition readiness review
 
 > 본 시스템은 **"버티는 투자"** 를 철학으로 한다. 공격적 수익 추구보다 **하방 경직성 확보**에 무게 중심을 두며, 시장이 주는 평균 수익을 안전하게 획득하는 것을 목표로 한다.

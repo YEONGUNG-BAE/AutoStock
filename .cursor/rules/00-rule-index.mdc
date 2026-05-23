@@ -36,15 +36,32 @@ Before coding, open only the relevant rule file:
 
 ## MVP implementation order
 
-1. Config loader and domain models.
-2. LLM JSON schemas and validators.
-3. Date-ID storage, existence validation, and stale validation.
-4. PaperBrokerAdapter, internal paper ledger, and replayable DecisionSnapshot/event log.
-5. Allocator parser/validator.
-6. Risk filters and OrderIntent.
-7. Scheduler.
-8. Weekly/Monthly Postmortem.
-9. KIS live read-only / tiny-live rehearsal.
-10. Emergency triggers.
+> **Phase numbering policy**
+>
+> Canonical phase numbering lives in `CODING_RULES.md`.
+> When a task says "Phase N", follow that file — not any legacy 1–10 MVP list.
+> Phase 0, 1, 2, 2.1, and 3 are **DONE**; do not reimplement or reinterpret them for doc alignment.
+> Phase 4 is **NEXT**.
 
-Emergency triggers are intentionally late. Do not implement them before parser, validator, paper broker, and replay tests are stable.
+- **Phase 0** — Runtime Config / Live Gate **[DONE]**
+- **Phase 1** — Ollama JSON Harness / RunManifest **[DONE]**
+- **Phase 2** — Core Domain Models **[DONE]**
+- **Phase 2.1** — Domain Validation Hardening **[DONE]**
+- **Phase 3** — PaperBrokerAdapter / SQLiteLedger / Paper Ledger **[DONE]**
+- **Phase 4** — Decision Schema / DecisionSnapshot / Replay Foundation **[NEXT]**
+- **Phase 5** — Date-ID Store / Evidence Source Layer
+- **Phase 6** — Data API Read-only Adapters
+- **Phase 7** — Scout Input Builder / ScoutSummary Schema
+- **Phase 8** — Allocator Decision Schema + Validator
+- **Phase 9** — Analysis Decision Schema + Validator
+- **Phase 10** — RiskFilter + OrderIntent Generation
+- **Phase 11** — Paper E2E Loop
+- **Phase 12** — Logs / DailySummary / Debug Events
+- **Phase 13** — Postmortem
+- **Phase 14** — KIS Live Read-only / Tiny-live Rehearsal
+- **Phase 15** — Emergency Triggers
+- **Phase 16** — Long Paper Trading Review / Parameter Review
+
+Emergency triggers (Phase 15) stay late. Do not implement them before parser, validator, paper broker, and replay tests are stable.
+
+**Deprecated:** legacy MVP list items such as "1. Config loader and domain models", "3. Date-ID storage before PaperBroker", or "Allocator before PaperBroker" — superseded by the canonical phases above.
