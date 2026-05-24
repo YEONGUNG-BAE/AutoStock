@@ -1986,7 +1986,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 
 이 Phase에서는 실제 매매 판단, Allocator, RiskFilter, OrderIntent 생성은 하지 않는다.
 
-### Phase 8 — Allocator Decision Schema + Validator [NEXT]
+### Phase 8 — Allocator Decision Schema + Validator [DONE]
 
 자산군 비중 결정을 위한 Allocator schema와 validator를 구현한다.
 
@@ -2008,7 +2008,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 - Date-ID 근거 검증
 - invalid output은 부분 채택하지 않고 전체 폐기
 
-### Phase 9 — Analysis Decision Schema + Validator
+### Phase 9 — Analysis Decision Schema + Validator [NEXT]
 
 종목 분석 4역할 JSON schema와 validator를 구현한다.
 

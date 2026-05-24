@@ -390,7 +390,7 @@ Phase 10에서 Python이 처리:
 - PaperBroker 실행 금지
 - KIS 호출 금지
 
-### Phase 9 — Analysis Decision Schema + Validator
+### Phase 9 — Analysis Decision Schema + Validator [NEXT]
 
 목표: 종목 분석 4역할 JSON schema와 validator를 만든다.
 
