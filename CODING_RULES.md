@@ -297,8 +297,9 @@ src/
 - Date-ID existence validation
 - Date-ID stale validation
 - `reasons[].date_id` validation
-- Date-ID validation failure 시 DebugEvent 기록
-
+- Date-ID validation failure는 `ValidationResult` / `ValidationIssue`로 표현한다.
+- Debug.md writer 연결은 Phase 12에서 구현한다.
+  
 금지:
 
 - 실제 FRED/DART/yfinance/news API 호출 금지

@@ -19,6 +19,7 @@ __pycache__/
 config/config.toml
 config/*.local.toml
 !config/config.toml.example
+!config/config.full.example
 
 secrets/
 *.pem

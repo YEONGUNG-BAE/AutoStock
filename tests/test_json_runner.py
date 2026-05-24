@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from llm.json_runner import JsonRunner, JsonRunnerOptions
@@ -20,6 +22,16 @@ class FakeTransport:
     def __call__(self, method: str, url: str, payload: dict[str, Any] | None, timeout_seconds: float) -> HttpResponse:
         self.calls.append((method, url, payload, timeout_seconds))
         return self.response
+
+
+def test_json_runner_options_rejects_non_zero_temperature() -> None:
+    with pytest.raises(ValueError, match="temperature must be 0"):
+        JsonRunnerOptions(model="qwen3.6:35b", temperature=0.1)
+
+
+def test_json_runner_options_accepts_zero_temperature() -> None:
+    options = JsonRunnerOptions(model="qwen3.6:35b", temperature=0)
+    assert options.temperature == 0
 
 
 def test_json_runner_parses_and_validates_normal_json_response() -> None:

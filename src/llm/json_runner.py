@@ -23,6 +23,10 @@ class JsonRunnerOptions:
     num_ctx: int = 4096
     keep_alive: str = "24h"
 
+    def __post_init__(self) -> None:
+        if self.temperature != 0:
+            raise ValueError("temperature must be 0 for deterministic trading decisions.")
+
 
 @dataclass(frozen=True)
 class JsonRunResult(Generic[SchemaT]):
