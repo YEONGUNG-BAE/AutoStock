@@ -57,6 +57,19 @@ class PaperLoopRunner:
             loop_input.correlation_id
             or loop_input.analysis_decision.decision_id.value
         )
+
+        # run_id duplicate는 write/broker 호출 전에 fail-closed 한다.
+        if self._decision_store.get_decision_snapshot(loop_input.normalized_run_id) is not None:
+            return _validation_failed_result(
+                loop_input=loop_input,
+                correlation_id=correlation_id,
+                message=(
+                    f"decision_id already exists: {loop_input.normalized_run_id.value}"
+                ),
+                code=PAPER_LOOP_DUPLICATE_SNAPSHOT,
+                snapshot_ids=(),
+            )
+
         risk_input = RiskFilterInput(
             allocator_decision=loop_input.allocator_decision,
             analysis_decision=loop_input.analysis_decision,
@@ -332,7 +345,13 @@ def _compute_and_save_nav_snapshot(
     loop_input: PaperLoopInput,
     order_id: str,
 ) -> NavSnapshot:
-    """FILLED 이후 단일 통화 NAV snapshot을 계산·저장한다."""
+    """FILLED 이후 단일 통화 NAV snapshot을 계산·저장한다.
+
+    Transaction boundary (Phase 11 MVP):
+    - PaperBroker fill/cash/position write는 Phase 3 PaperBroker transaction이 소유한다.
+    - NAV snapshot은 Phase 11 post-fill diagnostic write이며 fill과 같은 transaction이 아니다.
+    - Phase 11 MVP에서는 이 boundary를 유지한다.
+    """
     currency = loop_input.market_price.currency
     account_role = loop_input.broker_account_role
 

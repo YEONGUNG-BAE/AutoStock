@@ -8,7 +8,11 @@ def replay_paper_loop(
     runner: PaperLoopRunner,
     loop_input: PaperLoopInput,
 ) -> PaperLoopResult:
-    """동일 입력으로 paper loop를 재실행한다. replay determinism 테스트용."""
+    """동일 입력으로 paper loop를 재실행한다. replay determinism 테스트용.
+
+    duplicate run_id는 runner preflight에서 VALIDATION_FAILED로 fail-closed 하며
+    broker/ledger side effect 없이 반환한다.
+    """
     return runner.run(loop_input)
 
 

@@ -1,9 +1,18 @@
 # Technical Debt / P3 Backlog
 
+## P2 — Phase 11 Paper E2E Loop (resolved in Phase 11 cleanup)
+
+- duplicate `run_id` preflight added before any DecisionStore write or PaperBroker call. `_finalize_loop_result` DuplicateDecisionIdError handling remains as race-condition defense.
+
+## P3 — Phase 11 Paper E2E Loop
+
+- Phase 12 should record Debug.md event if NAV snapshot write fails after fill.
+- Future cleanup: make `NavSnapshot` currency-agnostic instead of KRW-named fields (`total_nav_krw`, `cash_krw`, `invested_krw`).
+
 ## P3 — Phase 10 Risk
 
 - Keep `tests/conftest.py` fixtures minimal as Phase 11 E2E tests grow.
-- Phase 11 must own target_weight_percent → executable quantity conversion using NAV, market price, lot/rounding policy, and broker constraints. Phase 10 intentionally emits target-weight OrderIntent only.
+- ~~Phase 11 must own target_weight_percent → executable quantity conversion~~ — done in Phase 11 (`QuantityResolver`).
 
 ## P3 — Phase 9 Analysis
 

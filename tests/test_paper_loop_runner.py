@@ -184,6 +184,7 @@ def test_hold_path_noop(loop_env, sample_risk_input_factory) -> None:
     )
 
     cash_before = broker.get_cash(Currency.KRW, AccountRole.PAPER)
+    before_entries = ledger.list_cash_ledger_entries(currency=Currency.KRW)
     result = runner.run(loop_input)
 
     assert result.status == PaperLoopStatus.NOOP
@@ -191,9 +192,8 @@ def test_hold_path_noop(loop_env, sample_risk_input_factory) -> None:
     assert result.fill is None
     assert result.nav_snapshot is None
     assert broker.get_cash(Currency.KRW, AccountRole.PAPER).amount == cash_before.amount
-    assert ledger.list_cash_ledger_entries(currency=Currency.KRW) == (
-        ledger.list_cash_ledger_entries(currency=Currency.KRW)
-    )
+    after_entries = ledger.list_cash_ledger_entries(currency=Currency.KRW)
+    assert after_entries == before_entries
     assert len(ledger.list_nav_snapshots()) == 0
 
 
@@ -336,7 +336,51 @@ def test_duplicate_run_id_validation_failed(loop_env, sample_risk_input_factory)
     )
     second = runner.run(second_input)
     assert second.status == PaperLoopStatus.VALIDATION_FAILED
-    assert len(decision_store.list_decision_snapshots()) == 5
+    assert len(decision_store.list_decision_snapshots()) == 3
+
+
+def test_duplicate_run_id_buy_path_no_broker_leak(loop_env, sample_risk_input_factory) -> None:
+    """same run_id 재실행 시 broker/ledger side effect가 발생하지 않아야 한다."""
+    runner, ledger, decision_store, broker = loop_env
+    shared_run_id = DecisionId("paper-loop-dup-buy-shared")
+
+    first_input = _loop_input(
+        sample_risk_input_factory,
+        run_suffix="dup-buy-a",
+        action=AnalysisAction.BUY,
+        target_weight="5",
+    ).model_copy(update={"run_id": shared_run_id})
+
+    first = runner.run(first_input)
+    assert first.status == PaperLoopStatus.FILLED
+
+    cash_after_first = broker.get_cash(Currency.KRW, AccountRole.PAPER).amount
+    position_after_first = broker.get_position(SYMBOL, Market.KR, AccountRole.PAPER)
+    assert position_after_first is not None
+    position_qty_after_first = position_after_first.quantity
+    nav_count_after_first = len(ledger.list_nav_snapshots())
+    snapshot_count_after_first = len(decision_store.list_decision_snapshots())
+
+    second_input = _loop_input(
+        sample_risk_input_factory,
+        run_suffix="dup-buy-b",
+        action=AnalysisAction.BUY,
+        target_weight="5",
+    ).model_copy(update={"run_id": shared_run_id})
+
+    second = runner.run(second_input)
+
+    assert second.status == PaperLoopStatus.VALIDATION_FAILED
+    assert second.decision_snapshot_ids == ()
+    assert broker.get_cash(Currency.KRW, AccountRole.PAPER).amount == cash_after_first
+    position_after_second = broker.get_position(SYMBOL, Market.KR, AccountRole.PAPER)
+    assert position_after_second is not None
+    assert position_after_second.quantity == position_qty_after_first
+    assert len(ledger.list_nav_snapshots()) == nav_count_after_first
+    assert len(decision_store.list_decision_snapshots()) == snapshot_count_after_first
+    assert ledger.get_order_intent("order-analysis-dup-buy-b") is None
+    assert ledger.get_order_result("order-analysis-dup-buy-b") is None
+    assert ledger.get_fill_by_order_id("order-analysis-dup-buy-b") is None
 
 
 def test_noop_target_equal_no_broker(loop_env, sample_risk_input_factory) -> None:
