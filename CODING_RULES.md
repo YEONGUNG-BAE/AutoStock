@@ -132,12 +132,10 @@ src/
 > **Phase numbering policy**
 >
 > 본 프로젝트의 Phase 번호는 이제 실제 구현 이력 기준으로 고정한다.
-> Phase 0, 1, 2, 2.1, 3은 이미 완료된 구현 단위로 간주하며 되돌리거나 재해석하지 않는다.
-> 과거 기획안 또는 legacy CODING_RULES에서 더 이른 Phase에 배치되어 있었지만 아직 구현되지 않은 항목은 Phase 4 이후로 재배치한다.
+> 이전 페이즈는 이미 완료된 구현 단위로 간주하며 되돌리거나 재해석하지 않는다.
 >
 > Cursor 작업 지시에서 "Phase N"이라고 하면 아래 canonical phase numbering을 따른다.
 > legacy phase numbering과 충돌하면 아래 목록을 우선한다.
-> 이미 구현된 Phase 0~3 코드는 문서 정합성을 위해 재작성하지 않는다.
 
 ### Phase 0 — Runtime Config / Live Gate [DONE]
 

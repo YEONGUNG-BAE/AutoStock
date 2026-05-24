@@ -41,8 +41,6 @@ Before coding, open only the relevant rule file:
 >
 > Canonical phase numbering lives in `CODING_RULES.md`.
 > When a task says "Phase N", follow that file — not any legacy 1–10 MVP list.
-> Phase 0, 1, 2, 2.1, and 3 are **DONE**; do not reimplement or reinterpret them for doc alignment.
-> Phase 4 is **NEXT**.
 
 - **Phase 0** — Runtime Config / Live Gate **[DONE]**
 - **Phase 1** — Ollama JSON Harness / RunManifest **[DONE]**

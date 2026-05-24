@@ -1843,7 +1843,6 @@ DailySummary가 누적된 데이터를 압축하여 중장기 흐름을 인지�
 > **Phase numbering policy**
 >
 > 본 프로젝트의 Phase 번호는 실제 구현 이력 기준으로 고정한다.
-> Phase 0~3은 이미 구현 및 테스트가 완료된 단위로 간주하며, 과거 기획안 또는 legacy CODING_RULES에서 더 이른 단계에 배치되어 있던 미구현 항목은 Phase 4 이후로 재배치한다.
 >
 > 기획안은 상위 로드맵을 제공하고, 세부 구현 규칙은 `CODING_RULES.md` 및 `.cursor/rules/*.mdc`를 따른다.
 
