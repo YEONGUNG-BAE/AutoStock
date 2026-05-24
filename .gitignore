@@ -14,8 +14,17 @@ __pycache__/
 .env
 .env.*
 !.env.example
-!/src/logs/
-!/src/logs/**
+# .gitignore에서 두 줄 제거:
+#   !/src/logs/
+#   !/src/logs/**
+git rm --cached src/logs/__pycache__/__init__.cpython-311.pyc
+git rm --cached src/logs/__pycache__/daily_summary.cpython-311.pyc
+git rm --cached src/logs/__pycache__/debug_writer.cpython-311.pyc
+git rm --cached src/logs/__pycache__/event_codes.cpython-311.pyc
+git rm --cached src/logs/__pycache__/event_log.cpython-311.pyc
+git rm --cached src/logs/__pycache__/factory.cpython-311.pyc
+git rm --cached src/logs/__pycache__/models.cpython-311.pyc
+
 
 # Runtime config (commit config/config.toml.example only)
 config/config.toml
