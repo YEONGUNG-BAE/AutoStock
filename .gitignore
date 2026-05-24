@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+__MACOSX/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.uv-cache/
+.uv-tools/
+
+# Secrets / local environment (never commit real values)
+.env
+.env.*
+!.env.example
+
+# Runtime config (commit config/config.toml.example only)
+config/config.toml
+config/*.local.toml
+!config/config.toml.example
+
+secrets/
+*.pem
+*.key
+*.crt
+
+# Runtime artifacts
+memory/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime data directory at repository root only (not src/data/)
+/data/

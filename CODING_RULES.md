@@ -98,6 +98,34 @@ src/
   config/              # typed settings and config.toml loader
   tests/               # unit/integration/replay tests
 ```
+### Secrets / Config / GitHub Hygiene
+
+- 실제 API key, token, account number, app secret, certificate, private key는 절대 Git에 커밋하지 않는다.
+- runtime config는 `config/config.toml`에 두고, 이 파일은 Git에서 ignore한다.
+- repository에는 `config/config.toml.example`만 커밋한다.
+- `.env`, `.env.*`, `secrets/`, `*.pem`, `*.key`, `*.crt`는 Git에서 ignore한다.
+- API key 값 자체를 config에 저장하지 않는다. config에는 환경변수 이름만 저장한다.
+  - 예: `fred_api_key_env = "FRED_API_KEY"`
+  - 예: `kis_app_secret_env = "KIS_LIVE_APP_SECRET"`
+- 실제 환경변수 값 존재 여부 검증은 해당 adapter를 실제 read-only로 실행하는 Phase에서 수행한다.
+- unit test에서는 실제 API key, 실제 환경변수, 실제 외부 network를 사용하지 않는다.
+- 테스트에는 `TEST_FRED_API_KEY` 같은 가짜 환경변수 이름 문자열만 사용한다.
+- runtime artifacts는 Git에 커밋하지 않는다.
+  - `*.db`
+  - `*.sqlite`
+  - `*.sqlite3`
+  - `logs/`
+  - `memory/`
+  - `/data/`
+- macOS/Python cache도 Git에 커밋하지 않는다.
+  - `.DS_Store`
+  - `__MACOSX/`
+  - `__pycache__/`
+  - `.pytest_cache/`
+  - `.venv/`
+  - `.uv-cache/`
+- `src/data/`는 source code directory이므로 ignore하지 않는다. runtime data directory를 ignore할 때는 `/data/`처럼 root anchored rule을 사용한다.
+
 
 ## MVP 구현 순서
 

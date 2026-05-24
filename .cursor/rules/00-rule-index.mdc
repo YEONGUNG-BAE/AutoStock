@@ -15,6 +15,7 @@ Non-negotiables:
 - Debug.md is for technical/operational events such as malformed LLM output, schema failure, execution/API/fill errors, and gold trade policy blocks; it does not store Postmortem `error_tags` and never feeds Top 3 investment tags.
 - Runtime trading mode is controlled only by typed `config.toml`; default is paper mode. Long-horizon paper performance is owned by the internal PaperBroker ledger. KIS mock is excluded from the MVP default path.
 - Final target runtime is macOS on the user's Mac; avoid Linux/Windows-only assumptions. Mac mini Pro arrival is now near-term, so model/runtime assumptions must be verified by local Ollama benchmarks before being treated as stable.
+- Secrets/config hygiene follows CODING_RULES.md. Never commit real API keys, tokens, config/config.toml, .env, or runtime DB/log files.
 
 Before coding, open only the relevant rule file:
 - Architecture: `01-architecture-boundaries.mdc`
