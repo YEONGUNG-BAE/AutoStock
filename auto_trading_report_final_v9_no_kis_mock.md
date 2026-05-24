@@ -1971,7 +1971,7 @@ LLM 판단 근거를 Date-ID로 추적하고 stale 여부를 검증할 수 있�
 
 뉴스 API는 이 단계 이후로 보류할 수 있다. Unit test에서 실제 외부 네트워크 호출은 금지한다.
 
-### Phase 7 — Scout Input Builder / ScoutSummary Schema [NEXT]
+### Phase 7 — Scout Input Builder / ScoutSummary Schema [DONE]
 
 Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
 
@@ -1986,7 +1986,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 
 이 Phase에서는 실제 매매 판단, Allocator, RiskFilter, OrderIntent 생성은 하지 않는다.
 
-### Phase 8 — Allocator Decision Schema + Validator
+### Phase 8 — Allocator Decision Schema + Validator [NEXT]
 
 자산군 비중 결정을 위한 Allocator schema와 validator를 구현한다.
 

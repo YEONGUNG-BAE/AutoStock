@@ -329,7 +329,7 @@ src/
 - trading decision 구현 금지
 - broker execution과 직접 연결 금지
 
-### Phase 7 — Scout Input Builder / ScoutSummary Schema [NEXT]
+### Phase 7 — Scout Input Builder / ScoutSummary Schema [DONE]
 
 목표: Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummary JSON schema를 검증한다.
 
@@ -350,7 +350,7 @@ src/
 - RiskFilter 구현 금지
 - OrderIntent 생성 금지
 
-### Phase 8 — Allocator Decision Schema + Validator
+### Phase 8 — Allocator Decision Schema + Validator [NEXT]
 
 목표: 자산군 배분 판단 JSON schema와 Python validator를 만든다.
 
