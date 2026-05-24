@@ -1,12 +1,15 @@
 # Technical Debt / P3 Backlog
 
-## P2 — Phase 11 Paper E2E Loop (resolved in Phase 11 cleanup)
 
-- duplicate `run_id` preflight added before any DecisionStore write or PaperBroker call. `_finalize_loop_result` DuplicateDecisionIdError handling remains as race-condition defense.
+## P3 — Phase 12 Logs / DailySummary / Debug Events
+
+- `ALLOCATOR_DATE_ID_FUTURE_SOURCE` / `ANALYSIS_DATE_ID_FUTURE_SOURCE` currently map to `DATE_ID_FORMAT_INVALID` because there is no dedicated future-source debug event code. Later consider adding a canonical `DATE_ID_FUTURE_SOURCE` or `EVIDENCE_FUTURE_SOURCE` code to `docs/DEBUG_EVENT_CODES.md`.
+- `RISK_GOLD_TRADE_FREQUENCY_EXCEEDED` currently maps to `GOLD_TRADE_BLOCKED_MONTHLY_LIMIT` without distinguishing monthly vs quarterly violations. Later split the risk issue code or inspect issue metadata/path to map quarterly violations to `GOLD_TRADE_BLOCKED_QUARTERLY_LIMIT`.
+- `DailySummary.range_violation_count` and `allocator_fallback_count` are Phase 12 foundation fields and currently default to 0 in projection. Later add explicit classifiers when validation/debug event semantics stabilize.
 
 ## P3 — Phase 11 Paper E2E Loop
 
-- Phase 12 should record Debug.md event if NAV snapshot write fails after fill.
+- Phase 12 added `PAPER_NAV_SNAPSHOT_ERROR` catalog support and `debug_event_from_nav_snapshot_error()` helper. Future runtime integration may record this event if NAV snapshot write fails after a paper fill.
 - Future cleanup: make `NavSnapshot` currency-agnostic instead of KRW-named fields (`total_nav_krw`, `cash_krw`, `invested_krw`).
 
 ## P3 — Phase 10 Risk

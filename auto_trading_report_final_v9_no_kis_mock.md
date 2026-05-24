@@ -2061,7 +2061,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
   - same input → same OrderIntent
   - same broker input → same paper ledger effect
 
-### Phase 12 — Logs / DailySummary / Debug Events [NEXT]
+### Phase 12 — Logs / DailySummary / Debug Events [DONE]
 
 운영 로그와 기술 이벤트를 replay 가능하게 기록한다.
 
@@ -2074,7 +2074,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - replayable event log
 - Debug event code는 Postmortem error_tags와 분리
 
-### Phase 13 — Postmortem
+### Phase 13 — Postmortem [NEXT]
 
 국장/미장 weekly/monthly postmortem과 error tag 집계를 구현한다.
 

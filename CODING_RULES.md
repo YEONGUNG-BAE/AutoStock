@@ -467,7 +467,7 @@ Phase 10에서 Python이 처리:
 - KIS live 주문 금지
 - external API calls in unit tests 금지
 
-### Phase 12 — Logs / DailySummary / Debug Events [NEXT]
+### Phase 12 — Logs / DailySummary / Debug Events [DONE]
 
 목표: 운영 및 기술 이벤트를 replay 가능한 로그로 남긴다.
 
@@ -486,7 +486,7 @@ Phase 10에서 Python이 처리:
 - Debug.md event code를 runtime LLM prompt에 주입 금지
 - Debug.md event code를 Postmortem Top 3 Error Tags에 사용 금지
 
-### Phase 13 — Postmortem
+### Phase 13 — Postmortem [NEXT]
 
 목표: 국장/미장 weekly/monthly postmortem을 분리하고 error_tags를 관리한다.
 

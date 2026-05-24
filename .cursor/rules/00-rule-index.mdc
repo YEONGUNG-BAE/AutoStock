@@ -55,8 +55,8 @@ Before coding, open only the relevant rule file:
 - **Phase 9** — Analysis Decision Schema + Validator **[DONE]**
 - **Phase 10** — RiskFilter + OrderIntent Generation **[DONE]**
 - **Phase 11** — Paper E2E Loop **[DONE]**
-- **Phase 12** — Logs / DailySummary / Debug Events **[NEXT]**
-- **Phase 13** — Postmortem
+- **Phase 12** — Logs / DailySummary / Debug Events **[DONE]**
+- **Phase 13** — Postmortem **[NEXT]**
 - **Phase 14** — KIS Live Read-only / Tiny-live Rehearsal
 - **Phase 15** — Emergency Triggers
 - **Phase 16** — Long Paper Trading Review / Parameter Review
