@@ -2043,7 +2043,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 - LLM confidence를 MVP hard filter로 사용하지 않음
 - validated decision → OrderIntent generation
 
-### Phase 11 — Paper E2E Loop [NEXT]
+### Phase 11 — Paper E2E Loop [DONE]
 
 LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를 연결한다.
 
@@ -2061,7 +2061,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
   - same input → same OrderIntent
   - same broker input → same paper ledger effect
 
-### Phase 12 — Logs / DailySummary / Debug Events
+### Phase 12 — Logs / DailySummary / Debug Events [NEXT]
 
 운영 로그와 기술 이벤트를 replay 가능하게 기록한다.
 

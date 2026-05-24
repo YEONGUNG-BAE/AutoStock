@@ -130,6 +130,7 @@ Disallowed runtime LLM feedback sources:
 | `ORDER_FILL_ERROR` | HIGH | Fill status is invalid, missing, or inconsistent. | Reconcile account state. |
 | `PARTIAL_FILL_HANDLING_ERROR` | MEDIUM | Partial fill was not handled according to order policy. | Reconcile and patch order logic. |
 | `PAPER_BROKER_SIM_ERROR` | HIGH | Paper broker simulation produced impossible or inconsistent state. | Stop paper session until fixed. |
+| `PAPER_NAV_SNAPSHOT_ERROR` | HIGH | Paper NAV snapshot write failed after a paper fill. | Record event; reconcile paper ledger and NAV snapshot. |
 | `SLIPPAGE_REJECTION` | LOW | Order was rejected by directional slippage rule. | Record as policy event; no trade. |
 | `MARKET_CLOSED_ORDER_ATTEMPT` | MEDIUM | Order attempted outside valid market session. | Fix scheduler/calendar logic. |
 | `UNTRADEABLE_SECURITY` | MEDIUM | Trading halt, limit-down lock, no liquidity, or non-tradeable asset. | Skip order and record. |

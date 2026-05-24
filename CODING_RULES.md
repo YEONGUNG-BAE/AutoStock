@@ -444,7 +444,7 @@ Phase 10에서 Python이 처리:
 - live mode 우회 금지
 - PaperBroker 외부 가격 조회 금지
 
-### Phase 11 — Paper E2E Loop [NEXT]
+### Phase 11 — Paper E2E Loop [DONE]
 
 목표: LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper loop를 연결한다.
 
@@ -467,7 +467,7 @@ Phase 10에서 Python이 처리:
 - KIS live 주문 금지
 - external API calls in unit tests 금지
 
-### Phase 12 — Logs / DailySummary / Debug Events
+### Phase 12 — Logs / DailySummary / Debug Events [NEXT]
 
 목표: 운영 및 기술 이벤트를 replay 가능한 로그로 남긴다.
 
