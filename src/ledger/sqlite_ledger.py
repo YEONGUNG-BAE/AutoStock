@@ -523,6 +523,18 @@ class SQLiteLedger:
             ),
         )
 
+    def list_nav_snapshots(self) -> tuple[NavSnapshot, ...]:
+        """저장된 NAV 스냅샷 목록을 as_of, snapshot_id 순으로 반환한다."""
+        rows = self._conn.execute(
+            """
+            SELECT snapshot_id, as_of, total_nav_krw, cash_krw, invested_krw,
+                   daily_return_percent, mdd_percent
+            FROM nav_snapshots
+            ORDER BY as_of ASC, snapshot_id ASC
+            """
+        ).fetchall()
+        return tuple(_row_to_nav_snapshot(row) for row in rows)
+
     def list_tables(self) -> tuple[str, ...]:
         """스키마 초기화 검증용. 생성된 user table 이름을 반환한다."""
         rows = self._conn.execute(
@@ -632,4 +644,19 @@ def _row_to_position(row: sqlite3.Row) -> Position:
         avg_cost=_str_to_decimal(row["avg_cost"], field_name="avg_cost"),
         currency=_str_to_enum(Currency, row["currency"]),
         market_price=_str_to_decimal(row["market_price"], field_name="market_price"),
+    )
+
+
+def _row_to_nav_snapshot(row: sqlite3.Row) -> NavSnapshot:
+    return NavSnapshot(
+        snapshot_id=row["snapshot_id"],
+        as_of=_str_to_datetime(row["as_of"], field_name="as_of"),
+        total_nav_krw=_str_to_decimal(row["total_nav_krw"], field_name="total_nav_krw"),
+        cash_krw=_str_to_decimal(row["cash_krw"], field_name="cash_krw"),
+        invested_krw=_str_to_decimal(row["invested_krw"], field_name="invested_krw"),
+        daily_return_percent=_str_to_decimal(
+            row["daily_return_percent"],
+            field_name="daily_return_percent",
+        ),
+        mdd_percent=_str_to_decimal(row["mdd_percent"], field_name="mdd_percent"),
     )

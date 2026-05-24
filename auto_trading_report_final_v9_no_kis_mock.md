@@ -2026,7 +2026,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 
 이 Phase에서는 Analysis 결과가 broker를 직접 호출하지 않는다.
 
-### Phase 10 — RiskFilter + OrderIntent Generation [NEXT]
+### Phase 10 — RiskFilter + OrderIntent Generation [DONE]
 
 검증된 Allocator/Analysis 결과를 Python hard filter로 검증하고 OrderIntent를 생성한다.
 
@@ -2043,7 +2043,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 - LLM confidence를 MVP hard filter로 사용하지 않음
 - validated decision → OrderIntent generation
 
-### Phase 11 — Paper E2E Loop
+### Phase 11 — Paper E2E Loop [NEXT]
 
 LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를 연결한다.
 

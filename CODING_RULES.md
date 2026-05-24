@@ -413,7 +413,7 @@ Phase 10에서 Python이 처리:
 - OrderIntent 생성은 Phase 10에서 수행
 - RiskFilter 구현 금지
 
-### Phase 10 — RiskFilter + OrderIntent Generation [NEXT]
+### Phase 10 — RiskFilter + OrderIntent Generation [DONE]
 
 목표: validated Allocator/Analysis output을 Python hard filter로 검증하고 `OrderIntent`를 생성한다.
 
@@ -444,7 +444,7 @@ Phase 10에서 Python이 처리:
 - live mode 우회 금지
 - PaperBroker 외부 가격 조회 금지
 
-### Phase 11 — Paper E2E Loop
+### Phase 11 — Paper E2E Loop [NEXT]
 
 목표: LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper loop를 연결한다.
 

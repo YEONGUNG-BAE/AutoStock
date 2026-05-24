@@ -53,8 +53,8 @@ Before coding, open only the relevant rule file:
 - **Phase 7** — Scout Input Builder / ScoutSummary Schema **[DONE]**
 - **Phase 8** — Allocator Decision Schema + Validator **[DONE]**
 - **Phase 9** — Analysis Decision Schema + Validator **[DONE]**
-- **Phase 10** — RiskFilter + OrderIntent Generation **[NEXT]**
-- **Phase 11** — Paper E2E Loop
+- **Phase 10** — RiskFilter + OrderIntent Generation **[DONE]**
+- **Phase 11** — Paper E2E Loop **[NEXT]**
 - **Phase 12** — Logs / DailySummary / Debug Events
 - **Phase 13** — Postmortem
 - **Phase 14** — KIS Live Read-only / Tiny-live Rehearsal
