@@ -1,4 +1,13 @@
-# Technical Debt / P3 Backlog
+# Technical Debt / P2·P3 Backlog
+
+
+## P2 — AccountRole Vocabulary Alignment Before Phase 14
+
+- `.cursor/rules/02-domain-models-and-state.mdc` defines account roles as `KR_TAX_ADVANTAGED | US_REGULAR | CASH_BUFFER`, while code currently uses `ISA | GENERAL | CMA | PAPER`.
+- Current paper path is unaffected because Phase 0~13 primarily uses `AccountRole.PAPER`.
+- Before Phase 14 KIS live read-only / tiny-live rehearsal, choose one source of truth and align code, rules, config, tests, and any persisted `account_role` values.
+- Preferred long-term direction: semantic roles (`KR_TAX_ADVANTAGED`, `US_REGULAR`, `CASH_BUFFER`, `PAPER`) with broker/account-number mapping handled in the KIS adapter/config layer.
+- Do not casually rename before Phase 14 — `domain/enums.py`, `ledger/sqlite_ledger.py`, `broker/paper_broker.py`, `paper_loop/`, `risk/order_generation.py`, and persisted SQLite `account_role` values must all be migrated together.
 
 
 ## P3 — Phase 12 Logs / DailySummary / Debug Events
