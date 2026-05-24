@@ -187,13 +187,16 @@ class KisReadOnlyClient:
             errors.append(f"token: {exc}")
 
         if token_ok:
-            try:
-                self.get_balance(AccountRole.KR_TAX_ADVANTAGED)
-                balance_ok = True
-                isa_support_status = IsaSupportStatus.SUPPORTED
-            except KisClientError as exc:
-                errors.append(f"isa_balance: {exc}")
-                isa_support_status = IsaSupportStatus.UNSUPPORTED
+            if not self._account_role_settings.use_isa_for_kr_and_gold:
+                isa_support_status = IsaSupportStatus.SKIPPED
+            else:
+                try:
+                    self.get_balance(AccountRole.KR_TAX_ADVANTAGED)
+                    balance_ok = True
+                    isa_support_status = IsaSupportStatus.SUPPORTED
+                except KisClientError as exc:
+                    errors.append(f"isa_balance: {exc}")
+                    isa_support_status = IsaSupportStatus.UNSUPPORTED
 
         if token_ok:
             try:
@@ -208,9 +211,6 @@ class KisReadOnlyClient:
                 orderbook_ok = True
             except KisClientError as exc:
                 errors.append(f"orderbook: {exc}")
-
-        if not self._account_role_settings.use_isa_for_kr_and_gold:
-            isa_support_status = IsaSupportStatus.SKIPPED
 
         return KisReadOnlySmokeResult(
             token_ok=token_ok,

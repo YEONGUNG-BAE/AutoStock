@@ -20,7 +20,7 @@ from broker.kis_client import (
     KisReadOnlyClient,
     resolve_account_env_var,
 )
-from broker.kis_models import KisAccountRoleError, KisCredentialError, KisHttpError
+from broker.kis_models import IsaSupportStatus, KisAccountRoleError, KisCredentialError, KisHttpError
 from broker.kis_transport import KisHttpResponse
 from config.settings import (
     BrokerAccountRoleSettings,
@@ -35,6 +35,8 @@ from kis_fake_transport import FakeKisTransport
 def _make_client(
     transport: FakeKisTransport,
     environ: dict[str, str] | None = None,
+    *,
+    account_role_settings: BrokerAccountRoleSettings | None = None,
 ) -> KisReadOnlyClient:
     env = {
         "KIS_LIVE_APP_KEY": "app-key",
@@ -46,7 +48,7 @@ def _make_client(
     }
     return KisReadOnlyClient(
         live_settings=KisLiveSettings(),
-        account_role_settings=BrokerAccountRoleSettings(),
+        account_role_settings=account_role_settings or BrokerAccountRoleSettings(),
         read_only_settings=KisReadOnlySettings(),
         transport=transport,
         environ=env,
@@ -232,3 +234,22 @@ def test_smoke_check_runs_read_only_paths() -> None:
     assert result.quote_ok is True
     assert result.orderbook_ok is True
     assert len(transport.calls) >= 4
+
+
+def test_smoke_check_skips_isa_balance_when_disabled() -> None:
+    transport = FakeKisTransport()
+    client = _make_client(
+        transport,
+        environ={"KIS_ISA_ACCOUNT": ""},
+        account_role_settings=BrokerAccountRoleSettings(use_isa_for_kr_and_gold=False),
+    )
+
+    result = client.run_read_only_smoke_check()
+
+    assert result.isa_support_status == IsaSupportStatus.SKIPPED
+    assert result.balance_ok is False
+    assert not any("isa_balance" in error for error in result.errors)
+    assert not any("inquire-balance" in call["url"] for call in transport.calls)
+    assert result.token_ok is True
+    assert result.quote_ok is True
+    assert result.orderbook_ok is True

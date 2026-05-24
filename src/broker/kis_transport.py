@@ -6,6 +6,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlencode
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ class StdlibKisHttpTransport:
 def _append_query_params(url: str, params: Mapping[str, str] | None) -> str:
     if not params:
         return url
-    query = "&".join(f"{key}={value}" for key, value in params.items())
+    query = urlencode(params)
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}{query}"
 

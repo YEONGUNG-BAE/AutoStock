@@ -1,6 +1,13 @@
 # Technical Debt / P2·P3 Backlog
 
 
+## P3 — Phase 14 KIS Live Read-only / Tiny-live Rehearsal
+
+- Validate KIS OpenAPI endpoint paths, TR IDs, request parameters, and response field variants against official KIS documentation before real read-only smoke.
+- `StdlibKisHttpTransport` is a manual-smoke scaffold and is not connected to scheduler/runtime default paths.
+- `broker.kis_read_only.enabled=true` is not an automatic execution trigger. Read-only smoke must remain explicitly invoked unless a later phase adds a reviewed CLI or runner.
+- Tiny-live actual order submission is intentionally not implemented in Phase 14. Handle it only in a later explicit manual rehearsal phase.
+
 ## P3 — Phase 13 Postmortem
 
 - `parse_postmortem_tag_summary_from_markdown()` accepts a single fenced `json` block anywhere in the document, but rule 08 requires the tag summary to be at the **end** of every Postmortem. Before live Postmortem authoring begins, harden the parser to require the JSON block to be the last non-whitespace content (reject if any prose follows it).
