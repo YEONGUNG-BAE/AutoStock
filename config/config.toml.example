@@ -32,6 +32,18 @@ retry_count = 0
 # paper = internal PaperBrokerAdapter. kis_live = live KIS path after all gates pass.
 adapter = "paper"
 
+[broker.account_roles]
+use_isa_for_kr_and_gold = true
+use_cma_for_order_execution = false
+kr_tax_advantaged_account_env = "KIS_ISA_ACCOUNT"
+us_regular_account_env = "KIS_US_REGULAR_ACCOUNT"
+cash_buffer_account_env = "KIS_CMA_ACCOUNT"
+
+[broker.kis_read_only]
+# Read-only smoke path only — not wired to scheduler or automatic order execution.
+enabled = false
+timeout_seconds = 10
+
 [broker.live]
 # Environment variable names only — set values in .env or your shell, not in Git.
 account_env = "KIS_LIVE_ACCOUNT"

@@ -13,6 +13,9 @@ from typing import Any, TypeVar
 ENV_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
 DEFAULT_LIVE_CONFIRMATION_ENV_VAR = "LIVE_TRADING_CONFIRM"
 DEFAULT_LIVE_CONFIRMATION_PHRASE = "ENABLE_LIVE_TRADING"
+DEFAULT_TINY_LIVE_CONFIRMATION_ENV_VAR = "TINY_LIVE_CONFIRM"
+DEFAULT_TINY_LIVE_CONFIRMATION_PHRASE = "ENABLE_TINY_LIVE"
+DEFAULT_MAX_TINY_LIVE_NOTIONAL_KRW = 100_000
 EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
@@ -56,6 +59,9 @@ class TradingSettings:
     allow_live_trading: bool = False
     live_confirmation_env_var: str = DEFAULT_LIVE_CONFIRMATION_ENV_VAR
     live_confirmation_phrase: str = DEFAULT_LIVE_CONFIRMATION_PHRASE
+    tiny_live_confirmation_env_var: str = DEFAULT_TINY_LIVE_CONFIRMATION_ENV_VAR
+    tiny_live_confirmation_phrase: str = DEFAULT_TINY_LIVE_CONFIRMATION_PHRASE
+    max_tiny_live_notional_krw: int = DEFAULT_MAX_TINY_LIVE_NOTIONAL_KRW
 
 
 @dataclass(frozen=True)
@@ -63,12 +69,34 @@ class KisLiveSettings:
     account_env: str = "KIS_LIVE_ACCOUNT"
     app_key_env: str = "KIS_LIVE_APP_KEY"
     app_secret_env: str = "KIS_LIVE_APP_SECRET"
+    base_url: str = "https://openapi.koreainvestment.com:9443"
+
+
+@dataclass(frozen=True)
+class BrokerAccountRoleSettings:
+    """KIS 계좌 역할 매핑. env var 이름만 저장하고 실제 계좌번호는 환경변수에서 읽는다."""
+
+    use_isa_for_kr_and_gold: bool = True
+    use_cma_for_order_execution: bool = False
+    kr_tax_advantaged_account_env: str = "KIS_ISA_ACCOUNT"
+    us_regular_account_env: str = "KIS_US_REGULAR_ACCOUNT"
+    cash_buffer_account_env: str = "KIS_CMA_ACCOUNT"
+
+
+@dataclass(frozen=True)
+class KisReadOnlySettings:
+    """KIS read-only smoke 경로 설정. 스케줄러/자동 주문과 연결하지 않는다."""
+
+    enabled: bool = False
+    timeout_seconds: float = 10.0
 
 
 @dataclass(frozen=True)
 class BrokerSettings:
     adapter: BrokerAdapterName = BrokerAdapterName.PAPER
     live: KisLiveSettings = field(default_factory=KisLiveSettings)
+    account_roles: BrokerAccountRoleSettings = field(default_factory=BrokerAccountRoleSettings)
+    kis_read_only: KisReadOnlySettings = field(default_factory=KisReadOnlySettings)
 
 
 @dataclass(frozen=True)
@@ -158,18 +186,48 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
     trading_section = _optional_table(config, "trading", "config.trading")
     broker_section = _optional_table(config, "broker", "config.broker")
     live_section = _optional_table(broker_section, "live", "config.broker.live")
+    account_roles_section = _optional_table(broker_section, "account_roles", "config.broker.account_roles")
+    kis_read_only_section = _optional_table(broker_section, "kis_read_only", "config.broker.kis_read_only")
     llm_section = _optional_table(config, "llm", "config.llm")
 
     _assert_allowed_keys(
         trading_section,
-        allowed_keys={"mode", "allow_live_trading", "live_confirmation_env_var", "live_confirmation_phrase"},
+        allowed_keys={
+            "mode",
+            "allow_live_trading",
+            "live_confirmation_env_var",
+            "live_confirmation_phrase",
+            "tiny_live_confirmation_env_var",
+            "tiny_live_confirmation_phrase",
+            "max_tiny_live_notional_krw",
+        },
         field_path="config.trading",
     )
-    _assert_allowed_keys(broker_section, allowed_keys={"adapter", "live"}, field_path="config.broker")
+    _assert_allowed_keys(
+        broker_section,
+        allowed_keys={"adapter", "live", "account_roles", "kis_read_only"},
+        field_path="config.broker",
+    )
     _assert_allowed_keys(
         live_section,
-        allowed_keys={"account_env", "app_key_env", "app_secret_env"},
+        allowed_keys={"account_env", "app_key_env", "app_secret_env", "base_url"},
         field_path="config.broker.live",
+    )
+    _assert_allowed_keys(
+        account_roles_section,
+        allowed_keys={
+            "use_isa_for_kr_and_gold",
+            "use_cma_for_order_execution",
+            "kr_tax_advantaged_account_env",
+            "us_regular_account_env",
+            "cash_buffer_account_env",
+        },
+        field_path="config.broker.account_roles",
+    )
+    _assert_allowed_keys(
+        kis_read_only_section,
+        allowed_keys={"enabled", "timeout_seconds"},
+        field_path="config.broker.kis_read_only",
     )
     _assert_allowed_keys(
         llm_section,
@@ -207,6 +265,18 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
                 trading_section.get("live_confirmation_phrase", DEFAULT_LIVE_CONFIRMATION_PHRASE),
                 field_path="config.trading.live_confirmation_phrase",
             ),
+            tiny_live_confirmation_env_var=_parse_str(
+                trading_section.get("tiny_live_confirmation_env_var", DEFAULT_TINY_LIVE_CONFIRMATION_ENV_VAR),
+                field_path="config.trading.tiny_live_confirmation_env_var",
+            ),
+            tiny_live_confirmation_phrase=_parse_str(
+                trading_section.get("tiny_live_confirmation_phrase", DEFAULT_TINY_LIVE_CONFIRMATION_PHRASE),
+                field_path="config.trading.tiny_live_confirmation_phrase",
+            ),
+            max_tiny_live_notional_krw=_parse_positive_int(
+                trading_section.get("max_tiny_live_notional_krw", DEFAULT_MAX_TINY_LIVE_NOTIONAL_KRW),
+                field_path="config.trading.max_tiny_live_notional_krw",
+            ),
         ),
         broker=BrokerSettings(
             adapter=_parse_enum(
@@ -226,6 +296,42 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
                 app_secret_env=_parse_str(
                     live_section.get("app_secret_env", "KIS_LIVE_APP_SECRET"),
                     field_path="config.broker.live.app_secret_env",
+                ),
+                base_url=_parse_str(
+                    live_section.get("base_url", "https://openapi.koreainvestment.com:9443"),
+                    field_path="config.broker.live.base_url",
+                ),
+            ),
+            account_roles=BrokerAccountRoleSettings(
+                use_isa_for_kr_and_gold=_parse_bool(
+                    account_roles_section.get("use_isa_for_kr_and_gold", True),
+                    field_path="config.broker.account_roles.use_isa_for_kr_and_gold",
+                ),
+                use_cma_for_order_execution=_parse_bool(
+                    account_roles_section.get("use_cma_for_order_execution", False),
+                    field_path="config.broker.account_roles.use_cma_for_order_execution",
+                ),
+                kr_tax_advantaged_account_env=_parse_str(
+                    account_roles_section.get("kr_tax_advantaged_account_env", "KIS_ISA_ACCOUNT"),
+                    field_path="config.broker.account_roles.kr_tax_advantaged_account_env",
+                ),
+                us_regular_account_env=_parse_str(
+                    account_roles_section.get("us_regular_account_env", "KIS_US_REGULAR_ACCOUNT"),
+                    field_path="config.broker.account_roles.us_regular_account_env",
+                ),
+                cash_buffer_account_env=_parse_str(
+                    account_roles_section.get("cash_buffer_account_env", "KIS_CMA_ACCOUNT"),
+                    field_path="config.broker.account_roles.cash_buffer_account_env",
+                ),
+            ),
+            kis_read_only=KisReadOnlySettings(
+                enabled=_parse_bool(
+                    kis_read_only_section.get("enabled", False),
+                    field_path="config.broker.kis_read_only.enabled",
+                ),
+                timeout_seconds=_parse_positive_number(
+                    kis_read_only_section.get("timeout_seconds", 10.0),
+                    field_path="config.broker.kis_read_only.timeout_seconds",
                 ),
             ),
         ),

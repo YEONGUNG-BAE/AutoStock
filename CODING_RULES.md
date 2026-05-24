@@ -486,7 +486,7 @@ Phase 10에서 Python이 처리:
 - Debug.md event code를 runtime LLM prompt에 주입 금지
 - Debug.md event code를 Postmortem Top 3 Error Tags에 사용 금지
 
-### Phase 13 — Postmortem [NEXT]
+### Phase 13 — Postmortem [DONE]
 
 목표: 국장/미장 weekly/monthly postmortem을 분리하고 error_tags를 관리한다.
 
@@ -500,7 +500,7 @@ Phase 10에서 Python이 처리:
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Postmortem용 `error_tags`를 저장하지 않으며 Top 3에서 제외
 
-### Phase 14 — KIS live read-only / Tiny-live Rehearsal
+### Phase 14 — KIS live read-only / Tiny-live Rehearsal [NEXT]
 
 목표: 실전 계좌는 read-only 검증부터 시작하고, 주문 endpoint는 극소액 수동 tiny-live 직전에만 검증한다.
 

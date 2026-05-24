@@ -310,12 +310,14 @@ def test_execution_mode_enum_contains_required_values() -> None:
 def test_config_package_exports_only_phase_0_public_api() -> None:
     assert set(config.__all__) == {
         "AppSettings",
+        "BrokerAccountRoleSettings",
         "BrokerAdapterName",
         "BrokerSettings",
         "ConfigEnvironmentError",
         "ConfigFileNotFoundError",
         "ExecutionMode",
         "KisLiveSettings",
+        "KisReadOnlySettings",
         "RuntimeGateError",
         "SettingsError",
         "TradingMode",
@@ -331,3 +333,11 @@ def test_forbidden_mock_adapter_and_environment_names_are_not_present() -> None:
 
     assert forbidden_adapter not in settings_source
     assert forbidden_env not in settings_source
+
+
+def test_config_toml_example_still_loads_as_paper() -> None:
+    settings = load_settings("config/config.toml.example")
+
+    assert settings.trading.mode == TradingMode.PAPER
+    assert settings.broker.adapter == BrokerAdapterName.PAPER
+    assert settings.broker.account_roles.kr_tax_advantaged_account_env == "KIS_ISA_ACCOUNT"

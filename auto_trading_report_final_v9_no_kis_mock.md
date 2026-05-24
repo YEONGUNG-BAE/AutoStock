@@ -2074,7 +2074,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - replayable event log
 - Debug event code는 Postmortem error_tags와 분리
 
-### Phase 13 — Postmortem [NEXT]
+### Phase 13 — Postmortem [DONE]
 
 국장/미장 weekly/monthly postmortem과 error tag 집계를 구현한다.
 
@@ -2088,7 +2088,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Top 3 집계에서 제외
 
-### Phase 14 — KIS Live Read-only / Tiny-live Rehearsal
+### Phase 14 — KIS Live Read-only / Tiny-live Rehearsal [NEXT]
 
 실전 계좌 연결은 read-only 검증부터 시작한다.
 
