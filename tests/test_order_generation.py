@@ -36,6 +36,22 @@ NOW = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
 GENERATOR = OrderIntentGenerator()
 
 
+def test_order_generator_default_account_role_is_paper(sample_risk_input_factory) -> None:
+    result = GENERATOR.generate(
+        sample_risk_input_factory(
+            action=AnalysisAction.BUY,
+            target_weight_percent=Percent("4"),
+            context_overrides={
+                "current_symbol_market_value": Money.from_str("3000000", Currency.KRW),
+                "current_symbol_cumulative_buy_cost": Money.from_str("1000000", Currency.KRW),
+            },
+        )
+    )
+    assert result.status == OrderGenerationStatus.GENERATED
+    assert result.order_intent is not None
+    assert result.order_intent.account_role == AccountRole.PAPER
+
+
 def test_buy_generates_order_intent_buy_market_target_weight(sample_risk_input_factory) -> None:
     risk_input = sample_risk_input_factory(
         action=AnalysisAction.BUY,
@@ -49,6 +65,7 @@ def test_buy_generates_order_intent_buy_market_target_weight(sample_risk_input_f
 
     assert result.status == OrderGenerationStatus.GENERATED
     assert result.order_intent is not None
+    assert result.order_intent.account_role == AccountRole.PAPER
     assert result.order_intent.side == OrderSide.BUY
     assert result.order_intent.order_type == OrderType.MARKET
     assert result.order_intent.quantity is None

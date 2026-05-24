@@ -1,14 +1,11 @@
 # Technical Debt / P2·P3 Backlog
 
 
-## P2 — AccountRole Vocabulary Alignment Before Phase 14
+## P3 — Phase 13 Postmortem
 
-- `.cursor/rules/02-domain-models-and-state.mdc` defines account roles as `KR_TAX_ADVANTAGED | US_REGULAR | CASH_BUFFER`, while code currently uses `ISA | GENERAL | CMA | PAPER`.
-- Current paper path is unaffected because Phase 0~13 primarily uses `AccountRole.PAPER`.
-- Before Phase 14 KIS live read-only / tiny-live rehearsal, choose one source of truth and align code, rules, config, tests, and any persisted `account_role` values.
-- Preferred long-term direction: semantic roles (`KR_TAX_ADVANTAGED`, `US_REGULAR`, `CASH_BUFFER`, `PAPER`) with broker/account-number mapping handled in the KIS adapter/config layer.
-- Do not casually rename before Phase 14 — `domain/enums.py`, `ledger/sqlite_ledger.py`, `broker/paper_broker.py`, `paper_loop/`, `risk/order_generation.py`, and persisted SQLite `account_role` values must all be migrated together.
-
+- `parse_postmortem_tag_summary_from_markdown()` accepts a single fenced `json` block anywhere in the document, but rule 08 requires the tag summary to be at the **end** of every Postmortem. Before live Postmortem authoring begins, harden the parser to require the JSON block to be the last non-whitespace content (reject if any prose follows it).
+- `validate_postmortem_error_tags()` coerces non-string keys via `str(raw_tag)` before catalog validation. JSON input always has string keys so this is benign in practice, but direct Python callers can pass non-string keys and have them silently stringified. Consider rejecting non-string keys explicitly to match the strictness of other validators.
+- `PostmortemTagSummary` currently rejects empty `error_tags`. This matches the "오답노트" spirit, but real operations may need to record a Postmortem with no flagged mistakes (e.g., a clean week). Decide whether to allow `error_tags={}` + `top_error_tags=()` before Phase 13 outputs are consumed by Top 3 aggregation in production.
 
 ## P3 — Phase 12 Logs / DailySummary / Debug Events
 
@@ -50,6 +47,15 @@
 ## P3 — Phase 3 Broker
 
 - BUY insufficient-cash evaluation computes fee before rejection because cash sufficiency depends on fee-inclusive total cost. Keep fee calculators pure/no-side-effect; revisit only if fee calculation gains external dependencies or side effects.
+
+## Reference — Completed AccountRole Vocabulary Alignment
+
+- Migrated domain `AccountRole` from product/account-name values (`ISA`, `GENERAL`, `CMA`) to semantic portfolio roles (`KR_TAX_ADVANTAGED`, `US_REGULAR`, `CASH_BUFFER`, `PAPER`).
+- Mapping: `ISA` → `KR_TAX_ADVANTAGED`, `GENERAL` → `US_REGULAR`, `CMA` → `CASH_BUFFER`, `PAPER` → `PAPER`.
+- `PAPER` remains internal PaperBroker-only and is not a live broker account.
+- No KIS live routing or account-number mapping was implemented in this cleanup.
+- Old enum values are rejected; no alias or silent normalization.
+- Persisted SQLite `account_role` values in existing runtime DBs are not auto-migrated; explicit migration required if old values exist.
 
 ## Reference — Completed Phase 3 Hardening Notes
 

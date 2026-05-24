@@ -108,14 +108,15 @@ LLM owns:
 When multiple project accounts are enabled, persist account role explicitly:
 
 ```text
-AccountRole = KR_TAX_ADVANTAGED | US_REGULAR | CASH_BUFFER
+AccountRole = KR_TAX_ADVANTAGED | US_REGULAR | CASH_BUFFER | PAPER
 ```
 
 Default routing:
 
-- `KR_TAX_ADVANTAGED`: ISA account for KR stocks and ACE KRX Gold Spot ETF, after smoke test.
-- `US_REGULAR`: regular domestic/foreign stock account for US stocks.
-- `CASH_BUFFER`: CMA or non-trading cash account; do not submit orders from it.
+- `KR_TAX_ADVANTAGED`: ISA or equivalent KR tax-advantaged account role for KR stocks and ACE KRX Gold Spot ETF, after smoke test.
+- `US_REGULAR`: regular overseas/US stock account role.
+- `CASH_BUFFER`: CMA or non-trading cash buffer role; do not submit orders from it.
+- `PAPER`: internal PaperBroker / paper ledger role only; never a live broker account.
 
 Portfolio risk state must be calculated from combined project NAV, not from one account:
 

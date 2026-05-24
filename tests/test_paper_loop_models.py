@@ -53,6 +53,11 @@ def _valid_loop_input(sample_risk_input_factory, **overrides: object) -> PaperLo
     return PaperLoopInput(**base)
 
 
+def test_paper_loop_default_account_role_remains_paper(sample_risk_input_factory) -> None:
+    loop_input = _valid_loop_input(sample_risk_input_factory)
+    assert loop_input.broker_account_role == AccountRole.PAPER
+
+
 def test_valid_input(sample_risk_input_factory) -> None:
     loop_input = _valid_loop_input(sample_risk_input_factory)
     assert loop_input.normalized_run_id.value == "paper-loop-260522-001"
@@ -131,5 +136,5 @@ def test_non_paper_account_role_reject(sample_risk_input_factory) -> None:
     with pytest.raises(ValueError, match="PAPER"):
         _valid_loop_input(
             sample_risk_input_factory,
-            broker_account_role=AccountRole.ISA,
+            broker_account_role=AccountRole.KR_TAX_ADVANTAGED,
         )

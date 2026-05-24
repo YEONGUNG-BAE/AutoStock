@@ -233,7 +233,7 @@ def test_cash_and_position_restore_after_reopen(tmp_path: Path) -> None:
                 symbol="AAPL",
                 market=Market.US,
                 asset_class=AssetClass.US_EQUITY,
-                account_role=AccountRole.GENERAL,
+                account_role=AccountRole.US_REGULAR,
                 quantity=Decimal("3"),
                 avg_cost=Decimal("150"),
                 currency=Currency.USD,
@@ -243,7 +243,7 @@ def test_cash_and_position_restore_after_reopen(tmp_path: Path) -> None:
 
     reopened = SQLiteLedger(db_path)
     cash = reopened.get_cash(Currency.KRW, AccountRole.PAPER)
-    position = reopened.get_position("AAPL", Market.US, AccountRole.GENERAL)
+    position = reopened.get_position("AAPL", Market.US, AccountRole.US_REGULAR)
     entries = reopened.list_cash_ledger_entries()
 
     assert cash is not None
@@ -537,6 +537,60 @@ def test_restore_rejects_non_finite_decimal(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="amount must be a finite decimal"):
         ledger.get_cash(Currency.KRW, AccountRole.PAPER)
     ledger.close()
+
+
+def test_sqlite_ledger_preserves_semantic_account_role(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.db"
+    ledger = SQLiteLedger(db_path)
+    with ledger.transaction():
+        ledger.apply_cash_change(
+            CashSnapshot(
+                currency=Currency.KRW,
+                amount=Decimal("1000000"),
+                account_role=AccountRole.KR_TAX_ADVANTAGED,
+                as_of=NOW,
+            ),
+            order_id=None,
+            correlation_id=None,
+            delta_amount=Decimal("1000000"),
+            reason="INITIAL_CASH",
+        )
+        ledger.upsert_position(
+            Position(
+                symbol="005930",
+                market=Market.KR,
+                asset_class=AssetClass.KR_EQUITY,
+                account_role=AccountRole.KR_TAX_ADVANTAGED,
+                quantity=Decimal("10"),
+                avg_cost=Decimal("70000"),
+                currency=Currency.KRW,
+            )
+        )
+        ledger.upsert_position(
+            Position(
+                symbol="AAPL",
+                market=Market.US,
+                asset_class=AssetClass.US_EQUITY,
+                account_role=AccountRole.US_REGULAR,
+                quantity=Decimal("2"),
+                avg_cost=Decimal("150"),
+                currency=Currency.USD,
+            )
+        )
+    ledger.close()
+
+    reopened = SQLiteLedger(db_path)
+    kr_cash = reopened.get_cash(Currency.KRW, AccountRole.KR_TAX_ADVANTAGED)
+    kr_position = reopened.get_position("005930", Market.KR, AccountRole.KR_TAX_ADVANTAGED)
+    us_position = reopened.get_position("AAPL", Market.US, AccountRole.US_REGULAR)
+
+    assert kr_cash is not None
+    assert kr_cash.amount == Decimal("1000000")
+    assert kr_position is not None
+    assert kr_position.quantity == Decimal("10")
+    assert us_position is not None
+    assert us_position.quantity == Decimal("2")
+    reopened.close()
 
 
 def _order_intent(*, order_id: str = "order-1") -> OrderIntent:

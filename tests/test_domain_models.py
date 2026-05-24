@@ -190,7 +190,7 @@ def test_position_market_value_prefers_market_price() -> None:
         symbol="005930",
         market=Market.KR,
         asset_class=AssetClass.KR_EQUITY,
-        account_role=AccountRole.ISA,
+        account_role=AccountRole.KR_TAX_ADVANTAGED,
         quantity=Decimal("10"),
         avg_cost=Decimal("100"),
         currency=Currency.KRW,
@@ -206,7 +206,7 @@ def test_position_rejects_negative_quantity() -> None:
             symbol="005930",
             market=Market.KR,
             asset_class=AssetClass.KR_EQUITY,
-            account_role=AccountRole.ISA,
+            account_role=AccountRole.KR_TAX_ADVANTAGED,
             quantity=Decimal("-1"),
             avg_cost=Decimal("100"),
             currency=Currency.KRW,
@@ -314,10 +314,26 @@ def test_asset_class_enums_are_distinct() -> None:
     }
 
 
-def test_account_role_enums_are_distinct() -> None:
-    assert {AccountRole.ISA, AccountRole.GENERAL, AccountRole.CMA, AccountRole.PAPER} == {
-        AccountRole(item) for item in ("ISA", "GENERAL", "CMA", "PAPER")
+def test_account_role_semantic_values() -> None:
+    assert {role.value for role in AccountRole} == {
+        "KR_TAX_ADVANTAGED",
+        "US_REGULAR",
+        "CASH_BUFFER",
+        "PAPER",
     }
+    assert AccountRole.KR_TAX_ADVANTAGED.value == "KR_TAX_ADVANTAGED"
+    assert AccountRole.US_REGULAR.value == "US_REGULAR"
+    assert AccountRole.CASH_BUFFER.value == "CASH_BUFFER"
+    assert AccountRole.PAPER.value == "PAPER"
+
+
+def test_legacy_account_role_values_reject() -> None:
+    for legacy in ("ISA", "GENERAL", "CMA"):
+        with pytest.raises(ValueError):
+            AccountRole(legacy)
+    assert not hasattr(AccountRole, "ISA")
+    assert not hasattr(AccountRole, "GENERAL")
+    assert not hasattr(AccountRole, "CMA")
 
 
 def test_execution_mode_matches_config_execution_mode() -> None:
@@ -380,7 +396,7 @@ def _order_intent(
         symbol="005930",
         market=Market.KR,
         asset_class=AssetClass.KR_EQUITY,
-        account_role=AccountRole.ISA,
+        account_role=AccountRole.KR_TAX_ADVANTAGED,
         side=OrderSide.BUY,
         order_type=order_type,
         execution_mode=ExecutionMode.NORMAL,

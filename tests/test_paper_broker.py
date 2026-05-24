@@ -369,7 +369,7 @@ def test_us_market_with_krw_currency_is_rejected(db_path: Path) -> None:
         symbol="AAPL",
         market=Market.US,
         asset_class=AssetClass.US_EQUITY,
-        account_role=AccountRole.GENERAL,
+        account_role=AccountRole.US_REGULAR,
         side=OrderSide.BUY,
         order_type=OrderType.MARKET,
         execution_mode=ExecutionMode.NORMAL,
@@ -388,7 +388,7 @@ def test_us_market_with_krw_currency_is_rejected(db_path: Path) -> None:
         initial_cash=CashSnapshot(
             currency=Currency.USD,
             amount=Decimal("10000"),
-            account_role=AccountRole.GENERAL,
+            account_role=AccountRole.US_REGULAR,
             as_of=NOW,
         ),
     )

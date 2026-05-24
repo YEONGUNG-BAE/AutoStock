@@ -18,9 +18,11 @@ class AssetClass(StrEnum):
 
 
 class AccountRole(StrEnum):
-    ISA = "ISA"
-    GENERAL = "GENERAL"
-    CMA = "CMA"
+    """Portfolio/account role. KIS product name mapping은 Phase 14 adapter/config layer에서 처리한다."""
+
+    KR_TAX_ADVANTAGED = "KR_TAX_ADVANTAGED"
+    US_REGULAR = "US_REGULAR"
+    CASH_BUFFER = "CASH_BUFFER"
     PAPER = "PAPER"
 
 
