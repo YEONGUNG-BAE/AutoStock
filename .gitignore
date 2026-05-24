@@ -14,6 +14,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!/src/logs/
+!/src/logs/**
 
 # Runtime config (commit config/config.toml.example only)
 config/config.toml
@@ -28,7 +30,7 @@ secrets/
 
 # Runtime artifacts
 memory/
-logs/
+/logs/
 *.db
 *.sqlite
 *.sqlite3
