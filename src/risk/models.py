@@ -122,10 +122,11 @@ class RiskFilterContext(BaseModel):
         for field_name, money in (
             ("current_symbol_market_value", self.current_symbol_market_value),
             ("current_symbol_cumulative_buy_cost", self.current_symbol_cumulative_buy_cost),
-            ("proposed_price", self.proposed_price),
         ):
             if money is not None and money.currency != nav_currency:
                 raise ValueError(f"{field_name}.currency must match total_nav.currency.")
+
+        # proposed_price는 NAV 통화가 아니라 종목 quote currency 기준이다.
 
         if self.paper_observation_min_invested_percent is not None:
             lower = self.paper_observation_min_invested_percent.value

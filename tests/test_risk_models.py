@@ -112,6 +112,15 @@ def test_currency_mismatch_reject() -> None:
         _sample_context(cash=Money.from_str("20000000", Currency.USD))
 
 
+def test_proposed_price_quote_currency_may_differ_from_nav() -> None:
+    context = _sample_context(
+        proposed_price=Money.from_str("101", Currency.USD),
+    )
+    assert context.proposed_price is not None
+    assert context.proposed_price.currency == Currency.USD
+    assert context.total_nav.currency == KRW
+
+
 def test_asset_class_weights_extra_field_reject() -> None:
     with pytest.raises(ValidationError):
         AssetClassWeights(

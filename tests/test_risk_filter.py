@@ -388,7 +388,7 @@ def test_us_sell_rebound_slippage_block(sample_risk_input_factory) -> None:
         context_overrides={
             "current_symbol_market_value": Money.from_str("5000000", KRW),
             "current_symbol_cumulative_buy_cost": Money.from_str("3000000", KRW),
-            "proposed_price": Money.from_str("101", KRW),
+            "proposed_price": Money.from_str("101", Currency.USD),
             "reference_prices": {
                 "AAPL": MarketPrice(
                     symbol="AAPL",
@@ -403,6 +403,40 @@ def test_us_sell_rebound_slippage_block(sample_risk_input_factory) -> None:
     result = FILTER.evaluate(risk_input)
     assert result.passed is False
     assert any(issue.code == RISK_DIRECTIONAL_SLIPPAGE_EXCEEDED for issue in result.issues)
+
+
+def test_slippage_proposed_reference_currency_mismatch_block(sample_risk_input_factory) -> None:
+    ref_price = Decimal("100")
+    risk_input = sample_risk_input_factory(
+        action=AnalysisAction.SELL,
+        symbol="AAPL",
+        market="US",
+        target_weight_percent=Percent("2"),
+        context_overrides={
+            "current_symbol_market_value": Money.from_str("5000000", KRW),
+            "current_symbol_cumulative_buy_cost": Money.from_str("3000000", KRW),
+            "proposed_price": Money.from_str("101", KRW),
+            "reference_prices": {
+                "AAPL": MarketPrice(
+                    symbol="AAPL",
+                    market=Market.US,
+                    currency=Currency.USD,
+                    price=ref_price,
+                    as_of=NOW,
+                ),
+            },
+        },
+    )
+    result = FILTER.evaluate(risk_input)
+    assert result.passed is False
+    assert any(
+        issue.code == RISK_INSUFFICIENT_CONTEXT
+        and issue.severity == ValidationSeverity.ERROR
+        and "proposed=KRW" in issue.message
+        and "reference=USD" in issue.message
+        for issue in result.issues
+    )
+    assert not any(issue.code == RISK_DIRECTIONAL_SLIPPAGE_EXCEEDED for issue in result.issues)
 
 
 def test_missing_price_context_no_slippage_issue(sample_risk_input_factory) -> None:

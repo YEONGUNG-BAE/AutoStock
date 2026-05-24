@@ -424,9 +424,24 @@ def _check_directional_slippage(risk_input: RiskFilterInput, action: AnalysisAct
     if reference is None:
         return []
 
+    proposed = context.proposed_price
+    if proposed.currency != reference.currency:
+        return [
+            ValidationIssue(
+                code=RISK_INSUFFICIENT_CONTEXT,
+                message=(
+                    "Directional slippage requires proposed_price currency to match "
+                    f"reference quote currency: proposed={proposed.currency.value}, "
+                    f"reference={reference.currency.value}."
+                ),
+                severity=ValidationSeverity.ERROR,
+                path="context.proposed_price",
+            )
+        ]
+
     tolerance = slippage_tolerance_percent(reference.market)
     reference_amount = reference.price
-    proposed_amount = context.proposed_price.amount
+    proposed_amount = proposed.amount
     tolerance_factor = tolerance / Decimal("100")
 
     if action == AnalysisAction.BUY:
