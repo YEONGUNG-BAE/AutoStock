@@ -350,28 +350,39 @@ src/
 - RiskFilter 구현 금지
 - OrderIntent 생성 금지
 
-### Phase 8 — Allocator Decision Schema + Validator [NEXT]
+### Phase 8 — Allocator Decision Schema + Validator [DONE]
 
 목표: 자산군 배분 판단 JSON schema와 Python validator를 만든다.
 
 구현 대상:
 
-- `AllocatorDecision`
+- `AllocatorDecision` (final target 중심 schema)
 - Signal Summary
 - Cash Manager
 - Asset Allocator
 - Consistency Checker
 - `cash_policy.cash_target_percent`
-  - 전체 계좌 기준
+  - 전체 계좌 기준 **최종** 현금 목표
 - `target_weights`
-  - 현금 제외 운용 자산 기준
+  - 현금 제외 운용 자산 기준 **최종** KR/US/Gold 목표
   - KR/US/Gold 합계 100
 - gold rule
-  - 평상시 18~22
-  - 예외 15~25
-- action / adjust_percent sign consistency
+  - `gold_policy_mode=normal`: 18~22
+  - `gold_policy_mode=exception`: 15~25
 - all reasons require Date-ID
 - invalid Allocator output은 부분 채택하지 않고 전체 폐기
+
+스키마에 포함하지 않음 (Phase 8):
+
+- `action` / `adjust_percent`
+- `asset_policies` per-bucket action fields
+- `reason_codes`
+
+Phase 10에서 Python이 처리:
+
+- 현재 실제 비중과 target의 차이 계산
+- rebalance delta
+- OrderIntent 생성
 
 금지:
 

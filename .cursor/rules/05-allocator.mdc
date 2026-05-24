@@ -9,11 +9,20 @@ alwaysApply: false
 
 Allocator decides:
 
-1. total-account cash target
-2. invested-assets KR/US/Gold target weights
-3. gold adjustment intent
+1. total-account cash target (final)
+2. invested-assets KR/US/Gold target weights (final)
+3. gold policy mode and gold target within the selected band
 
 Allocator does not select individual stocks.
+
+## Schema model (Phase 8)
+
+`AllocatorDecision` is a **final target** schema. It does not include `action`, `adjust_percent`, `asset_policies`, or `reason_codes`.
+
+- `cash_policy.cash_target_percent` = total-account final cash target
+- `target_weights.kr/us/gold` = invested-assets final KR/US/Gold targets (cash excluded; sum must be 100)
+
+Current-vs-target delta, rebalance delta, and `OrderIntent` generation are **Python-owned in Phase 10**, not part of the Phase 8 LLM output schema.
 
 ## Sequential reasoning order
 
@@ -33,94 +42,100 @@ Summarize KR/US market Scout, DailySummary, and macro/gold evidence. Do not deci
 
 ### Cash Manager
 
-- Decide `cash_policy.cash_target_percent` on total account basis.
+- Decide `cash_policy.cash_target_percent` on total account basis (final target).
 - Normal range: 10~30%.
+- `cash_manager.recommended_cash_percent` must match `cash_policy.cash_target_percent`.
 - MDD killswitch is Python-owned. Allocator must not instruct panic liquidation.
 
 ### Asset Allocator
 
-- Decide `target_weights.kr/us/gold` on invested-assets basis.
+- Decide `target_weights.kr/us/gold` on invested-assets basis (final targets).
 - Sum must be 100.
-- Gold normal band: 18~22.
-- Gold exceptional band: 15~25.
+- `asset_allocator.target_weights` must match top-level `target_weights`.
+- Gold normal band (`gold_policy_mode=normal`): 18~22.
+- Gold exception band (`gold_policy_mode=exception`): 15~25.
 
 ### Consistency Checker
 
 Check:
 
 - cash and target weights do not contradict reasoning
-- target_weights sum to 100
-- action and adjust_percent sign match
+- `target_weights` sum to 100
+- `target_weights` match `asset_allocator.target_weights`
+- `cash_policy.cash_target_percent` matches `cash_manager.recommended_cash_percent`
 - Date-ID exists in every reason
+- set `passed: true` only when internally consistent
 
-Python still performs final validation.
+Python still performs final validation via `AllocatorDecisionValidator`.
 
 ## LLM output schema
 
+Phase 8 canonical schema name: `allocator_decision.v1`
+
 ```json
 {
-  "allocator_decision": {
-    "summary_one_liner": "",
-    "reasoning": "",
-    "cash_policy": {
-      "cash_target_percent": 20,
-      "action": "MAINTAIN",
-      "adjust_percent": 0,
-      "reasons": [
-        { "reason": "", "date_id": "YYMMDD-N" }
-      ],
-      "final_decision": ""
-    },
+  "decision_id": "allocator-260522-001",
+  "created_at": "2026-05-22T12:00:00+00:00",
+  "schema_name": "allocator_decision.v1",
+  "universe": "ALL",
+  "summary_one_liner": "균형 배분 유지",
+  "gold_policy_mode": "normal",
+  "signal_summary": {
+    "summary": "KR/US macro evidence summarized",
+    "reasons": [
+      { "reason": "VIX elevated", "date_id": "260522-1" }
+    ]
+  },
+  "cash_manager": {
+    "summary": "Maintain 20% cash on total account",
+    "recommended_cash_percent": "20",
+    "reasons": [
+      { "reason": "Liquidity buffer", "date_id": "260522-2" }
+    ]
+  },
+  "asset_allocator": {
+    "summary": "Balanced KR/US/Gold allocation",
     "target_weights": {
-      "kr": 50,
-      "us": 30,
-      "gold": 20
+      "kr": "50",
+      "us": "30",
+      "gold": "20"
     },
-    "asset_policies": {
-      "kr": {
-        "action": "MAINTAIN",
-        "adjust_percent": 0,
-        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
-        "final_decision": ""
-      },
-      "us": {
-        "action": "MAINTAIN",
-        "adjust_percent": 0,
-        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
-        "final_decision": ""
-      },
-      "gold": {
-        "action": "MAINTAIN",
-        "adjust_percent": 0,
-        "reasons": [ { "reason": "", "date_id": "YYMMDD-N" } ],
-        "final_decision": ""
-      }
-    },
-    "reason_codes": ["STEADY_STATE"]
-  }
+    "reasons": [
+      { "reason": "Regional balance", "date_id": "260522-3" }
+    ]
+  },
+  "consistency_checker": {
+    "passed": true,
+    "summary": "Cash and weights are consistent",
+    "issues": [],
+    "reasons": [
+      { "reason": "Cross-check passed", "date_id": "260522-4" }
+    ]
+  },
+  "cash_policy": {
+    "cash_target_percent": "20",
+    "rationale": "Maintain liquidity",
+    "reasons": [
+      { "reason": "Cash band policy", "date_id": "260522-5" }
+    ]
+  },
+  "target_weights": {
+    "kr": "50",
+    "us": "30",
+    "gold": "20"
+  },
+  "reasons": [
+    { "reason": "Overall allocation thesis", "date_id": "260522-6" }
+  ],
+  "metadata": {}
 }
 ```
 
-## Initial reason_codes allowlist
-
-Allowed initial `reason_codes`:
-
-- `STEADY_STATE`
-- `MACRO_RISK_ON`
-- `MACRO_RISK_OFF`
-- `VIX_SPIKE`
-- `RATE_CHANGE`
-- `DXY_SHIFT`
-- `FX_KRW_WEAKNESS`
-- `KR_INDEX_DROP`
-- `US_INDEX_DROP`
-- `GOLD_MOMENTUM`
-
-Reject unknown `reason_codes` unless the user explicitly expands the code set.
+Do not add `action`, `adjust_percent`, `asset_policies`, `reason_codes`, order fields, or performance targets to this schema.
 
 ## Python wrapper fields
 
-Python wraps LLM output into `allocator_record` with:
+Python wraps validated LLM output into `allocator_record` with:
 
 - schema_version
 - decision_date
@@ -133,28 +148,32 @@ Python wraps LLM output into `allocator_record` with:
 - validation results
 - rejected/fallback status
 
+These wrapper/delta fields are computed by Python; do not request them from the LLM.
+
 ## Rejection rules
 
 Reject the entire Allocator response and keep previous targets when:
 
 - JSON malformed
-- target_weights sum != 100
+- schema invalid (`ALLOCATOR_SCHEMA_INVALID`)
+- `target_weights` sum != 100
 - cash target outside 10~30
-- gold target < 15 or > 25
-- Date-ID missing or unknown
-- action and adjust_percent sign contradict
-- reason_codes empty or invalid
+- gold target violates selected `gold_policy_mode` band
+- Date-ID missing, unknown, stale, or future-dated
+- `target_weights` != `asset_allocator.target_weights`
+- `cash_policy.cash_target_percent` != `cash_manager.recommended_cash_percent`
+- `consistency_checker.passed` is false
 - critical field missing
 
 Do not partially keep KR/US if gold output is clearly invalid. The response credibility is broken.
 
 ## Gold rules
 
-- 18~22: normal band.
-- 23~25: only with risk-off evidence and reason_codes.
-- 15~17: only with clear risk-on/strong market evidence.
-- <15 or >25: reject entire Allocator output.
-- Micro-adjustment rules and trade count enforcement are Python-owned.
+- 18~22: normal band (`gold_policy_mode=normal`).
+- 23~25: only in `gold_policy_mode=exception` with risk-off Date-ID-backed evidence in reasons.
+- 15~17: only in `gold_policy_mode=exception` with risk-on/strong-market Date-ID-backed evidence in reasons.
+- <15 or >25: reject entire Allocator output regardless of mode.
+- Micro-adjustment rules and trade count enforcement are Python-owned (Phase 10+).
 
 ## Gold trading frequency
 
@@ -164,9 +183,9 @@ Python counts gold trades; the LLM must not calculate trade counts.
 - Quarterly soft limit: 4 gold trades.
 - If the monthly/quarterly limit is exceeded, inject a warning into the Allocator prompt.
 - If gold trade is blocked by Python frequency policy, do not execute gold adjustment even if LLM requests it.
-- Ignore micro-adjustments below 3%p by converting them to MAINTAIN in Python post-processing.
-- Gold INCREASE is normally capped at +5%p per decision.
-- Gold DECREASE is normally capped at -2%p per decision.
+- Ignore micro-adjustments below 3%p in Python post-processing (Phase 10).
+- Gold INCREASE is normally capped at +5%p per decision (Phase 10).
+- Gold DECREASE is normally capped at -2%p per decision (Phase 10).
 
 ## Allocator tolerance
 

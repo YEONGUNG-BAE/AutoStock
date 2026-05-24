@@ -1,5 +1,9 @@
 # Technical Debt / P3 Backlog
 
+## P3 — Phase 8 Allocator
+
+- `AllocatorAction` enum is currently not used by Phase 8 schema. Revisit during final API surface cleanup.
+
 ## P3 — Phase 7 Scout
 
 - `ScoutInputBuilder` currently loads all records and filters fact types in Python. Later optimize by delegating single fact_type filters to `SQLiteDateIdSourceStore.list_records(fact_type=...)`.
