@@ -52,8 +52,8 @@ Before coding, open only the relevant rule file:
 - **Phase 6** — Data API Read-only Adapters **[DONE]**
 - **Phase 7** — Scout Input Builder / ScoutSummary Schema **[DONE]**
 - **Phase 8** — Allocator Decision Schema + Validator **[DONE]**
-- **Phase 9** — Analysis Decision Schema + Validator **[NEXT]**
-- **Phase 10** — RiskFilter + OrderIntent Generation
+- **Phase 9** — Analysis Decision Schema + Validator **[DONE]**
+- **Phase 10** — RiskFilter + OrderIntent Generation **[NEXT]**
 - **Phase 11** — Paper E2E Loop
 - **Phase 12** — Logs / DailySummary / Debug Events
 - **Phase 13** — Postmortem

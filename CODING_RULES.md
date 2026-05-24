@@ -390,7 +390,7 @@ Phase 10에서 Python이 처리:
 - PaperBroker 실행 금지
 - KIS 호출 금지
 
-### Phase 9 — Analysis Decision Schema + Validator [NEXT]
+### Phase 9 — Analysis Decision Schema + Validator [DONE]
 
 목표: 종목 분석 4역할 JSON schema와 validator를 만든다.
 
@@ -413,7 +413,7 @@ Phase 10에서 Python이 처리:
 - OrderIntent 생성은 Phase 10에서 수행
 - RiskFilter 구현 금지
 
-### Phase 10 — RiskFilter + OrderIntent Generation
+### Phase 10 — RiskFilter + OrderIntent Generation [NEXT]
 
 목표: validated Allocator/Analysis output을 Python hard filter로 검증하고 `OrderIntent`를 생성한다.
 

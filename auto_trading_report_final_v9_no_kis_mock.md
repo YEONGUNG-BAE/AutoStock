@@ -2008,7 +2008,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 - Date-ID 근거 검증
 - invalid output은 부분 채택하지 않고 전체 폐기
 
-### Phase 9 — Analysis Decision Schema + Validator [NEXT]
+### Phase 9 — Analysis Decision Schema + Validator [DONE]
 
 종목 분석 4역할 JSON schema와 validator를 구현한다.
 
@@ -2026,7 +2026,7 @@ Date-ID source layer의 데이터를 Scout 입력으로 조립하고 ScoutSummar
 
 이 Phase에서는 Analysis 결과가 broker를 직접 호출하지 않는다.
 
-### Phase 10 — RiskFilter + OrderIntent Generation
+### Phase 10 — RiskFilter + OrderIntent Generation [NEXT]
 
 검증된 Allocator/Analysis 결과를 Python hard filter로 검증하고 OrderIntent를 생성한다.
 
