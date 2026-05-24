@@ -51,6 +51,22 @@ def test_fred_adapter_rejects_missing_value() -> None:
         adapter.fetch_latest_observation("DGS10", as_of=NOW)
 
 
+def test_fred_adapter_accepts_negative_value() -> None:
+    adapter = FredMacroAdapter(
+        FakeFredClient({"value": "-1.25", "source_timestamp": NOW})
+    )
+    point = adapter.fetch_latest_observation("REALYIELD", as_of=NOW)
+    assert point.value == Decimal("-1.25")
+
+
+def test_fred_adapter_accepts_zero_value() -> None:
+    adapter = FredMacroAdapter(
+        FakeFredClient({"value": "0", "source_timestamp": NOW})
+    )
+    point = adapter.fetch_latest_observation("T10Y2Y", as_of=NOW)
+    assert point.value == Decimal("0")
+
+
 def test_fred_adapter_rejects_nan_value() -> None:
     adapter = FredMacroAdapter(
         FakeFredClient({"value": "NaN", "source_timestamp": NOW})

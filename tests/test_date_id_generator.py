@@ -84,3 +84,22 @@ def test_date_id_generator_rejects_naive_source_timestamp(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="timezone-aware datetime"):
         generator.next_id(NAIVE_NOW)
     store.close()
+
+
+def test_date_id_generator_requires_save_between_generations(tmp_path: Path) -> None:
+    """같은 날짜에 여러 Date-ID를 생성할 때는 generate -> save를 반복해야 한다."""
+    store = SQLiteDateIdSourceStore(tmp_path / "date_ids.db")
+    generator = DateIdGenerator(store)
+    target_date = date(2026, 5, 22)
+
+    first = generator.next_id_for_date(target_date)
+    duplicate_without_save = generator.next_id_for_date(target_date)
+    assert first == duplicate_without_save == DateId("260522-1")
+
+    with store.transaction():
+        store.save_record(_sample_record(date_id=first.value))
+
+    second = generator.next_id_for_date(target_date)
+    store.close()
+
+    assert second == DateId("260522-2")

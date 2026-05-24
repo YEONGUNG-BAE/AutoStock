@@ -27,7 +27,7 @@ class FredMacroAdapter:
         if not isinstance(raw, Mapping):
             raise ValueError("client response must be a mapping.")
 
-        value = _require_positive_decimal(raw.get("value"), field_name="value")
+        value = _require_finite_decimal(raw.get("value"), field_name="value")
         source_timestamp = _require_source_timestamp(raw.get("source_timestamp"))
         payload = _extract_extra_payload(raw, reserved_keys={"value", "source_timestamp"})
 
@@ -41,13 +41,10 @@ class FredMacroAdapter:
         )
 
 
-def _require_positive_decimal(value: Any, *, field_name: str) -> Decimal:
+def _require_finite_decimal(value: Any, *, field_name: str) -> Decimal:
     if value is None:
         raise ValueError(f"{field_name} is required.")
-    parsed = to_decimal(value, field_name=field_name)
-    if parsed <= Decimal("0"):
-        raise ValueError(f"{field_name} must be greater than 0.")
-    return parsed
+    return to_decimal(value, field_name=field_name)
 
 
 def _require_source_timestamp(value: Any) -> datetime:

@@ -12,7 +12,14 @@ _DEFAULT_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
 class DateIdGenerator:
-    """store에 존재하는 Date-ID를 참고해 deterministic YYMMDD-N Date-ID를 생성한다."""
+    """store state를 기준으로 deterministic YYMMDD-N Date-ID를 생성한다.
+
+    사용 정책:
+    - next_id()는 store에 이미 저장된 Date-ID 목록을 읽어 다음 sequence를 계산한다.
+    - 같은 KST 날짜에 여러 Date-ID가 필요하면 generate -> save를 반복한다.
+    - save 없이 next_id()만 연속 호출하면 동일 id가 반환될 수 있다.
+    - batch reservation(한 번에 여러 id 예약)은 Phase 6 범위가 아니다.
+    """
 
     def __init__(
         self,

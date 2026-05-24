@@ -68,7 +68,7 @@ class MacroDataPoint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     series_id: str
-    value: Decimal = Field(gt=Decimal("0"))
+    value: Decimal
     source_name: str
     source_timestamp: datetime
     as_of: datetime

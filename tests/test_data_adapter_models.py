@@ -136,11 +136,33 @@ def test_macro_data_point_rejects_blank_required_fields(field_name: str) -> None
         MacroDataPoint(**base)
 
 
-def test_macro_data_point_rejects_non_positive_value() -> None:
-    with pytest.raises(ValidationError):
+def test_macro_data_point_accepts_zero_value() -> None:
+    point = MacroDataPoint(
+        series_id="T10Y2Y",
+        value=Decimal("0"),
+        source_name="fred",
+        source_timestamp=NOW,
+        as_of=NOW,
+    )
+    assert point.value == Decimal("0")
+
+
+def test_macro_data_point_accepts_negative_value() -> None:
+    point = MacroDataPoint(
+        series_id="REALYIELD",
+        value=Decimal("-1.25"),
+        source_name="fred",
+        source_timestamp=NOW,
+        as_of=NOW,
+    )
+    assert point.value == Decimal("-1.25")
+
+
+def test_macro_data_point_rejects_nan_value() -> None:
+    with pytest.raises(ValidationError, match="finite"):
         MacroDataPoint(
             series_id="DGS10",
-            value=Decimal("0"),
+            value=Decimal("NaN"),
             source_name="fred",
             source_timestamp=NOW,
             as_of=NOW,
