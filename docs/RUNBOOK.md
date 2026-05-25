@@ -397,9 +397,35 @@ PYTHONPATH=src uv run python ops/build_paper_review_report.py \
   --store runtime/paper_review/reports.jsonl
 ```
 
-**Collector가 아님:** 이 script는 ledger/log/postmortem/emergency store를 자동으로 읽지 않는다. `PaperReviewInput` JSON은 후속 collector 또는 수동 export 절차로 준비한다. sample generator는 후속 작업에서 별도 구현한다. 구조 참고는 `tests/test_paper_review_*.py`만 본다.
+**Collector가 아님:** 이 script는 ledger/log/postmortem/emergency store를 자동으로 읽지 않는다. `PaperReviewInput` JSON은 후속 production collector 또는 dev synthetic builder로 준비한다.
 
-**기본 실행:** input 검증 + in-memory report 생성 + text summary 출력. 파일 write 없음.
+### Dev-only synthetic PaperReviewInput builder
+
+`ops/dev/build_synthetic_paper_review_input.py` — **dev-only** deterministic synthetic fixture builder.
+
+- production collector가 **아니다**
+- ledger/decision/log/postmortem/emergency store를 **자동으로 읽지 않는다**
+- output: `runtime/synthetic/paper_review_input.<scenario>.SYNTH.json`
+- 모든 id는 `SYNTH-` prefix
+- deterministic output (동일 명령 → byte-identical JSON)
+- generated JSON은 **commit하지 않는다**
+
+```bash
+PYTHONPATH=src uv run python ops/dev/build_synthetic_paper_review_input.py --scenario partial-with-trade
+
+PYTHONPATH=src uv run python ops/build_paper_review_report.py \
+  --review-input runtime/synthetic/paper_review_input.partial-with-trade.SYNTH.json
+
+PYTHONPATH=src uv run python ops/build_paper_review_report.py \
+  --review-input runtime/synthetic/paper_review_input.partial-with-trade.SYNTH.json \
+  --markdown-out runtime/synthetic/paper_review.partial-with-trade.SYNTH.md
+```
+
+scenario: `insufficient-minimal` (default), `partial-with-trade`, `sufficient-drawdown`
+
+`--markdown-out` 또는 `--store` 사용 시 runtime artifact가 생성된다. generated JSON/markdown/store JSONL은 commit하지 않는다. recommendations는 사람이 검토할 후보이며 auto-apply 금지.
+
+**기본 report 실행:** input 검증 + in-memory report 생성 + text summary 출력. 파일 write 없음.
 
 **artifact 주의:** `runtime/paper_review/*.jsonl`과 markdown output은 현재 `.gitignore` 일반 패턴으로 자동 ignore되지 않을 수 있다. `--store` / `--markdown-out` 사용 후 커밋 전 `git status` 확인.
 

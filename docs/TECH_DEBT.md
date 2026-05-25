@@ -18,7 +18,7 @@
 - Define explicit detectors for `false_positive_suspected_count` and `missed_risk_suspected_count`. Phase 16 currently keeps them at default 0.
 
 ### Paper review / report
-- Run `ops/build_paper_review_report.py` with a valid `PaperReviewInput` bundle once a safe bundle exists.
+- ~~Run `ops/build_paper_review_report.py` with a valid `PaperReviewInput` bundle once a safe bundle exists.~~ Done: dev synthetic builder + manual smoke via `ops/dev/build_synthetic_paper_review_input.py`.
 - Implement a `PaperReviewInput` collector/exporter that explicitly assembles NAV snapshots, DailySummary records, Postmortem records, Emergency events, OrderIntent records, and Fill records.
 - Avoid running `--store` and `--markdown-out` together until partial-side-effect behavior is either accepted or hardened. Recommended operation: generate markdown first, then save to JSONL store after review.
 
