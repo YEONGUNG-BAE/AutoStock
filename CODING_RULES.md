@@ -537,7 +537,7 @@ Phase 10에서 Python이 처리:
 - emergency Scout context
 - MDD_KILLSWITCH는 Python 룰베이스
 
-### Phase 16 — Long Paper Trading Review / Parameter Review [NEXT]
+### Phase 16 — Long Paper Trading Review / Parameter Review [DONE]
 
 목표: 장기 paper data를 기반으로 파라미터를 검토한다.
 

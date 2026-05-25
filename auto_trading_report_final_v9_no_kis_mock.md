@@ -2125,7 +2125,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - emergency Scout context
 - MDD_KILLSWITCH는 Python rule-based로 처리
 
-### Phase 16 — Long Paper Trading Review / Parameter Review [NEXT]
+### Phase 16 — Long Paper Trading Review / Parameter Review [DONE]
 
 장기 paper trading 데이터를 기반으로 시스템 파라미터를 검토한다.
 

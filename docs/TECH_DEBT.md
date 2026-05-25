@@ -8,6 +8,8 @@
 - Slippage/execution-quality review once reference prices are stored consistently in paper ledger inputs.
 - Parameter recommendation human approval workflow before any config edits (Phase 16 produces candidates only).
 - Explicit false-positive / missed-risk detector rules for MDD threshold review before those counts become non-zero.
+- `MddThresholdReview.false_positive_suspected_count` / `missed_risk_suspected_count` currently default to 0 but the model itself does not reject non-zero values. After explicit detector rules are agreed, consider adding a validator that rejects non-zero values until those detectors exist, or document the allowed source.
+- `PaperReviewInput` validates that `nav_snapshots`, `daily_summaries`, `postmortem_records`, and `emergency_events` fall within the review period, but does not yet validate that `order_intents` and `fills` timestamps fall within the period. Add explicit timestamp range validation if stale order/fill data could enter review inputs.
 
 ## P3 — Phase 15 Emergency Triggers
 
