@@ -199,7 +199,7 @@ validated decision bundle을 paper ledger에 반영한다.
 PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/paper_loop_input.json
 ```
 
-validation-only dry run:
+validation-only dry run (DB 파일/스키마 생성 없음):
 
 ```bash
 PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/paper_loop_input.json --no-write
@@ -218,7 +218,7 @@ PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/pap
 
 - `--initial-cash-krw`는 Decimal string으로 처리한다 (`float` 사용 금지).
 - 기존 ledger에 `Currency.KRW / AccountRole.PAPER` cash가 있으면 initial cash를 중복 seed하지 않는다.
-- duplicate `run_id`는 `PaperLoopRunner` fail-closed → exit 1.
+- duplicate `run_id`는 initial cash seed 전에 fail-closed → exit 1.
 - DB는 append-only; script가 DB를 자동 reset/delete하지 않는다.
 
 ### one-shot 절차

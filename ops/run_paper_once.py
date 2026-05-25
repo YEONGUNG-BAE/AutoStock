@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sqlite3
 import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -55,7 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-write",
         action="store_true",
-        help="validate input and prepare environment only; do not call PaperLoopRunner.run()",
+        help="validate input only; do not open DB or call PaperLoopRunner.run()",
     )
     parser.add_argument(
         "--json",
@@ -103,9 +104,12 @@ def _summarize_validation_error(exc: ValidationError) -> str:
 
 
 def _parse_initial_cash_krw(value: str) -> Decimal | None:
+    """Decimal string → finite non-negative amount. float 변환 금지."""
     try:
         amount = Decimal(value)
     except InvalidOperation:
+        return None
+    if not amount.is_finite():
         return None
     if amount < Decimal("0"):
         return None
@@ -272,6 +276,20 @@ def main(argv: list[str] | None = None) -> int:
             as_json=as_json,
         )
 
+    if args.no_write:
+        summary = _build_summary(
+            outcome="PASS",
+            validated_input=input_path,
+            ledger_db=ledger_db,
+            decision_db=decision_db,
+            initial_cash_seeded=False,
+            loop_input=loop_input,
+            result_status="VALIDATION_ONLY",
+            correlation_id=loop_input.correlation_id,
+        )
+        _emit_summary(summary, as_json=as_json)
+        return 0
+
     ledger_db.parent.mkdir(parents=True, exist_ok=True)
     decision_db.parent.mkdir(parents=True, exist_ok=True)
 
@@ -282,25 +300,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             ledger = SQLiteLedger(ledger_db)
             decision_store = SQLiteDecisionStore(decision_db)
-        except OSError as exc:
+        except (OSError, sqlite3.Error) as exc:
             return _fail("db", f"unable to open sqlite database: {exc}", as_json=as_json)
+
+        existing = decision_store.get_decision_snapshot(loop_input.normalized_run_id)
+        if existing is not None:
+            return _fail(
+                "runner",
+                f"decision_id already exists: {loop_input.normalized_run_id.value}",
+                as_json=as_json,
+            )
 
         cash_missing = _cash_missing(ledger)
         initial_cash_seeded = False
-
-        if args.no_write:
-            summary = _build_summary(
-                outcome="PASS",
-                validated_input=input_path,
-                ledger_db=ledger_db,
-                decision_db=decision_db,
-                initial_cash_seeded=False,
-                loop_input=loop_input,
-                result_status="VALIDATION_ONLY",
-                correlation_id=loop_input.correlation_id,
-            )
-            _emit_summary(summary, as_json=as_json)
-            return 0
 
         initial_cash = None
         if cash_missing:
