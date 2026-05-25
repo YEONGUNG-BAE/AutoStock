@@ -1,6 +1,10 @@
 # Technical Debt / P2·P3 Backlog
 
 
+## P3 — Phase 15 Emergency Triggers
+
+- Review MDD liquidation overshoot behavior: current Phase 15 planning may sell full loss positions before proportional profitable-position sales. This is safe as a conservative emergency plan foundation, but before execution integration, decide whether loss positions should support partial sells to stay closer to the target cash percentage and the 1~3% residual mismatch rule.
+
 ## P3 — Phase 14 KIS Live Read-only / Tiny-live Rehearsal
 
 - Validate KIS OpenAPI endpoint paths, TR IDs, request parameters, and response field variants against official KIS documentation before real read-only smoke.

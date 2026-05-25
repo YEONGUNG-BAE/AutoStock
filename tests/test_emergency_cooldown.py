@@ -125,7 +125,22 @@ def test_mdd_level_2_within_4_hours_of_level_1_suppressed() -> None:
     assert decision.suppressed is True
 
 
-def test_mdd_level_3_ignores_cooldown() -> None:
+def test_mdd_level_3_same_stage_same_day_suppressed() -> None:
+    now = datetime(2026, 5, 24, 18, 0, tzinfo=UTC)
+    prior = (
+        MddCooldownEvent(
+            stage=MddStage.LEVEL_3,
+            triggered_at=datetime(2026, 5, 24, 10, 0, tzinfo=UTC),
+        ),
+    )
+    decision = should_suppress_mdd_stage(stage=MddStage.LEVEL_3, now=now, prior_events=prior)
+    assert decision.suppressed is True
+    assert decision.debug_event_code == "MDD_COOLDOWN_ACTIVE"
+    assert decision.reason is not None
+    assert "LEVEL_3" in decision.reason
+
+
+def test_mdd_level_3_ignores_interval_cooldown_from_lower_stages() -> None:
     now = datetime(2026, 5, 24, 11, 0, tzinfo=UTC)
     prior = (
         MddCooldownEvent(

@@ -114,16 +114,14 @@ def should_suppress_mdd_stage(
 ) -> MddCooldownDecision:
     """MDD stage cooldown 규칙을 평가한다.
 
-    - 동일 stage는 하루 1회만 trigger
+    - 동일 stage는 하루 1회만 trigger (Level 1/2/3 모두 적용)
     - 다른 stage는 같은 날 trigger 가능
-    - Level 1 → Level 2는 4시간 cooldown (Level 3 제외)
-    - Level 3은 cooldown 무시
+    - Level 1 → Level 2는 4시간 interval cooldown
+    - Level 3는 lower-stage interval cooldown만 무시 (same-day duplicate는 적용)
     """
     now = require_timezone_aware_datetime(now, field_name="now")
 
-    if stage == MddStage.LEVEL_3:
-        return MddCooldownDecision(suppressed=False)
-
+    # 1. Same-stage same-day duplicate applies to all stages, including LEVEL_3.
     for event in prior_events:
         if event.stage != stage:
             continue
@@ -134,6 +132,11 @@ def should_suppress_mdd_stage(
                 debug_event_code="MDD_COOLDOWN_ACTIVE",
             )
 
+    # 2. LEVEL_3 ignores interval cooldown only.
+    if stage == MddStage.LEVEL_3:
+        return MddCooldownDecision(suppressed=False)
+
+    # 3. LEVEL_2 keeps Level 1 -> Level 2 4-hour cooldown.
     if stage == MddStage.LEVEL_2:
         level_1_events = [e for e in prior_events if e.stage == MddStage.LEVEL_1]
         if level_1_events:
