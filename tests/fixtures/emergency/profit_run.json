@@ -1,0 +1,12 @@
+{
+  "symbol": "AAPL",
+  "market": "US",
+  "account_role": "PAPER",
+  "stages": [
+    {"weight_percent": "10", "requires_llm_review": false, "status": "NOOP"},
+    {"weight_percent": "15", "requires_llm_review": true, "status": "DETECTED"},
+    {"weight_percent": "20", "requires_llm_review": true, "status": "DETECTED"}
+  ],
+  "detected_at": "2026-05-24T14:30:00+00:00",
+  "trigger_id_prefix": "trigger-profit-run-golden"
+}

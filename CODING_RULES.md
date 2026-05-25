@@ -500,7 +500,7 @@ Phase 10에서 Python이 처리:
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Postmortem용 `error_tags`를 저장하지 않으며 Top 3에서 제외
 
-### Phase 14 — KIS live read-only / Tiny-live Rehearsal [NEXT]
+### Phase 14 — KIS live read-only / Tiny-live Rehearsal [DONE]
 
 목표: 실전 계좌는 read-only 검증부터 시작하고, 주문 endpoint는 극소액 수동 tiny-live 직전에만 검증한다.
 
@@ -522,7 +522,7 @@ Phase 10에서 Python이 처리:
 - ISA smoke test 통과 전 ISA 자동 주문 금지
 - live order endpoint 자동 호출 금지
 
-### Phase 15 — Emergency Triggers
+### Phase 15 — Emergency Triggers [NEXT]
 
 목표: parser/validator/paper broker/replay 안정화 후 긴급 트리거를 구현한다.
 

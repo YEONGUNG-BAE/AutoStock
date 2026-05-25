@@ -1,0 +1,28 @@
+{
+  "levels": [
+    {
+      "current_nav": "9000000",
+      "historical_peak_nav": "10000000",
+      "expected_mdd_percent": "-10",
+      "expected_stage": "LEVEL_1",
+      "target_cash_percent": "50"
+    },
+    {
+      "current_nav": "8500000",
+      "historical_peak_nav": "10000000",
+      "expected_mdd_percent": "-15",
+      "expected_stage": "LEVEL_2",
+      "target_cash_percent": "80"
+    },
+    {
+      "current_nav": "8000000",
+      "historical_peak_nav": "10000000",
+      "expected_mdd_percent": "-20",
+      "expected_stage": "LEVEL_3",
+      "target_cash_percent": "95",
+      "halt_required": true
+    }
+  ],
+  "detected_at": "2026-05-24T14:30:00+00:00",
+  "trigger_id_prefix": "trigger-mdd-golden"
+}

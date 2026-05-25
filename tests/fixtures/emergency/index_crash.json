@@ -1,0 +1,12 @@
+{
+  "market": "US",
+  "index_symbol": "SPY",
+  "index_name": "S&P 500",
+  "previous_close": "500",
+  "current_value": "492.5",
+  "affected_holdings": ["AAPL", "MSFT"],
+  "detected_at": "2026-05-24T14:30:00+00:00",
+  "trigger_id": "trigger-index-crash-golden-001",
+  "expected_observed_percent": "-1.5",
+  "expected_threshold_percent": "-1.5"
+}

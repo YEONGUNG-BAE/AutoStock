@@ -1,0 +1,15 @@
+{
+  "symbol": "005930",
+  "market": "KR",
+  "sector": "semiconductor",
+  "account_role": "PAPER",
+  "quantity": "100",
+  "previous_close": "70000",
+  "current_price": "67900",
+  "market_value": "6790000",
+  "same_sector_symbols": ["000660"],
+  "detected_at": "2026-05-24T14:30:00+00:00",
+  "trigger_id": "trigger-stock-drop-golden-001",
+  "expected_observed_percent": "-3",
+  "expected_threshold_percent": "-3"
+}

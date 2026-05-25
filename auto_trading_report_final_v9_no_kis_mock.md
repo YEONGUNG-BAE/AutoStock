@@ -2088,7 +2088,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - Top 3 Error Tags는 Postmortem 태그만 집계
 - Debug.md는 Top 3 집계에서 제외
 
-### Phase 14 — KIS Live Read-only / Tiny-live Rehearsal [NEXT]
+### Phase 14 — KIS Live Read-only / Tiny-live Rehearsal [DONE]
 
 실전 계좌 연결은 read-only 검증부터 시작한다.
 
@@ -2110,7 +2110,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - ISA smoke test 전 ISA 자동 주문 금지
 - live order endpoint 자동 호출 금지
 
-### Phase 15 — Emergency Triggers
+### Phase 15 — Emergency Triggers [NEXT]
 
 정기 분석 외 긴급 트리거를 구현한다.
 

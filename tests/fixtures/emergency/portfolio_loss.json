@@ -1,0 +1,15 @@
+{
+  "previous_total_nav": "10000000",
+  "current_total_nav": "9800000",
+  "loss_contributors": [
+    {"symbol": "005930", "loss_contribution": "-80000"},
+    {"symbol": "000660", "loss_contribution": "-60000"},
+    {"symbol": "035420", "loss_contribution": "-40000"},
+    {"symbol": "035720", "loss_contribution": "-20000"}
+  ],
+  "account_role": "PAPER",
+  "detected_at": "2026-05-24T14:30:00+00:00",
+  "trigger_id": "trigger-portfolio-loss-golden-001",
+  "expected_observed_percent": "-2",
+  "expected_scope_symbols": ["005930", "000660", "035420"]
+}
