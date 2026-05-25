@@ -3,6 +3,7 @@
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live
+- ~~Add manual KIS read-only smoke ops entrypoint.~~ Done: `ops/run_kis_read_only_smoke.py` (explicit `--run` opt-in; no orders).
 - Verify KIS OpenAPI endpoint paths and TR IDs in `src/broker/kis_client.py` against the official KIS Open API documentation before real read-only smoke.
 - Keep `StdlibKisHttpTransport` as a manual smoke scaffold only. Do not connect it to scheduler/runtime default paths without a separate review.
 - `broker.kis_read_only.enabled=true` is not an automatic trigger. Read-only smoke must remain explicit/manual.

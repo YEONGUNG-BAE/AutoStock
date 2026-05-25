@@ -443,20 +443,53 @@ scenario: `insufficient-minimal` (default), `partial-with-trade`, `sufficient-dr
 
 ## 11. KIS read-only smoke procedure
 
-> **이번 단계에서 KIS smoke script는 구현하지 않는다.** 아래는 수동 운용 절차만 기록한다.
+`ops/run_kis_read_only_smoke.py` — **명시적 수동** KIS read-only smoke script.
+
+- default invocation은 **KIS HTTP 호출을 하지 않는다**
+- 실제 KIS 호출은 **`--run` flag가 있을 때만** 수행한다
+- **`broker.kis_read_only.enabled=true`는 자동 trigger가 아니다** — script를 수동으로 실행해야 한다
+- **order endpoint 호출 금지** — token / balance / quote / orderbook read-only만
+- **secrets / account numbers / access token 출력 금지** — account number는 masked만 출력
 
 ### P3 backlog
 
 - KIS endpoint / TR ID는 **공식 문서 대조 전까지 P3 backlog**다 (`docs/TECH_DEBT.md` 참조).
 
-### read-only smoke 절차
+### 필요 env vars
+
+| env var | 필요 여부 |
+|---|---|
+| `KIS_LIVE_APP_KEY` | required |
+| `KIS_LIVE_APP_SECRET` | required |
+| `KIS_ISA_ACCOUNT` | required if `use_isa_for_kr_and_gold=true` |
+| `KIS_US_REGULAR_ACCOUNT` | optional (현재 KR-focused smoke에서 미사용) |
+| `KIS_CMA_ACCOUNT` | optional/skipped unless `use_cma_for_order_execution=true` |
+
+KR smoke symbol **`411060`**은 Phase 14 기본 ISA/KR read-only smoke symbol이며, quote/orderbook smoke 기본값이다.
+
+### config / dry-run (HTTP 없음)
+
+```bash
+PYTHONPATH=src uv run python ops/run_kis_read_only_smoke.py
+
+PYTHONPATH=src uv run python ops/run_kis_read_only_smoke.py --check-config-only
+
+PYTHONPATH=src uv run python ops/run_kis_read_only_smoke.py --dry-run
+
+PYTHONPATH=src uv run python ops/run_kis_read_only_smoke.py --dry-run --json
+```
+
+### 실제 KIS read-only run (명시적 opt-in)
+
+```bash
+PYTHONPATH=src uv run python ops/run_kis_read_only_smoke.py --run --kr-symbol 411060
+```
+
+운영 전 확인:
 
 1. `config/config.toml`에서 live gates가 **비활성** 상태인지 확인한다 (`trading.mode=paper`, `allow_live_trading=false`).
 2. KIS credentials는 **환경변수**로만 제공 — repo에 commit하지 않는다.
-3. **`broker.kis_read_only.enabled=true`는 자동 실행 trigger가 아니다** — 명시적 수동 호출만 허용.
-4. 확인 대상: **balance / positions / current price / orderbook** (read-only).
-5. **order endpoint 호출 금지.**
-6. **secrets / account numbers commit 금지.**
+3. 확인 대상: **token / balance / current price / orderbook** (read-only).
 
 ### 실패 시
 
