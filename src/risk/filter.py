@@ -9,7 +9,7 @@ from allocator.models import AssetBucket
 from domain.money import Money
 from domain.validation import ValidationIssue, ValidationResult, ValidationSeverity
 
-from risk.models import RiskFilterInput, RiskMode
+from risk.models import RiskFilterContext, RiskFilterInput, RiskMode
 from risk.rules import (
     RISK_FILTER_SCHEMA,
     RISK_FILTER_VALIDATOR_VERSION,
@@ -116,7 +116,7 @@ def _check_action_supported(action: AnalysisAction) -> list[ValidationIssue]:
     ]
 
 
-def _check_mdd_killswitch(context, action: AnalysisAction) -> list[ValidationIssue]:
+def _check_mdd_killswitch(context: RiskFilterContext, action: AnalysisAction) -> list[ValidationIssue]:
     if context.mode != RiskMode.MDD_KILLSWITCH:
         return []
     issues: list[ValidationIssue] = [
@@ -130,7 +130,7 @@ def _check_mdd_killswitch(context, action: AnalysisAction) -> list[ValidationIss
     return issues
 
 
-def _check_mdd_percent_threshold(context) -> list[ValidationIssue]:
+def _check_mdd_percent_threshold(context: RiskFilterContext) -> list[ValidationIssue]:
     level = mdd_level_from_percent(context.mdd_percent)
     if level is None:
         return []
