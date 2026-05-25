@@ -354,12 +354,40 @@ Phase 16은 장기 paper trading 데이터를 기반으로 **파라미터 변경
 - **`human_approval_required=true`** — 사람 승인 없이 config 변경 금지.
 - config change는 **별도 PR**로만 한다 — review report에서 자동 반영하지 않는다.
 
-### review 실행 (개념)
+### review 실행
+
+```bash
+PYTHONPATH=src uv run python ops/build_paper_review_report.py --review-input path/to/paper_review_input.json
+```
+
+optional markdown:
+
+```bash
+PYTHONPATH=src uv run python ops/build_paper_review_report.py \
+  --review-input path/to/paper_review_input.json \
+  --markdown-out runtime/paper_review/report.md
+```
+
+optional store:
+
+```bash
+PYTHONPATH=src uv run python ops/build_paper_review_report.py \
+  --review-input path/to/paper_review_input.json \
+  --store runtime/paper_review/reports.jsonl
+```
+
+**Collector가 아님:** 이 script는 ledger/log/postmortem/emergency store를 자동으로 읽지 않는다. `PaperReviewInput` JSON은 후속 collector 또는 수동 export 절차로 준비한다. sample generator는 후속 작업에서 별도 구현한다. 구조 참고는 `tests/test_paper_review_*.py`만 본다.
+
+**기본 실행:** input 검증 + in-memory report 생성 + text summary 출력. 파일 write 없음.
+
+**artifact 주의:** `runtime/paper_review/*.jsonl`과 markdown output은 현재 `.gitignore` 일반 패턴으로 자동 ignore되지 않을 수 있다. `--store` / `--markdown-out` 사용 후 커밋 전 `git status` 확인.
+
+### review 절차
 
 ```text
 1. PaperReviewInput 준비 (nav_snapshots, daily_summaries, postmortem_records, emergency_events, order_intents, fills)
-2. build_paper_review_report(review_input) 호출
-3. render_paper_review_markdown(report)로 markdown 출력
+2. ops/build_paper_review_report.py --review-input ... 실행
+3. optional: --markdown-out 또는 --store
 4. recommendations 섹션을 사람이 검토
 5. 승인된 변경만 별도 PR로 config.toml.example / domain constants 수정
 ```
