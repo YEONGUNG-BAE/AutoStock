@@ -49,7 +49,19 @@ WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`872 passed
 
 ## 3. Ollama smoke procedure
 
-> **이번 단계에서 smoke script는 구현하지 않는다.** 아래는 수동 운용 절차만 기록한다.
+### Smoke script
+
+`ops/run_ollama_smoke.py` — 로컬 Ollama + `JsonRunner` JSON-only smoke (dummy schema only).
+
+```bash
+PYTHONPATH=src uv run python ops/run_ollama_smoke.py
+```
+
+옵션 override 예:
+
+```bash
+PYTHONPATH=src uv run python ops/run_ollama_smoke.py --host http://localhost:11434 --model qwen3.6:35b-a3b --verbose
+```
 
 ### 목적
 
@@ -58,20 +70,15 @@ WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`872 passed
 3. `temperature=0` deterministic JSON call 확인
 4. JSON parse / Pydantic validation 확인
 
-### 아직 구현되지 않은 script
+### 절차
 
-```
-ops/run_ollama_smoke.py   ← 미구현 (향후 추가)
-```
-
-### 절차 (수동)
-
-1. Ollama 서버가 실행 중인지 확인한다 (`http://localhost:11434` 또는 config에 지정된 host).
-2. config에 설정된 model이 `ollama list`에 존재하는지 확인한다.
-3. smoke 호출 시 **투자 판단 schema가 아닌 작은 dummy schema**를 사용한다.
-4. `JsonRunnerOptions.temperature`는 반드시 `0`이어야 한다 (`src/llm/json_runner.py`).
-5. smoke 중에는 **broker / KIS / paper ledger를 호출하지 않는다**.
-6. JSON parse 실패 또는 Pydantic validation 실패 시 Debug event로 기록하고 원인을 조사한다.
+1. `./ops/acceptance_check.sh` PASS 확인.
+2. Ollama 서버가 실행 중인지 확인한다 (`http://localhost:11434` 또는 config에 지정된 host).
+3. 위 smoke script를 실행한다 (기본 config: `config/config.toml.example`).
+4. smoke는 **투자 판단 schema가 아닌 script 내부 dummy schema**(`ok`, `message`, `number`)만 사용한다.
+5. `JsonRunnerOptions.temperature`는 항상 `0`이다 — CLI override 없음 (`src/llm/json_runner.py`).
+6. smoke 중에는 **broker / KIS / paper ledger를 호출하지 않는다**.
+7. JSON parse 실패, markdown fence, Pydantic validation 실패 시 exit 1 — 원인 조사 후 재실행.
 
 ### 실패 시
 
