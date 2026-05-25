@@ -2110,7 +2110,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - ISA smoke test 전 ISA 자동 주문 금지
 - live order endpoint 자동 호출 금지
 
-### Phase 15 — Emergency Triggers [NEXT]
+### Phase 15 — Emergency Triggers [DONE]
 
 정기 분석 외 긴급 트리거를 구현한다.
 
@@ -2125,7 +2125,7 @@ LLM 판단부터 PaperBroker 체결까지 replay 가능한 paper trading loop를
 - emergency Scout context
 - MDD_KILLSWITCH는 Python rule-based로 처리
 
-### Phase 16 — Long Paper Trading Review / Parameter Review
+### Phase 16 — Long Paper Trading Review / Parameter Review [NEXT]
 
 장기 paper trading 데이터를 기반으로 시스템 파라미터를 검토한다.
 

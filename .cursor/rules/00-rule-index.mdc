@@ -58,8 +58,8 @@ Before coding, open only the relevant rule file:
 - **Phase 12** — Logs / DailySummary / Debug Events **[DONE]**
 - **Phase 13** — Postmortem **[DONE]**
 - **Phase 14** — KIS Live Read-only / Tiny-live Rehearsal **[DONE]**
-- **Phase 15** — Emergency Triggers **[NEXT]**
-- **Phase 16** — Long Paper Trading Review / Parameter Review
+- **Phase 15** — Emergency Triggers **[DONE]**
+- **Phase 16** — Long Paper Trading Review / Parameter Review **[NEXT]**
 
 Emergency triggers (Phase 15) stay late. Do not implement them before parser, validator, paper broker, and replay tests are stable.
 

@@ -1,6 +1,14 @@
 # Technical Debt / P2·P3 Backlog
 
 
+## P3 — Phase 16 Long Paper Trading Review / Parameter Review
+
+- Real benchmark-relative review once benchmark series source is stable.
+- DailySummary coverage projection if existing data is incomplete for review period gap analysis.
+- Slippage/execution-quality review once reference prices are stored consistently in paper ledger inputs.
+- Parameter recommendation human approval workflow before any config edits (Phase 16 produces candidates only).
+- Explicit false-positive / missed-risk detector rules for MDD threshold review before those counts become non-zero.
+
 ## P3 — Phase 15 Emergency Triggers
 
 - Review MDD liquidation overshoot behavior: current Phase 15 planning may sell full loss positions before proportional profitable-position sales. This is safe as a conservative emergency plan foundation, but before execution integration, decide whether loss positions should support partial sells to stay closer to the target cash percentage and the 1~3% residual mismatch rule.

@@ -522,7 +522,7 @@ Phase 10에서 Python이 처리:
 - ISA smoke test 통과 전 ISA 자동 주문 금지
 - live order endpoint 자동 호출 금지
 
-### Phase 15 — Emergency Triggers [NEXT]
+### Phase 15 — Emergency Triggers [DONE]
 
 목표: parser/validator/paper broker/replay 안정화 후 긴급 트리거를 구현한다.
 
@@ -537,7 +537,7 @@ Phase 10에서 Python이 처리:
 - emergency Scout context
 - MDD_KILLSWITCH는 Python 룰베이스
 
-### Phase 16 — Long Paper Trading Review / Parameter Review
+### Phase 16 — Long Paper Trading Review / Parameter Review [NEXT]
 
 목표: 장기 paper data를 기반으로 파라미터를 검토한다.
 
