@@ -1,5 +1,38 @@
 # Technical Debt / P2·P3 Backlog
 
+## P3 — Ops / KIS / Paper Review Backlog
+
+### KIS read-only / tiny-live
+- Verify KIS OpenAPI endpoint paths and TR IDs in `src/broker/kis_client.py` against the official KIS Open API documentation before real read-only smoke.
+- Keep `StdlibKisHttpTransport` as a manual smoke scaffold only. Do not connect it to scheduler/runtime default paths without a separate review.
+- `broker.kis_read_only.enabled=true` is not an automatic trigger. Read-only smoke must remain explicit/manual.
+- Tiny-live actual order submission remains intentionally unimplemented. Do not add `submit_tiny_live_order()` / `place_tiny_live_order()` before a separate manual rehearsal.
+
+### AccountRole / legacy runtime data
+- If old runtime SQLite databases contain legacy `account_role` values (`ISA`, `GENERAL`, `CMA`), add an explicit migration script or discard those runtime DBs. Current semantic values are `KR_TAX_ADVANTAGED`, `US_REGULAR`, `CASH_BUFFER`, `PAPER`.
+
+### Emergency / MDD
+- Add optional DailySummary projection for emergency/MDD events without changing Phase 12 store semantics.
+- Consider settings/config override for emergency thresholds. Current implementation uses module constants.
+- Review MDD liquidation overshoot behavior. Loss-position-first liquidation can exceed target cash; partial sell sizing may be needed before execution integration.
+- Define explicit detectors for `false_positive_suspected_count` and `missed_risk_suspected_count`. Phase 16 currently keeps them at default 0.
+
+### Paper review / report
+- Run `ops/build_paper_review_report.py` with a valid `PaperReviewInput` bundle once a safe bundle exists.
+- Implement a `PaperReviewInput` collector/exporter that explicitly assembles NAV snapshots, DailySummary records, Postmortem records, Emergency events, OrderIntent records, and Fill records.
+- Avoid running `--store` and `--markdown-out` together until partial-side-effect behavior is either accepted or hardened. Recommended operation: generate markdown first, then save to JSONL store after review.
+
+### Paper operation entrypoints
+- Add a safe `PaperLoopInput` validated bundle builder for manual paper one-shot testing.
+- Run `ops/run_paper_once.py` against a valid bundle after the builder exists.
+
+### Date-ID / Date.md
+- Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.
+- Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
+
+### Ollama operation
+- Track local model smoke/latency stability for `qwen3.6:35b-mlx` and fallback `qwen3.6:35b`.
+- Do not auto-pull or auto-install Ollama models from scripts.
 
 ## P3 — Phase 16 Long Paper Trading Review / Parameter Review
 

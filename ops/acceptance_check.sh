@@ -183,6 +183,19 @@ check_tiny_live_submit
 check_auto_apply_true
 check_kis_account_pattern
 
+# Check 11 — runtime synthetic artifacts tracked in git
+check_runtime_synthetic_artifacts() {
+    local output
+    output="$(git ls-files | grep -E '^runtime/synthetic/' || true)"
+    if [ -z "$output" ]; then
+        pass "runtime synthetic artifacts: none"
+    else
+        fail "runtime synthetic artifacts: generated JSON tracked in git"
+    fi
+}
+
+check_runtime_synthetic_artifacts
+
 echo ""
 echo "Summary: $PASS_COUNT PASS, $WARN_COUNT WARN, $FAIL_COUNT FAIL"
 

@@ -212,7 +212,28 @@ PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/pap
 - `runtime/paper/ledger.sqlite3`
 - `runtime/paper/decisions.sqlite3`
 
-**입력:** `PaperLoopInput` JSON은 upstream Layer A에서 생성/검증되어야 한다. sample 생성기는 후속 작업에서 별도 구현한다. 구조 참고는 `tests/test_paper_loop_runner.py`만 본다.
+**입력:** production Layer A 출력 또는 dev synthetic builder(`ops/dev/build_synthetic_paper_loop_input.py`)로 준비한다. upstream Layer A orchestration entrypoint는 아직 없다.
+
+### Dev-only synthetic PaperLoopInput builder
+
+`ops/dev/build_synthetic_paper_loop_input.py` — **dev-only** deterministic synthetic fixture builder.
+
+- production Layer A가 **아니다**
+- Scout/Allocator/Analysis orchestration이 **아니다**
+- output: `runtime/synthetic/paper_loop_input.<scenario>.SYNTH.json`
+- 모든 id는 `SYNTH-` prefix
+- deterministic output (동일 명령 → byte-identical JSON)
+- generated JSON은 **commit하지 않는다**
+
+```bash
+PYTHONPATH=src uv run python ops/dev/build_synthetic_paper_loop_input.py --scenario normal-buy
+PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input runtime/synthetic/paper_loop_input.normal-buy.SYNTH.json --no-write
+PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input runtime/synthetic/paper_loop_input.normal-buy.SYNTH.json
+```
+
+scenario: `normal-buy` (default), `noop`, `risk-blocked`
+
+write mode 실행 전 `--no-write`로 먼저 검증한다. generated JSON과 runtime paper DB는 commit하지 않는다.
 
 **운영 규칙:**
 
