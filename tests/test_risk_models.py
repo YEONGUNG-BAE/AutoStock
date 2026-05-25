@@ -72,6 +72,32 @@ def test_naive_created_at_reject() -> None:
         _sample_context(created_at=datetime(2026, 5, 22, 12, 0))
 
 
+def test_risk_filter_context_created_at_accepts_iso_string() -> None:
+    context = RiskFilterContext.model_validate(
+        {
+            "created_at": "2026-05-22T12:00:00Z",
+            "mode": "normal",
+            "total_nav": {"amount": "100000000", "currency": "KRW"},
+            "cash": {"amount": "20000000", "currency": "KRW"},
+            "invested_amount": {"amount": "80000000", "currency": "KRW"},
+        }
+    )
+    assert context.created_at.tzinfo is not None
+
+
+def test_risk_filter_context_created_at_rejects_naive_string() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        RiskFilterContext.model_validate(
+            {
+                "created_at": "2026-05-22T12:00:00",
+                "mode": "normal",
+                "total_nav": {"amount": "100000000", "currency": "KRW"},
+                "cash": {"amount": "20000000", "currency": "KRW"},
+                "invested_amount": {"amount": "80000000", "currency": "KRW"},
+            }
+        )
+
+
 def test_total_nav_zero_reject() -> None:
     with pytest.raises(ValueError, match="total_nav"):
         _sample_context(total_nav=Money.from_str("0", KRW))

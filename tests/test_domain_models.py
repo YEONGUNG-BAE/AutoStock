@@ -314,6 +314,108 @@ def test_asset_class_enums_are_distinct() -> None:
     }
 
 
+def test_market_price_as_of_accepts_iso_string() -> None:
+    price = MarketPrice.model_validate(
+        {
+            "symbol": "005930",
+            "market": "KR",
+            "currency": "KRW",
+            "price": "70000",
+            "as_of": "2026-05-22T12:00:00Z",
+        }
+    )
+    assert price.as_of.tzinfo is not None
+
+
+def test_cash_snapshot_as_of_accepts_iso_string() -> None:
+    cash = CashSnapshot.model_validate(
+        {
+            "currency": "KRW",
+            "amount": "100000000",
+            "account_role": "PAPER",
+            "as_of": "2026-05-22T12:00:00+00:00",
+        }
+    )
+    assert cash.as_of.tzinfo is not None
+
+
+def test_nav_snapshot_as_of_accepts_iso_string() -> None:
+    nav = NavSnapshot.model_validate(
+        {
+            "snapshot_id": "nav-1",
+            "as_of": "2026-05-22T12:00:00Z",
+            "total_nav_krw": "1000",
+            "cash_krw": "300",
+            "invested_krw": "700",
+        }
+    )
+    assert nav.as_of.tzinfo is not None
+
+
+def test_portfolio_snapshot_as_of_accepts_iso_string() -> None:
+    portfolio = PortfolioSnapshot.model_validate(
+        {
+            "snapshot_id": "portfolio-1",
+            "as_of": "2026-05-22T12:00:00Z",
+            "positions": (),
+            "cash": (),
+            "total_nav_krw": "1000",
+            "cash_krw": "300",
+            "invested_percent": "70",
+        }
+    )
+    assert portfolio.as_of.tzinfo is not None
+
+
+def test_order_intent_created_at_accepts_iso_string() -> None:
+    intent = OrderIntent.model_validate(
+        {
+            "order_id": "order-1",
+            "correlation_id": "corr-1",
+            "symbol": "005930",
+            "market": "KR",
+            "asset_class": "KR_EQUITY",
+            "account_role": "PAPER",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "execution_mode": "normal",
+            "quantity": "10",
+            "created_at": "2026-05-22T12:00:00Z",
+        }
+    )
+    assert intent.created_at.tzinfo is not None
+
+
+def test_order_result_created_at_accepts_iso_string() -> None:
+    result = OrderResult.model_validate(
+        {
+            "order_id": "order-1",
+            "status": "FILLED",
+            "accepted": True,
+            "created_at": "2026-05-22T12:00:00Z",
+        }
+    )
+    assert result.created_at.tzinfo is not None
+
+
+def test_fill_filled_at_accepts_iso_string() -> None:
+    fill = Fill.model_validate(
+        {
+            "fill_id": "fill-1",
+            "order_id": "order-1",
+            "symbol": "005930",
+            "market": "KR",
+            "side": "BUY",
+            "quantity": "10",
+            "fill_price": "70000",
+            "commission": {"amount": "0", "currency": "KRW"},
+            "tax": {"amount": "0", "currency": "KRW"},
+            "filled_at": "2026-05-22T12:00:00Z",
+        }
+    )
+    assert fill.filled_at.tzinfo is not None
+
+
 def test_account_role_semantic_values() -> None:
     assert {role.value for role in AccountRole} == {
         "KR_TAX_ADVANTAGED",

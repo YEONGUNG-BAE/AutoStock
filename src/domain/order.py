@@ -7,7 +7,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config.settings import ExecutionMode
-from domain._datetime import require_timezone_aware_datetime
+from domain._datetime import parse_timezone_aware_datetime
 from domain._decimal import to_decimal, to_optional_decimal
 from domain._strings import normalize_required_string
 from domain.enums import AccountRole, AssetClass, Market, OrderSide, OrderStatus, OrderType, TimeInForce
@@ -51,7 +51,7 @@ class OrderIntent(BaseModel):
     @field_validator("created_at", mode="before")
     @classmethod
     def validate_created_at(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="created_at")
+        return parse_timezone_aware_datetime(value, field_name="created_at")
 
     @model_validator(mode="after")
     def validate_order_intent(self) -> Self:
@@ -98,7 +98,7 @@ class OrderResult(BaseModel):
     @field_validator("created_at", mode="before")
     @classmethod
     def validate_created_at(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="created_at")
+        return parse_timezone_aware_datetime(value, field_name="created_at")
 
     @model_validator(mode="after")
     def validate_order_result(self) -> Self:
@@ -144,7 +144,7 @@ class Fill(BaseModel):
     @field_validator("filled_at", mode="before")
     @classmethod
     def validate_filled_at(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="filled_at")
+        return parse_timezone_aware_datetime(value, field_name="filled_at")
 
     @model_validator(mode="after")
     def validate_commission_and_tax(self) -> Self:

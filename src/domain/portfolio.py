@@ -6,7 +6,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from domain._datetime import require_timezone_aware_datetime
+from domain._datetime import parse_timezone_aware_datetime
 from domain._decimal import to_decimal, to_optional_decimal
 from domain._strings import normalize_required_string
 from domain.position import CashSnapshot, Position
@@ -37,7 +37,7 @@ class PortfolioSnapshot(BaseModel):
     @field_validator("as_of", mode="before")
     @classmethod
     def validate_as_of(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="as_of")
+        return parse_timezone_aware_datetime(value, field_name="as_of")
 
     @field_validator("total_nav_krw", "cash_krw", "invested_percent", mode="before")
     @classmethod
@@ -81,7 +81,7 @@ class NavSnapshot(BaseModel):
     @field_validator("as_of", mode="before")
     @classmethod
     def validate_as_of(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="as_of")
+        return parse_timezone_aware_datetime(value, field_name="as_of")
 
     @field_validator("total_nav_krw", "cash_krw", "invested_krw", mode="before")
     @classmethod

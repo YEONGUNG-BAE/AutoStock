@@ -7,21 +7,12 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from decision.canonical_json import canonicalize_payload
-from domain._datetime import require_timezone_aware_datetime
+from domain._datetime import parse_timezone_aware_datetime
 from domain._strings import normalize_required_string
 from domain.identifiers import DateId, DecisionId, Percent
 
 ALLOCATOR_DECISION_SCHEMA = "allocator_decision.v1"
 SUMMARY_ONE_LINER_MAX_LENGTH = 200
-
-
-def _parse_timezone_aware_datetime(value: Any, *, field_name: str) -> datetime:
-    """datetime 객체 또는 ISO-8601 문자열을 timezone-aware datetime으로 변환한다."""
-    if isinstance(value, str):
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        parsed = datetime.fromisoformat(normalized)
-        return require_timezone_aware_datetime(parsed, field_name=field_name)
-    return require_timezone_aware_datetime(value, field_name=field_name)
 
 
 class AssetBucket(StrEnum):
@@ -296,7 +287,7 @@ class AllocatorDecision(BaseModel):
     @field_validator("created_at", mode="before")
     @classmethod
     def validate_created_at(cls, value: Any) -> datetime:
-        return _parse_timezone_aware_datetime(value, field_name="created_at")
+        return parse_timezone_aware_datetime(value, field_name="created_at")
 
     @field_validator("summary_one_liner", mode="after")
     @classmethod

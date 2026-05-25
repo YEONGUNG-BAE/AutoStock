@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from allocator.models import ALLOCATOR_DECISION_SCHEMA, AllocatorDecision
 from analysis.models import ANALYSIS_DECISION_SCHEMA, AnalysisDecision
 from decision.canonical_json import canonicalize_payload
-from domain._datetime import require_timezone_aware_datetime
+from domain._datetime import parse_timezone_aware_datetime
 from domain._strings import normalize_required_string
 from domain.decision import DecisionSnapshot
 from domain.enums import AccountRole, Currency, Market
@@ -92,7 +92,7 @@ class PaperLoopInput(BaseModel):
     @field_validator("created_at", mode="before")
     @classmethod
     def validate_created_at(cls, value: Any) -> datetime:
-        return require_timezone_aware_datetime(value, field_name="created_at")
+        return parse_timezone_aware_datetime(value, field_name="created_at")
 
     @field_validator("correlation_id", mode="before")
     @classmethod

@@ -138,3 +138,19 @@ def test_non_paper_account_role_reject(sample_risk_input_factory) -> None:
             sample_risk_input_factory,
             broker_account_role=AccountRole.KR_TAX_ADVANTAGED,
         )
+
+
+def test_paper_loop_input_json_roundtrip_with_iso_datetime_strings(
+    sample_risk_input_factory,
+) -> None:
+    """JSON file load path: ISO datetime string → PaperLoopInput.model_validate."""
+    import json
+
+    loop_input = _valid_loop_input(sample_risk_input_factory)
+    payload = json.loads(loop_input.model_dump_json())
+    roundtripped = PaperLoopInput.model_validate(payload)
+
+    assert roundtripped.normalized_run_id == loop_input.normalized_run_id
+    assert roundtripped.created_at == loop_input.created_at
+    assert roundtripped.risk_context.created_at == loop_input.risk_context.created_at
+    assert roundtripped.market_price.as_of == loop_input.market_price.as_of

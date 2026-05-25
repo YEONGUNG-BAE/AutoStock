@@ -23,8 +23,8 @@
 - Avoid running `--store` and `--markdown-out` together until partial-side-effect behavior is either accepted or hardened. Recommended operation: generate markdown first, then save to JSONL store after review.
 
 ### Paper operation entrypoints
-- Add a safe `PaperLoopInput` validated bundle builder for manual paper one-shot testing.
-- Run `ops/run_paper_once.py` against a valid bundle after the builder exists.
+- ~~Add a safe `PaperLoopInput` validated bundle builder for manual paper one-shot testing.~~ Done: `ops/dev/build_synthetic_paper_loop_input.py` (dev-only SYNTH fixtures).
+- ~~Run `ops/run_paper_once.py` against a valid bundle after the builder exists.~~ Done after datetime JSON roundtrip hardening in domain validators.
 
 ### Date-ID / Date.md
 - Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.
