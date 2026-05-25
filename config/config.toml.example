@@ -18,7 +18,7 @@ live_confirmation_phrase = "ENABLE_LIVE_TRADING"
 
 [llm]
 provider = "ollama"
-model = "qwen3.6:35b-a3b"
+model = "qwen3.6:35b-mlx"
 host = "http://localhost:11434"
 temperature = 0.0
 seed = 42

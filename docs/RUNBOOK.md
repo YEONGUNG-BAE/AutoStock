@@ -60,8 +60,10 @@ PYTHONPATH=src uv run python ops/run_ollama_smoke.py
 옵션 override 예:
 
 ```bash
-PYTHONPATH=src uv run python ops/run_ollama_smoke.py --host http://localhost:11434 --model qwen3.6:35b-a3b --verbose
+PYTHONPATH=src uv run python ops/run_ollama_smoke.py --host http://localhost:11434 --model qwen3.6:35b-mlx --verbose
 ```
+
+Mac mini 기본 운용 모델은 `qwen3.6:35b-mlx`다. Fallback tested model: `qwen3.6:35b` (동일 smoke 5/5 PASS).
 
 ### 목적
 
@@ -191,17 +193,43 @@ validated decision bundle을 paper ledger에 반영한다.
 - **fee / slippage / tax 모델은 단순화**되어 있음 (고정 비율 기반)
 - duplicate `run_id` / `decision_id`는 write 전 fail-closed
 
-### one-shot 실행 (개념)
+### one-shot 실행
+
+```bash
+PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/paper_loop_input.json
+```
+
+validation-only dry run:
+
+```bash
+PYTHONPATH=src uv run python ops/run_paper_once.py --validated-input path/to/paper_loop_input.json --no-write
+```
+
+**Layer B only:** 이 script는 LLM/Ollama/Scout/Allocator/Analysis orchestration을 하지 않는다. `PaperBrokerAdapter` + SQLite paper ledger만 사용한다.
+
+**기본 DB 경로** (`.gitignore`의 `*.sqlite3` 패턴으로 ignored):
+
+- `runtime/paper/ledger.sqlite3`
+- `runtime/paper/decisions.sqlite3`
+
+**입력:** `PaperLoopInput` JSON은 upstream Layer A에서 생성/검증되어야 한다. sample 생성기는 후속 작업에서 별도 구현한다. 구조 참고는 `tests/test_paper_loop_runner.py`만 본다.
+
+**운영 규칙:**
+
+- `--initial-cash-krw`는 Decimal string으로 처리한다 (`float` 사용 금지).
+- 기존 ledger에 `Currency.KRW / AccountRole.PAPER` cash가 있으면 initial cash를 중복 seed하지 않는다.
+- duplicate `run_id`는 `PaperLoopRunner` fail-closed → exit 1.
+- DB는 append-only; script가 DB를 자동 reset/delete하지 않는다.
+
+### one-shot 절차
 
 ```text
 1. acceptance_check PASS 확인
-2. validated AllocatorDecision + AnalysisDecision 준비 (JSON 또는 test fixture)
-3. RiskFilterContext + market prices 준비
-4. PaperLoopRunner.run(PaperLoopInput) 호출
+2. Ollama smoke PASS 확인 (Layer A LLM 사용 시)
+3. upstream Layer A에서 validated PaperLoopInput JSON 준비
+4. ops/run_paper_once.py --validated-input ... 실행
 5. OrderIntent / Fill / NavSnapshot / DecisionSnapshot 결과 검토
 ```
-
-> **참고:** `ops/run_paper_once.py`는 아직 미구현. 현재는 Python REPL 또는 test harness 패턴으로 one-shot을 수행한다.
 
 ---
 
