@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -85,6 +86,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print non-sensitive metadata only (no raw response body)",
     )
     return parser
+
+
+def _validate_timeout(timeout: float | None) -> str | None:
+    """--timeout override 검증. 실패 시 reason 문자열 반환."""
+    if timeout is None:
+        return None
+    if not math.isfinite(timeout):
+        return "--timeout must be a finite positive number of seconds"
+    if timeout <= 0:
+        return "--timeout must be greater than 0"
+    return None
 
 
 def _resolve_mode(args: argparse.Namespace) -> ModeName | None:
@@ -335,6 +347,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     as_json = args.json
     out: TextIO = sys.stdout
+
+    timeout_error = _validate_timeout(args.timeout)
+    if timeout_error is not None:
+        return _fail("input", timeout_error, as_json=as_json, out=out)
+
     config_path = Path(args.config)
 
     mode = _resolve_mode(args)
