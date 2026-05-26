@@ -27,6 +27,15 @@
 - ~~Add a safe `PaperLoopInput` validated bundle builder for manual paper one-shot testing.~~ Done: `ops/dev/build_synthetic_paper_loop_input.py` (dev-only SYNTH fixtures).
 - ~~Run `ops/run_paper_once.py` against a valid bundle after the builder exists.~~ Done after datetime JSON roundtrip hardening in domain validators.
 
+### Paper pilot workflow (Foundation 8A)
+- ~~Document 30-trading-day paper pilot daily workflow skeleton.~~ Done: `docs/PAPER_PILOT_WORKFLOW.md`.
+- **Evidence-based follow-ups (not pre-implemented):**
+  - Date.md export helper — trigger: Date.md ↔ store sync mistake ≥ 2 days
+  - Manual JSON intake validator (Foundation 8B) — trigger: same validation copy/paste ≥ 3 trading days
+  - Validated PaperLoopInput assembler (Foundation 8C) — trigger: manual assembly mistake ≥ 2 times
+  - DailySummary writer helper — trigger: template omission ≥ 2 times per week
+  - Optional LLM orchestration entrypoint (Foundation 8D) — trigger: daily ops > 60 min for 3 consecutive trading days
+
 ### Date-ID / Date.md
 - Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

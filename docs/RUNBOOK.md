@@ -35,15 +35,15 @@ chmod +x ops/acceptance_check.sh
 
 **기대 결과:**
 
-- 10개 check 모두 `[PASS]`
-- Summary: `10 PASS, 0 WARN, 0 FAIL`
+- 11개 check 모두 `[PASS]`
+- Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `872 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `891 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`872 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`891 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -542,6 +542,8 @@ Phase 14 tiny-live는 **dry-run gate/scaffold**다.
 
 아래 순서로 pilot을 진행한다. 각 단계는 이전 단계 PASS 후에만 진행한다.
 
+**하루 단위 daily workflow 상세:** [docs/PAPER_PILOT_WORKFLOW.md](PAPER_PILOT_WORKFLOW.md) — Date.md → Scout → Allocator → Analysis → Risk → PaperLoop → DailySummary → Postmortem 후보까지의 folder convention, 수동/자동 구분, Go/No-Go checklist.
+
 ```text
 1. acceptance_check
 2. Ollama smoke
@@ -578,6 +580,7 @@ Phase 14 tiny-live는 **dry-run gate/scaffold**다.
 
 | 문서 | 용도 |
 |---|---|
+| `docs/PAPER_PILOT_WORKFLOW.md` | 30거래일 paper pilot daily workflow skeleton |
 | `CODING_RULES.md` | Phase numbering, 핵심 원칙 |
 | `docs/DEBUG_EVENT_CODES.md` | Debug event catalog (human-only) |
 | `docs/POSTMORTEM_ERROR_TAGS.md` | Postmortem error tag catalog |

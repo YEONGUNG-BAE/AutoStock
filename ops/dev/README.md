@@ -13,3 +13,5 @@
 - 모든 synthetic id는 `SYNTH-` prefix
 - generated JSON은 **commit하지 않는다**
 - LLM/Ollama/KIS/PaperBroker/PaperLoopRunner/ledger store 호출 없음
+
+Daily paper pilot workflow: [docs/PAPER_PILOT_WORKFLOW.md](../../docs/PAPER_PILOT_WORKFLOW.md)
