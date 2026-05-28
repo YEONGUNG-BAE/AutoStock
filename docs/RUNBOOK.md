@@ -100,15 +100,45 @@ Ollama smoke가 실패하면 **daily paper pilot으로 넘어가지 않는다**.
 
 ### 추가 운영 규칙
 
-- **Date.md 자동 생성기는 이번 단계에서 구현하지 않는다.**
-- Date.md 작성/갱신은 **우선 수동 운영 절차**로 둔다.
+- **Foundation 8B** (`ops/research_source_intake.py`)가 operator-prepared JSONL → `SQLiteDateIdSourceStore` → `Date.md` export를 제공한다.
+- `Date.md`는 **read-only prompt reference**이며 store가 canonical이다.
+- external API fetch / LLM / trading 호출 **없음**.
+
+### Foundation 8B — research source intake (manual)
+
+입력 convention: `runtime/research/YYYY-MM-DD/research_sources.jsonl`
+
+```bash
+# validate JSONL only (no store / no Date.md write)
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl runtime/research/YYYY-MM-DD/research_sources.jsonl \
+  --validate-only \
+  --json
+
+# normal: JSONL → SQLite store → Date.md
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl runtime/research/YYYY-MM-DD/research_sources.jsonl \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --date-md-out runtime/research/YYYY-MM-DD/Date.md \
+  --json
+
+# export-only: existing store → Date.md
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --date-md-out runtime/research/YYYY-MM-DD/Date.exported.md \
+  --export-only \
+  --json
+```
+
+generated `runtime/research/` artifacts는 **commit하지 않는다**.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 
 ### 수동 갱신 절차 (개요)
 
-1. 당일 수집한 근거(뉴스, 공시, 매크로 등)를 `SQLiteDateIdSourceStore`에 기록한다.
-2. 해당 record를 기반으로 `Date.md`에 export 항목을 수동 추가/갱신한다.
+1. 당일 근거를 `research_sources.jsonl`에 operator-prepared record로 작성한다.
+2. 8B script로 store에 저장하고 `Date.md`를 export한다.
 3. LLM 호출 전 `Date.md`의 date_id 목록과 store record가 일치하는지 확인한다.
 4. stale evidence(오래된 date_id)는 Python validator가 거부할 수 있으므로, 당일 relevant evidence만 prompt에 포함한다.
 

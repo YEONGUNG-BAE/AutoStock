@@ -1,0 +1,2 @@
+Scout actual LLM entrypoint: NOT IMPLEMENTED.
+Day 0 uses synthetic PaperLoopInput as Layer B smoke only.

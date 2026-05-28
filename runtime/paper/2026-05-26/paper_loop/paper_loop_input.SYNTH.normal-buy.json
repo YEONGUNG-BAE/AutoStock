@@ -1,0 +1,218 @@
+{
+  "allocator_decision": {
+    "asset_allocator": {
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+          "source_name": null
+        }
+      ],
+      "summary": "SYNTHETIC DEV FIXTURE asset allocator",
+      "target_weights": {
+        "gold": "20",
+        "kr": "50",
+        "us": "30"
+      }
+    },
+    "cash_manager": {
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+          "source_name": null
+        }
+      ],
+      "recommended_cash_percent": "20",
+      "summary": "SYNTHETIC DEV FIXTURE cash manager"
+    },
+    "cash_policy": {
+      "cash_target_percent": "20",
+      "max_cash_percent": null,
+      "min_cash_percent": null,
+      "rationale": "SYNTHETIC DEV FIXTURE cash policy",
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+          "source_name": null
+        }
+      ]
+    },
+    "consistency_checker": {
+      "issues": [],
+      "passed": true,
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+          "source_name": null
+        }
+      ],
+      "summary": "SYNTHETIC DEV FIXTURE consistency ok"
+    },
+    "created_at": "2026-01-15T10:00:00+09:00",
+    "decision_id": "SYNTH-ALLOC-NORMAL-BUY",
+    "gold_policy_mode": "normal",
+    "metadata": {},
+    "reasons": [
+      {
+        "date_id": "260115-1",
+        "quote": null,
+        "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+        "source_name": null
+      }
+    ],
+    "schema_name": "allocator_decision.v1",
+    "signal_summary": {
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE allocator reason",
+          "source_name": null
+        }
+      ],
+      "summary": "SYNTHETIC DEV FIXTURE signal (normal-buy)"
+    },
+    "summary_one_liner": "SYNTHETIC DEV FIXTURE allocator (normal-buy)",
+    "target_weights": {
+      "gold": "20",
+      "kr": "50",
+      "us": "30"
+    },
+    "universe": "ALL"
+  },
+  "analysis_decision": {
+    "bear": {
+      "reasons": [
+        {
+          "date_id": "260115-1",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE analysis reason",
+          "source_name": null
+        }
+      ],
+      "risks": [
+        "SYNTHETIC DEV FIXTURE risk"
+      ],
+      "summary": "SYNTHETIC DEV FIXTURE bear"
+    },
+    "bull": {
+      "catalysts": [
+        "SYNTHETIC DEV FIXTURE catalyst"
+      ],
+      "reasons": [
+        {
+          "date_id": "260115-2",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE analysis reason",
+          "source_name": null
+        }
+      ],
+      "summary": "SYNTHETIC DEV FIXTURE bull"
+    },
+    "created_at": "2026-01-15T10:00:00+09:00",
+    "decision_id": "SYNTH-ANALYSIS-NORMAL-BUY",
+    "fund_manager": {
+      "action": "buy",
+      "rationale": "SYNTHETIC DEV FIXTURE fund manager (normal-buy)",
+      "reasons": [
+        {
+          "date_id": "260115-4",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE analysis reason",
+          "source_name": null
+        }
+      ],
+      "target_weight_percent": "5"
+    },
+    "market": "KR",
+    "metadata": {},
+    "reasons": [
+      {
+        "date_id": "260115-5",
+        "quote": null,
+        "reason": "SYNTHETIC DEV FIXTURE analysis reason",
+        "source_name": null
+      }
+    ],
+    "risk_manager": {
+      "max_weight_percent": null,
+      "reasons": [
+        {
+          "date_id": "260115-3",
+          "quote": null,
+          "reason": "SYNTHETIC DEV FIXTURE analysis reason",
+          "source_name": null
+        }
+      ],
+      "risk_flags": [],
+      "summary": "SYNTHETIC DEV FIXTURE risk manager"
+    },
+    "schema_name": "analysis_decision.v1",
+    "summary_one_liner": "SYNTHETIC DEV FIXTURE analysis (normal-buy)",
+    "symbol": "005930",
+    "universe": "KR_LARGE"
+  },
+  "broker_account_role": "PAPER",
+  "correlation_id": "SYNTH-CORR-NORMAL-BUY",
+  "created_at": "2026-01-15T10:00:00+09:00",
+  "market_price": {
+    "as_of": "2026-01-15T10:00:00+09:00",
+    "currency": "KRW",
+    "market": "KR",
+    "price": "70000",
+    "symbol": "005930"
+  },
+  "metadata": {
+    "generated_by": "ops/dev/build_synthetic_paper_loop_input.py",
+    "production_use": false,
+    "synthetic": true,
+    "synthetic_scenario": "normal-buy"
+  },
+  "risk_context": {
+    "allocator_symbol_target_weight": null,
+    "allocator_tolerance_percent": "5",
+    "asset_bucket": null,
+    "cash": {
+      "amount": "20000000",
+      "currency": "KRW"
+    },
+    "created_at": "2026-01-15T10:00:00+09:00",
+    "currency": null,
+    "current_asset_weights": null,
+    "current_symbol_cumulative_buy_cost": {
+      "amount": "1000000",
+      "currency": "KRW"
+    },
+    "current_symbol_market_value": {
+      "amount": "2000000",
+      "currency": "KRW"
+    },
+    "current_symbol_weight_percent": null,
+    "gold_trades_this_month": 0,
+    "gold_trades_this_quarter": 0,
+    "invested_amount": {
+      "amount": "80000000",
+      "currency": "KRW"
+    },
+    "market": null,
+    "mdd_percent": null,
+    "metadata": {},
+    "mode": "normal",
+    "paper_observation_min_invested_percent": null,
+    "proposed_price": null,
+    "reference_prices": null,
+    "total_nav": {
+      "amount": "100000000",
+      "currency": "KRW"
+    }
+  },
+  "run_id": "SYNTH-RUN-NORMAL-BUY",
+  "scout_summary": null
+}

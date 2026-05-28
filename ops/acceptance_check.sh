@@ -35,10 +35,10 @@ check_pytest() {
         fail "pytest: command failed (exit $exit_code)"
         return
     fi
-    if echo "$output" | grep -q "891 passed"; then
-        pass "pytest: 891 passed"
+    if echo "$output" | grep -q "908 passed"; then
+        pass "pytest: 908 passed"
     else
-        warn "pytest: exit 0 but baseline '891 passed' not found"
+        warn "pytest: exit 0 but baseline '908 passed' not found"
     fi
 }
 
@@ -183,18 +183,18 @@ check_tiny_live_submit
 check_auto_apply_true
 check_kis_account_pattern
 
-# Check 11 — runtime synthetic artifacts tracked in git
-check_runtime_synthetic_artifacts() {
+# Check 11 — runtime generated artifacts tracked in git
+check_runtime_generated_artifacts() {
     local output
-    output="$(git ls-files | grep -E '^runtime/synthetic/' || true)"
+    output="$(git ls-files | grep -E '^runtime/synthetic/|^runtime/research/' || true)"
     if [ -z "$output" ]; then
-        pass "runtime synthetic artifacts: none"
+        pass "runtime generated artifacts: none"
     else
-        fail "runtime synthetic artifacts: generated JSON tracked in git"
+        fail "runtime generated artifacts: generated files tracked in git"
     fi
 }
 
-check_runtime_synthetic_artifacts
+check_runtime_generated_artifacts
 
 echo ""
 echo "Summary: $PASS_COUNT PASS, $WARN_COUNT WARN, $FAIL_COUNT FAIL"

@@ -1,0 +1,13 @@
+verbose: config=config/config.toml.example
+verbose: host=http://localhost:11434
+verbose: model=qwen3.6:35b-mlx
+verbose: timeout_seconds=120
+verbose: prompt len=101 sha256=2824a8d1ba4d
+Ollama smoke: PASS
+config: config/config.toml.example
+host: http://localhost:11434
+model: qwen3.6:35b-mlx
+temperature: 0
+json_parsed: yes
+schema_validated: yes
+latency_ms: 542

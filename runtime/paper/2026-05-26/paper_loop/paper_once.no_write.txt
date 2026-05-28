@@ -1,0 +1,8 @@
+Paper once: PASS
+validated_input: runtime/paper/2026-05-26/paper_loop/paper_loop_input.SYNTH.normal-buy.json
+ledger_db: runtime/paper/ledger.sqlite3
+decision_db: runtime/paper/decisions.sqlite3
+initial_cash_seeded: no
+run_id: SYNTH-RUN-NORMAL-BUY
+status: VALIDATION_ONLY
+correlation_id: SYNTH-CORR-NORMAL-BUY

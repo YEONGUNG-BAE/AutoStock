@@ -27,17 +27,22 @@
 - ~~Add a safe `PaperLoopInput` validated bundle builder for manual paper one-shot testing.~~ Done: `ops/dev/build_synthetic_paper_loop_input.py` (dev-only SYNTH fixtures).
 - ~~Run `ops/run_paper_once.py` against a valid bundle after the builder exists.~~ Done after datetime JSON roundtrip hardening in domain validators.
 
-### Paper pilot workflow (Foundation 8A)
+### Paper pilot workflow (Foundation 8A–8I)
 - ~~Document 30-trading-day paper pilot daily workflow skeleton.~~ Done: `docs/PAPER_PILOT_WORKFLOW.md`.
+- ~~Foundation 8B: Research Source Intake + Date.md Export.~~ Done: `ops/research_source_intake.py`.
 - **Evidence-based follow-ups (not pre-implemented):**
-  - Date.md export helper — trigger: Date.md ↔ store sync mistake ≥ 2 days
-  - Manual JSON intake validator (Foundation 8B) — trigger: same validation copy/paste ≥ 3 trading days
-  - Validated PaperLoopInput assembler (Foundation 8C) — trigger: manual assembly mistake ≥ 2 times
+  - Foundation 8C: Universe v0 + Date.md prompt-reference smoke
+  - Foundation 8D: Scout Once manual LLM call
+  - Foundation 8E: Manual LLM JSON Intake Validator
+  - Foundation 8F: Portfolio state snapshot + Allocator Once
+  - Foundation 8G: Analysis Once
+  - Foundation 8H: Production PaperLoopInput Assembler
+  - Foundation 8I: End-to-End no-write rehearsal
   - DailySummary writer helper — trigger: template omission ≥ 2 times per week
-  - Optional LLM orchestration entrypoint (Foundation 8D) — trigger: daily ops > 60 min for 3 consecutive trading days
+  - Postmortem weekly template helper — trigger: tag summary format errors ≥ 2 times
 
 ### Date-ID / Date.md
-- Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.
+- ~~Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.~~ Done in Foundation 8B (`ops/research_source_intake.py`); real API fetchers remain deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 
 ### Ollama operation

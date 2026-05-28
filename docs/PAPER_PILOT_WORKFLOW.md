@@ -3,7 +3,8 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B/8C/8D는 며칠간 manual pilot을 돌린 뒤 **관측된 friction**이 있을 때만 evidence-based로 구현한다.
+> Foundation 8B (Research Source Intake + Date.md Export)는 **Day 0 roadmap**에 포함된다.  
+> Foundation 8C~8I는 evidence-based로 순차 진행하되, 8B는 manual pilot 전제 인프라다.
 
 ---
 
@@ -125,14 +126,20 @@ append-only; day folder는 **당일 운영 기록**이고 ledger는 **누적 sou
 - LLM prompt에는 **Date.md에 존재하는 date_id만** 사용한다.
 - LLM output의 `reasons[].date_id`는 Python Date-ID validator로 검증한다.
 - Date.md에 없는 date_id가 하나라도 나오면 **해당 LLM output 전체를 폐기**한다 (부분 salvage 금지).
-- Date.md 자동 생성기 / export helper는 **아직 없다**. pilot 초기에는 **수동 작성·갱신**한다.
+- Foundation **8B**가 manual/file-based **Date.md export helper** (`ops/research_source_intake.py`)를 제공한다.
+- `Date.md`는 **read-only prompt reference**이며, **SQLiteDateIdSourceStore**가 canonical store다.
+- pilot 초기 intake 경로: `runtime/research/YYYY-MM-DD/research_sources.jsonl` → store → `Date.md`
+- paper day folder의 `date/Date.md`는 research export를 복사하거나 symlink 없이 운영자가 당일 folder로 가져온다.
 
 ### 파일 convention
 
 | 파일 | 용도 |
 |---|---|
-| `date/Date.md` | 당일 prompt reference (수동) |
-| `date/date_id_sources.jsonl` | store export snapshot (수동 export 또는 향후 helper) |
+| `runtime/research/YYYY-MM-DD/research_sources.jsonl` | operator-prepared intake JSONL |
+| `runtime/research/YYYY-MM-DD/date_id_sources.sqlite3` | optional local Date-ID store |
+| `runtime/research/YYYY-MM-DD/Date.md` | exported prompt reference (8B) |
+| `runtime/paper/YYYY-MM-DD/date/Date.md` | 당일 paper run prompt reference |
+| `runtime/paper/YYYY-MM-DD/date/date_id_sources.jsonl` | optional store export snapshot |
 
 ### Pass gate
 
@@ -364,21 +371,41 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 
 ---
 
-## 12. Current gaps and evidence-based next steps
+## 12. Foundation roadmap (8B–8I) and evidence-based follow-ups
 
-Foundation **8B / 8C / 8D**는 **미리 구현하지 않는다.**  
-며칠간 manual pilot 후 가장 큰 friction을 확인하고, trigger condition을 만족할 때만 구현한다.
+### Day 0 roadmap (Foundation numbering — operational, not Phase numbering)
 
-| ID | 후보 | Trigger condition |
+| ID | 이름 | 목적 |
 |---|---|---|
-| **8B** | manual JSON intake validator (raw → validated CLI) | 동일 validation copy/paste를 **3거래일 이상** 반복 |
-| **8C** | validated PaperLoopInput assembler | PaperLoopInput **수동 조립 실수 2회 이상** |
-| **8D** | optional LLM orchestration entrypoint | 하루 운영 시간이 **60분을 3거래일 연속** 초과 |
-| — | Date.md export helper | Date.md ↔ store sync 실수 **2회 이상** |
-| — | DailySummary writer helper | DailySummary template 누락 필드가 **주 2회 이상** |
-| — | Postmortem weekly template helper | weekly close 시 tag summary 형식 오류 **2회 이상** |
+| **8B** | Research Source Intake + Date.md Export | operator JSONL → validated store → Date.md |
+| **8C** | Universe v0 + Date.md prompt-reference smoke | 제한 universe + Date.md citation smoke |
+| **8D** | Scout Once manual LLM call | Scout prompt 1회 수동 실행 절차 고정 |
+| **8E** | Manual LLM JSON Intake Validator | raw → validated JSON CLI (Scout/Allocator/Analysis) |
+| **8F** | Portfolio state snapshot + Allocator Once | portfolio snapshot + Allocator 1회 |
+| **8G** | Analysis Once | symbol/market별 Analysis 1회 |
+| **8H** | Production PaperLoopInput Assembler | validated Layer A → PaperLoopInput |
+| **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
 
-**Evidence log:** friction 관측 시 `runtime/paper/YYYY-MM-DD/README.md`의 Manual notes에 기록 → 주간 review에서 8B/8C/8D 우선순위 결정.
+**8B는 Day 0에 포함.** 8C~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+
+### Controlled walk-through vs 30-trading-day pilot
+
+- **Controlled Day 1 walk-through** — 8B~8I를 순서대로 **1회** 수동 검증. 30거래일 pilot **시작과 동일하지 않다**.
+- **30-trading-day paper pilot start** — repeatable manual intake discipline **또는** real API fetchers / repeatable intake automation이 갖춰진 뒤에만 시작한다.
+
+### Evidence-based automation (8C~8I 내부 helper)
+
+아래는 **미리 구현하지 않고**, manual pilot friction 관측 후 trigger 충족 시 검토한다.
+
+| 후보 | Trigger condition |
+|---|---|
+| 8E manual JSON intake validator (if not done in 8E scope) | 동일 validation copy/paste **3거래일 이상** |
+| 8H PaperLoopInput assembler | 수동 조립 실수 **2회 이상** |
+| optional orchestration beyond 8I | 하루 운영 **60분 초과가 3거래일 연속** |
+| DailySummary writer helper | template 누락 **주 2회 이상** |
+| Postmortem weekly template helper | tag summary 형식 오류 **2회 이상** |
+
+**Evidence log:** friction 관측 시 `runtime/paper/YYYY-MM-DD/README.md` Manual notes에 기록.
 
 ---
 
