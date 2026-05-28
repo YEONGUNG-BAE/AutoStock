@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `950 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `977 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`950 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`977 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -173,6 +173,26 @@ PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
 
 운영자는 `scout_prompt.md`를 LLM/Ollama UI에 **수동 paste**하고, raw JSON을 suggested path에 **수동 저장**한다.
 automatic LLM call / raw Scout validation / trading **없음**.
+
+### Foundation 8E — Scout raw JSON intake validator
+
+8D packet + operator manual raw JSON 저장 후 ScoutSummary validation:
+
+```bash
+PYTHONPATH=src uv run python ops/validate_scout_raw_json.py \
+  --raw-json runtime/paper/YYYY-MM-DD/scout/scout_output.kr.raw.json \
+  --scout-input runtime/paper/YYYY-MM-DD/scout/scout_input.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/scout \
+  --json
+```
+
+생성 파일: `scout_output.validated.json`, `scout_validation.txt`, `scout_validation_summary.json`.
+
+raw JSON은 **단일 JSON object만** 허용한다. markdown fence, fence 밖 prose, array/string root는 거부한다.
+`ScoutSummary.created_at`은 timezone-aware datetime이면 충분하며, 8E는 `ScoutInput.created_at` 대비 freshness ordering을 검사하지 않는다.
+automatic LLM call / Allocator / Analysis validation / trading **없음**.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.

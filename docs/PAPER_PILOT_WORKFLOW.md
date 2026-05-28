@@ -3,8 +3,8 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet)는 **Day 0 roadmap**에 포함된다.  
-> Foundation 8E~8I는 evidence-based로 순차 진행한다.
+> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator)는 **Day 0 roadmap**에 포함된다.  
+> Foundation 8F~8I는 evidence-based로 순차 진행한다.
 
 ---
 
@@ -18,6 +18,7 @@
 | Date.md export helper | **있음** — Foundation 8B `ops/research_source_intake.py`, manual/file-based only (scheduler/collector 없음) |
 | Universe v0 + Date.md smoke | **있음** — Foundation 8C `ops/run_date_md_smoke.py`, validation only (LLM/API/trading 없음) |
 | Scout Once manual packet | **있음** — Foundation 8D `ops/build_scout_manual_packet.py`, packet only (LLM call/raw validation 없음) |
+| Scout raw JSON validator | **있음** — Foundation 8E `ops/validate_scout_raw_json.py`, ScoutSummary validation only |
 | DailySummary / Postmortem 자동 생성기 | **없음** |
 | Scheduler / launchd | **없음** |
 | KIS / live / tiny-live order | **이 workflow와 무관** — paper ledger only |
@@ -382,13 +383,13 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8B** | Research Source Intake + Date.md Export | operator JSONL → validated store → Date.md |
 | **8C** | Universe v0 + Date.md prompt-reference smoke | `config/universe.paper.toml.example` + `ops/run_date_md_smoke.py` |
 | **8D** | Scout Once manual LLM call | `ops/build_scout_manual_packet.py` — ScoutInput + scout_prompt (LLM call 없음) |
-| **8E** | Manual LLM JSON Intake Validator | raw → validated JSON CLI (Scout/Allocator/Analysis) |
+| **8E** | Manual LLM JSON Intake Validator (Scout) | `ops/validate_scout_raw_json.py` — raw → validated ScoutSummary |
 | **8F** | Portfolio state snapshot + Allocator Once | portfolio snapshot + Allocator 1회 |
 | **8G** | Analysis Once | symbol/market별 Analysis 1회 |
 | **8H** | Production PaperLoopInput Assembler | validated Layer A → PaperLoopInput |
 | **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
 
-**8B·8C·8D는 Day 0에 포함.** 8E~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+**8B·8C·8D·8E는 Day 0에 포함.** 8F~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
 
 ### Universe v0 convention (Foundation 8C)
 
@@ -420,7 +421,7 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 | `runtime/paper/YYYY-MM-DD/scout/scout_output.<scope>.raw.json` | operator manual raw LLM output (**8D가 생성하지 않음**) |
 
 8D packet builder (`ops/build_scout_manual_packet.py`)는 ScoutInput + scout_prompt를 생성한다.
-**LLM을 호출하지 않으며**, raw/validated Scout output을 생성·검증하지 않는다 (8E deferred).
+**LLM을 호출하지 않으며**, raw/validated Scout output을 생성하지 않는다.
 
 ```bash
 PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
@@ -433,18 +434,40 @@ PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
   --json
 ```
 
+### Scout raw JSON validation convention (Foundation 8E)
+
+| Path | 용도 |
+|---|---|
+| `runtime/paper/YYYY-MM-DD/scout/scout_output.<scope>.raw.json` | operator manual raw LLM output |
+| `runtime/paper/YYYY-MM-DD/scout/scout_output.validated.json` | validated ScoutSummary JSON |
+| `runtime/paper/YYYY-MM-DD/scout/scout_validation.txt` | human-readable validation log |
+| `runtime/paper/YYYY-MM-DD/scout/scout_validation_summary.json` | machine-readable validation summary |
+
+8E validator (`ops/validate_scout_raw_json.py`)는 raw Scout JSON만 검증한다.
+Allocator/Analysis validation은 **8E 범위 밖**이다.
+`ScoutSummary.created_at`은 timezone-aware datetime이면 충분하며, 8E는 `ScoutInput.created_at` 대비 freshness ordering을 검사하지 않는다.
+
+```bash
+PYTHONPATH=src uv run python ops/validate_scout_raw_json.py \
+  --raw-json runtime/paper/YYYY-MM-DD/scout/scout_output.kr.raw.json \
+  --scout-input runtime/paper/YYYY-MM-DD/scout/scout_input.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/scout \
+  --json
+```
+
 ### Controlled walk-through vs 30-trading-day pilot
 
 - **Controlled Day 1 walk-through** — 8B~8I를 순서대로 **1회** 수동 검증. 30거래일 pilot **시작과 동일하지 않다**.
 - **30-trading-day paper pilot start** — repeatable manual intake discipline **또는** real API fetchers / repeatable intake automation이 갖춰진 뒤에만 시작한다.
 
-### Evidence-based automation (8E~8I 내부 helper)
+### Evidence-based automation (8F~8I 내부 helper)
 
 아래는 **미리 구현하지 않고**, manual pilot friction 관측 후 trigger 충족 시 검토한다.
 
 | 후보 | Trigger condition |
 |---|---|
-| 8E manual JSON intake validator (if not done in 8E scope) | 동일 validation copy/paste **3거래일 이상** |
 | 8H PaperLoopInput assembler | 수동 조립 실수 **2회 이상** |
 | optional orchestration beyond 8I | 하루 운영 **60분 초과가 3거래일 연속** |
 | DailySummary writer helper | template 누락 **주 2회 이상** |
