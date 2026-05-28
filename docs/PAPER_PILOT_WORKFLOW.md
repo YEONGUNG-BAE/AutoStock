@@ -3,8 +3,8 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once), 8G (Analysis Once per-symbol)는 **Day 0 roadmap**에 포함된다.
-> Foundation 8H~8I는 evidence-based로 순차 진행한다.
+> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once), 8G (Analysis Once per-symbol), 8H (PaperLoopInput assembler)는 **Day 0 roadmap**에 포함된다.  
+> Foundation 8I는 evidence-based로 순차 진행한다.
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|
 | Automatic daily paper trading system | **아님** — manual + validated paper operation |
 | LLM orchestration entrypoint (Scout→Allocator→Analysis 일괄) | **없음** |
-| Production PaperLoopInput assembler | **없음** |
+| Production PaperLoopInput assembler (per-symbol) | **있음** — Foundation 8H `ops/assemble_paper_loop_input.py` |
 | Date.md export helper | **있음** — Foundation 8B `ops/research_source_intake.py`, manual/file-based only (scheduler/collector 없음) |
 | Universe v0 + Date.md smoke | **있음** — Foundation 8C `ops/run_date_md_smoke.py`, validation only (LLM/API/trading 없음) |
 | Scout Once manual packet | **있음** — Foundation 8D `ops/build_scout_manual_packet.py`, packet only (LLM call/raw validation 없음) |
@@ -219,7 +219,7 @@ Pilot 초기에는 **단일 symbol** 또는 **소수 종목**만 Analysis 실행
 
 ### 현재 gap
 
-- Production PaperLoopInput assembler **없음**
+- Production PaperLoopInput assembler — Foundation 8H `ops/assemble_paper_loop_input.py` (**조립·검증만**, 실행 없음)
 - `ops/dev/build_synthetic_paper_loop_input.py`는 **dev-only SYNTH fixture** — production input 아님
 
 ### 수동 조립
@@ -388,10 +388,10 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8E** | Manual LLM JSON Intake Validator (Scout) | `ops/validate_scout_raw_json.py` — raw → validated ScoutSummary |
 | **8F** | Portfolio state snapshot + Allocator Once | `ops/build_allocator_manual_packet.py` + `ops/validate_allocator_raw_json.py` |
 | **8G** | Analysis Once | `ops/build_analysis_manual_packet.py` + `ops/validate_analysis_raw_json.py` (per-symbol) |
-| **8H** | Production PaperLoopInput Assembler | validated Layer A → PaperLoopInput |
+| **8H** | Production PaperLoopInput Assembler | `ops/assemble_paper_loop_input.py` (per-symbol, no execution) |
 | **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
 
-**8B·8C·8D·8E·8F·8G는 Day 0에 포함.** 8H~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+**8B·8C·8D·8E·8F·8G·8H는 Day 0에 포함.** 8I는 dependency order를 따르며, 8H PASS 후 진행한다.
 
 ### Universe v0 convention (Foundation 8C)
 
@@ -529,6 +529,34 @@ PYTHONPATH=src uv run python ops/validate_analysis_raw_json.py \
   --date-md runtime/research/YYYY-MM-DD/Date.md \
   --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
   --out-dir runtime/paper/YYYY-MM-DD/analysis \
+  --json
+```
+
+### PaperLoopInput assembly convention (Foundation 8H)
+
+| Path | 용도 |
+|---|---|
+| `docs/examples/paper_loop_context.paper.example.json` | committed synthetic example (copy only) |
+| `runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_context.json` | operator local context (**commit 금지**) |
+| `runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_input.<market>.<symbol>.json` | validated PaperLoopInput JSON |
+| `runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_input_assembly.<market>.<symbol>.txt` | human-readable assembly log |
+| `runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_input_summary.<market>.<symbol>.json` | machine-readable summary |
+
+8H assembler는 validated ScoutSummary(optional) + AllocatorDecision + AnalysisDecision + paper loop context + Date.md/store로 **PaperLoopInput만** 생성한다.
+**LLM·외부 시세 API·PaperLoopRunner·PaperBroker·KIS·OrderIntent 생성·ledger/fill/daily summary/postmortem 기록 없음.** `broker_account_role`는 **PAPER** 고정.
+
+```bash
+cp docs/examples/paper_loop_context.paper.example.json \
+  runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_context.json
+PYTHONPATH=src uv run python ops/assemble_paper_loop_input.py \
+  --validated-scout runtime/paper/YYYY-MM-DD/scout/scout_output.validated.json \
+  --validated-allocator runtime/paper/YYYY-MM-DD/allocator/allocator_output.validated.json \
+  --validated-analysis runtime/paper/YYYY-MM-DD/analysis/analysis_output.kr.SYNTH-KR-0001.validated.json \
+  --portfolio-state runtime/paper/YYYY-MM-DD/portfolio/portfolio_state.json \
+  --paper-loop-context runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_context.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/paper_loop \
   --json
 ```
 

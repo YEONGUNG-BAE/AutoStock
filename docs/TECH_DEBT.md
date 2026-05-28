@@ -32,12 +32,12 @@
 - ~~Foundation 8B: Research Source Intake + Date.md Export.~~ Done: `ops/research_source_intake.py`.
 - ~~Foundation 8C: Universe v0 + Date.md prompt-reference smoke.~~ Done: `config/universe.paper.toml.example`, `ops/run_date_md_smoke.py`.
 - ~~Foundation 8D: Scout Once manual LLM call packet.~~ Done: `ops/build_scout_manual_packet.py`.
-  - **P2 hardening candidate (not blocking 8H):** 8D/8E/8F/8G ops scripts write three output files sequentially via `write_text()` after preflight existence checks. Mid-sequence failure can leave partial artifacts; recovery is `--force` re-run or manual cleanup. Apply atomic-write pattern before 30-trading-day pilot start, or fold into a broader ops-script atomic-write pass at 8H/8I.
+  - **P2 hardening candidate (not blocking 8I):** 8D/8E/8F/8G/8H ops scripts write three output files sequentially via `write_text()` after preflight existence checks. Mid-sequence failure can leave partial artifacts; recovery is `--force` re-run or manual cleanup. Apply atomic-write pattern before 30-trading-day pilot start, or fold into a broader ops-script atomic-write pass at 8I.
 - ~~Foundation 8E: Manual LLM JSON Intake Validator (Scout).~~ Done: `ops/validate_scout_raw_json.py`.
 - ~~Foundation 8F: Portfolio state snapshot + Allocator Once.~~ Done: `ops/build_allocator_manual_packet.py`, `ops/validate_allocator_raw_json.py`, `docs/examples/portfolio_state.paper.example.json`.
 - ~~Foundation 8G: Analysis Once (per-symbol).~~ Done: `ops/build_analysis_manual_packet.py`, `ops/validate_analysis_raw_json.py`.
+- ~~Foundation 8H: Production PaperLoopInput Assembler (per-symbol).~~ Done: `ops/assemble_paper_loop_input.py`, `docs/examples/paper_loop_context.paper.example.json`.
 - **Evidence-based follow-ups (not pre-implemented):**
-  - Foundation 8H: Production PaperLoopInput Assembler
   - Foundation 8I: End-to-End no-write rehearsal
   - DailySummary writer helper — trigger: template omission ≥ 2 times per week
   - Postmortem weekly template helper — trigger: tag summary format errors ≥ 2 times
