@@ -1,0 +1,27 @@
+# Paper pilot Universe v0 example (synthetic symbols only — not investment advice).
+#
+# Copy to a local runtime file for actual pilot work:
+#   cp config/universe.paper.toml.example runtime/paper/universe.paper.toml
+#
+# Do not commit runtime/paper/universe.paper.toml.
+
+version = 1
+name = "paper-v0"
+description = "Synthetic paper pilot universe v0 for Foundation 8C smoke."
+base_market = "KR"
+
+[[symbols]]
+symbol = "SYNTH-KR-0001"
+market = "KR"
+display_name = "Synthetic KR Smoke Symbol 1"
+enabled = true
+tags = ["synthetic", "smoke"]
+notes = "Enabled for 8C Date.md prompt-reference smoke."
+
+[[symbols]]
+symbol = "SYNTH-US-0001"
+market = "US"
+display_name = "Synthetic US Smoke Symbol 1"
+enabled = false
+tags = ["synthetic", "smoke"]
+notes = "Disabled example entry; not required for default 8C smoke."

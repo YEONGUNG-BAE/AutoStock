@@ -3,8 +3,8 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B (Research Source Intake + Date.md Export)는 **Day 0 roadmap**에 포함된다.  
-> Foundation 8C~8I는 evidence-based로 순차 진행하되, 8B는 manual pilot 전제 인프라다.
+> Foundation 8B (Research Source Intake + Date.md Export)와 8C (Universe v0 + Date.md smoke)는 **Day 0 roadmap**에 포함된다.  
+> Foundation 8D~8I는 evidence-based로 순차 진행한다.
 
 ---
 
@@ -16,6 +16,7 @@
 | LLM orchestration entrypoint (Scout→Allocator→Analysis 일괄) | **없음** |
 | Production PaperLoopInput assembler | **없음** |
 | Date.md export helper | **있음** — Foundation 8B `ops/research_source_intake.py`, manual/file-based only (scheduler/collector 없음) |
+| Universe v0 + Date.md smoke | **있음** — Foundation 8C `ops/run_date_md_smoke.py`, validation only (LLM/API/trading 없음) |
 | DailySummary / Postmortem 자동 생성기 | **없음** |
 | Scheduler / launchd | **없음** |
 | KIS / live / tiny-live order | **이 workflow와 무관** — paper ledger only |
@@ -378,7 +379,7 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | ID | 이름 | 목적 |
 |---|---|---|
 | **8B** | Research Source Intake + Date.md Export | operator JSONL → validated store → Date.md |
-| **8C** | Universe v0 + Date.md prompt-reference smoke | 제한 universe + Date.md citation smoke |
+| **8C** | Universe v0 + Date.md prompt-reference smoke | `config/universe.paper.toml.example` + `ops/run_date_md_smoke.py` |
 | **8D** | Scout Once manual LLM call | Scout prompt 1회 수동 실행 절차 고정 |
 | **8E** | Manual LLM JSON Intake Validator | raw → validated JSON CLI (Scout/Allocator/Analysis) |
 | **8F** | Portfolio state snapshot + Allocator Once | portfolio snapshot + Allocator 1회 |
@@ -386,14 +387,34 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8H** | Production PaperLoopInput Assembler | validated Layer A → PaperLoopInput |
 | **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
 
-**8B는 Day 0에 포함.** 8C~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+**8B·8C는 Day 0에 포함.** 8D~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+
+### Universe v0 convention (Foundation 8C)
+
+| Path | 용도 |
+|---|---|
+| `config/universe.paper.toml.example` | committed synthetic example (copy only) |
+| `runtime/paper/universe.paper.toml` | operator local universe file (**commit 금지**) |
+| `runtime/paper/YYYY-MM-DD/universe.paper.toml` | optional daily reference copy |
+
+8C smoke (`ops/run_date_md_smoke.py`)는 Universe TOML + exported Date.md (+ optional store)를 검증한다. **LLM을 호출하지 않는다.**
+
+```bash
+cp config/universe.paper.toml.example runtime/paper/universe.paper.toml
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --require-symbol-coverage \
+  --json
+```
 
 ### Controlled walk-through vs 30-trading-day pilot
 
 - **Controlled Day 1 walk-through** — 8B~8I를 순서대로 **1회** 수동 검증. 30거래일 pilot **시작과 동일하지 않다**.
 - **30-trading-day paper pilot start** — repeatable manual intake discipline **또는** real API fetchers / repeatable intake automation이 갖춰진 뒤에만 시작한다.
 
-### Evidence-based automation (8C~8I 내부 helper)
+### Evidence-based automation (8D~8I 내부 helper)
 
 아래는 **미리 구현하지 않고**, manual pilot friction 관측 후 trigger 충족 시 검토한다.
 

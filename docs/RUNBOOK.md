@@ -132,6 +132,27 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 
 generated `runtime/research/` artifacts는 **commit하지 않는다**.
 
+### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
+
+로컬 universe 파일 준비:
+
+```bash
+cp config/universe.paper.toml.example runtime/paper/universe.paper.toml
+```
+
+8B로 Date.md/store 생성 후 8C smoke:
+
+```bash
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --require-symbol-coverage \
+  --json
+```
+
+external API / LLM / trading 호출 **없음**. smoke script는 output file을 생성하지 않는다.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 

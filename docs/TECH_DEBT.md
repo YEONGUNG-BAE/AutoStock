@@ -30,8 +30,8 @@
 ### Paper pilot workflow (Foundation 8A–8I)
 - ~~Document 30-trading-day paper pilot daily workflow skeleton.~~ Done: `docs/PAPER_PILOT_WORKFLOW.md`.
 - ~~Foundation 8B: Research Source Intake + Date.md Export.~~ Done: `ops/research_source_intake.py`.
+- ~~Foundation 8C: Universe v0 + Date.md prompt-reference smoke.~~ Done: `config/universe.paper.toml.example`, `ops/run_date_md_smoke.py`.
 - **Evidence-based follow-ups (not pre-implemented):**
-  - Foundation 8C: Universe v0 + Date.md prompt-reference smoke
   - Foundation 8D: Scout Once manual LLM call
   - Foundation 8E: Manual LLM JSON Intake Validator
   - Foundation 8F: Portfolio state snapshot + Allocator Once
