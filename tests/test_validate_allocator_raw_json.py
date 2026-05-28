@@ -544,3 +544,26 @@ def test_47_manual_smoke_shape_raw_json_validates_successfully(tmp_path: Path) -
     payload = _validate(tmp_path, out_dir=out_dir)
     assert payload["decision_id"] == "allocator-260528-1-smoke-test"
     assert payload["cited_date_ids_count"] == 1
+
+
+def test_48_store_argument_is_required_at_cli_level(tmp_path: Path) -> None:
+    """--store 누락 시 argparse가 SystemExit으로 거부해야 한다 (P1 회귀 가드).
+
+    이전 구현은 --store optional이라 누락 시 AllocatorDecisionValidator가 통째 스킵되어
+    target_weights sum / gold band / cash band / consistency_checker.passed 등
+    핵심 business rule이 검증되지 않은 채 validation.txt가 PASS로 출력되는 위험이 있었다.
+    """
+    record = _sample_record()
+    raw = _write_raw_json(tmp_path)
+    alloc_input = _write_allocator_input(tmp_path)
+    date_md = _write_date_md(tmp_path, record)
+    out_dir = tmp_path / "out"
+    with pytest.raises(SystemExit) as exc_info:
+        main([
+            "--raw-json", str(raw),
+            "--allocator-input", str(alloc_input),
+            "--date-md", str(date_md),
+            "--out-dir", str(out_dir),
+        ])
+    assert exc_info.value.code != 0
+    assert not out_dir.exists() or not any(out_dir.iterdir())

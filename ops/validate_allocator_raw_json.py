@@ -180,7 +180,7 @@ def _build_validation_txt(
     raw_json_path: Path,
     allocator_input_path: Path,
     date_md_path: Path,
-    store_path: Path | None,
+    store_path: Path,
     decision: AllocatorDecision,
     cited_date_ids: tuple[str, ...],
     output_paths: dict[str, str],
@@ -192,7 +192,7 @@ def _build_validation_txt(
         f"raw_json: {raw_json_path}",
         f"allocator_input: {allocator_input_path}",
         f"date_md: {date_md_path}",
-        f"store: {store_path if store_path is not None else '(not provided)'}",
+        f"store: {store_path}",
         f"universe: {decision.universe}",
         f"decision_id: {decision.decision_id.value}",
         f"cited_date_ids: {', '.join(cited_date_ids) if cited_date_ids else '(none)'}",
@@ -203,7 +203,7 @@ def _build_validation_txt(
         "  AllocatorDecision schema: PASS",
         "  allocator_input membership: PASS",
         "  Date.md membership: PASS",
-        f"  Store consistency: {'PASS' if store_path is not None else 'SKIPPED'}",
+        "  Store consistency: PASS",
         "  AllocatorDecisionValidator: PASS",
         "  created_at freshness ordering: NOT CHECKED",
         "",
@@ -221,7 +221,7 @@ def run_validate_allocator_raw_json(
     allocator_input_path: Path,
     date_md_path: Path,
     out_dir: Path,
-    store_path: Path | None,
+    store_path: Path,
     now: datetime,
     force: bool,
 ) -> dict[str, Any]:
@@ -233,100 +233,90 @@ def run_validate_allocator_raw_json(
     allocator_input = _load_allocator_input(allocator_input_path)
     date_md_ids = _load_date_md_ids(date_md_path)
 
-    store: SQLiteDateIdSourceStore | None = None
-    if store_path is not None:
-        store = _verify_store_consistency(date_md_path=date_md_path, store_path=store_path)
-
+    store = _verify_store_consistency(date_md_path=date_md_path, store_path=store_path)
     try:
-        decision = AllocatorDecision.model_validate(raw_object)
-    except ValueError as exc:
-        raise ValidationError("schema", str(exc)) from exc
+        try:
+            decision = AllocatorDecision.model_validate(raw_object)
+        except ValueError as exc:
+            raise ValidationError("schema", str(exc)) from exc
 
-    cited_date_ids = _validate_membership(
-        decision=decision,
-        allocator_input=allocator_input,
-        date_md_ids=date_md_ids,
-    )
+        cited_date_ids = _validate_membership(
+            decision=decision,
+            allocator_input=allocator_input,
+            date_md_ids=date_md_ids,
+        )
 
-    if store is not None:
         validator = AllocatorDecisionValidator(DateIdValidator(store, StalenessPolicy()))
         result = validator.validate(decision, now=now)
         if not result.passed:
             first_issue = result.issues[0] if result.issues else None
             message = first_issue.message if first_issue is not None else "AllocatorDecisionValidator failed"
             raise ValidationError("business_rule", message)
-    else:
-        validator = None
-        result = None
 
-    _preflight_out_dir(out_dir, force=force)
-    out_dir.mkdir(parents=True, exist_ok=True)
+        _preflight_out_dir(out_dir, force=force)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    output_paths = {
-        "validated": str(out_dir / OUTPUT_VALIDATED),
-        "validation_txt": str(out_dir / OUTPUT_VALIDATION_TXT),
-        "validation_summary": str(out_dir / OUTPUT_VALIDATION_SUMMARY),
-    }
+        output_paths = {
+            "validated": str(out_dir / OUTPUT_VALIDATED),
+            "validation_txt": str(out_dir / OUTPUT_VALIDATION_TXT),
+            "validation_summary": str(out_dir / OUTPUT_VALIDATION_SUMMARY),
+        }
 
-    (out_dir / OUTPUT_VALIDATED).write_text(
-        canonical_json_dumps(decision.to_canonical_dict()) + "\n",
-        encoding="utf-8",
-    )
-    (out_dir / OUTPUT_VALIDATION_TXT).write_text(
-        _build_validation_txt(
-            raw_json_path=raw_json_path,
-            allocator_input_path=allocator_input_path,
-            date_md_path=date_md_path,
-            store_path=store_path,
-            decision=decision,
-            cited_date_ids=cited_date_ids,
-            output_paths=output_paths,
-        ),
-        encoding="utf-8",
-    )
+        (out_dir / OUTPUT_VALIDATED).write_text(
+            canonical_json_dumps(decision.to_canonical_dict()) + "\n",
+            encoding="utf-8",
+        )
+        (out_dir / OUTPUT_VALIDATION_TXT).write_text(
+            _build_validation_txt(
+                raw_json_path=raw_json_path,
+                allocator_input_path=allocator_input_path,
+                date_md_path=date_md_path,
+                store_path=store_path,
+                decision=decision,
+                cited_date_ids=cited_date_ids,
+                output_paths=output_paths,
+            ),
+            encoding="utf-8",
+        )
 
-    validation_summary: dict[str, Any] = {
-        "status": "ok",
-        "stage": "complete",
-        "decision_id": decision.decision_id.value,
-        "universe": decision.universe,
-        "created_at": decision.created_at.isoformat(),
-        "cited_date_ids": list(cited_date_ids),
-        "cited_date_ids_count": len(cited_date_ids),
-        "target_weights": {
-            "kr": str(decision.target_weights.kr.value),
-            "us": str(decision.target_weights.us.value),
-            "gold": str(decision.target_weights.gold.value),
-        },
-        "cash_target_percent": str(decision.cash_policy.cash_target_percent.value),
-        "gold_policy_mode": decision.gold_policy_mode.value,
-        "output_paths": output_paths,
-        "raw_json": str(raw_json_path),
-        "allocator_input": str(allocator_input_path),
-        "date_md": str(date_md_path),
-        "validator_version": (
-            result.validator_version if result is not None else ALLOCATOR_VALIDATOR_VERSION
-        ),
-        "created_at_freshness_checked": False,
-    }
-    if store_path is not None:
-        validation_summary["store"] = str(store_path)
+        validation_summary: dict[str, Any] = {
+            "status": "ok",
+            "stage": "complete",
+            "decision_id": decision.decision_id.value,
+            "universe": decision.universe,
+            "created_at": decision.created_at.isoformat(),
+            "cited_date_ids": list(cited_date_ids),
+            "cited_date_ids_count": len(cited_date_ids),
+            "target_weights": {
+                "kr": str(decision.target_weights.kr.value),
+                "us": str(decision.target_weights.us.value),
+                "gold": str(decision.target_weights.gold.value),
+            },
+            "cash_target_percent": str(decision.cash_policy.cash_target_percent.value),
+            "gold_policy_mode": decision.gold_policy_mode.value,
+            "output_paths": output_paths,
+            "raw_json": str(raw_json_path),
+            "allocator_input": str(allocator_input_path),
+            "date_md": str(date_md_path),
+            "store": str(store_path),
+            "validator_version": result.validator_version,
+            "created_at_freshness_checked": False,
+        }
 
-    (out_dir / OUTPUT_VALIDATION_SUMMARY).write_text(
-        canonical_json_dumps(validation_summary) + "\n",
-        encoding="utf-8",
-    )
+        (out_dir / OUTPUT_VALIDATION_SUMMARY).write_text(
+            canonical_json_dumps(validation_summary) + "\n",
+            encoding="utf-8",
+        )
 
-    if store is not None:
+        return {
+            "status": "ok",
+            "stage": "complete",
+            "output_paths": output_paths,
+            "decision_id": decision.decision_id.value,
+            "cited_date_ids_count": len(cited_date_ids),
+        }
+    finally:
         store.close()
-
-    return {
-        "status": "ok",
-        "stage": "complete",
-        "output_paths": output_paths,
-        "decision_id": decision.decision_id.value,
-        "cited_date_ids_count": len(cited_date_ids),
-    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -337,7 +327,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allocator-input", required=True, help="allocator_input JSON path from 8F packet")
     parser.add_argument("--date-md", required=True, help="exported Date.md path")
     parser.add_argument("--out-dir", required=True, help="output directory for validated artifacts")
-    parser.add_argument("--store", default=None, help="optional SQLiteDateIdSourceStore path")
+    parser.add_argument("--store", required=True, help="SQLiteDateIdSourceStore path (required for AllocatorDecisionValidator)")
     parser.add_argument("--now", default=None, help="ISO timezone-aware datetime for DateIdValidator")
     parser.add_argument("--force", action="store_true", help="overwrite existing validation output files")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON summary to stdout")
@@ -381,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
             allocator_input_path=Path(args.allocator_input),
             date_md_path=Path(args.date_md),
             out_dir=Path(args.out_dir),
-            store_path=Path(args.store) if args.store else None,
+            store_path=Path(args.store),
             now=_resolve_now(args.now),
             force=args.force,
         )
