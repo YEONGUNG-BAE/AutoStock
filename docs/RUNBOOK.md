@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `909 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `950 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`909 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`950 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -152,6 +152,27 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 ```
 
 external API / LLM / trading 호출 **없음**. smoke script는 output file을 생성하지 않는다.
+
+### Foundation 8D — Scout Once manual LLM call packet
+
+8B intake + 8C smoke 후 Scout manual packet 생성:
+
+```bash
+PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/scout \
+  --require-symbol-coverage \
+  --market-scope KR \
+  --max-records 20 \
+  --json
+```
+
+생성 파일: `scout_input.json`, `scout_prompt.md`, `scout_packet_summary.json`.
+
+운영자는 `scout_prompt.md`를 LLM/Ollama UI에 **수동 paste**하고, raw JSON을 suggested path에 **수동 저장**한다.
+automatic LLM call / raw Scout validation / trading **없음**.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
