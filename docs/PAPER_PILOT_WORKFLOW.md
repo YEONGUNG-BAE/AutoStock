@@ -3,8 +3,8 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once)는 **Day 0 roadmap**에 포함된다.  
-> Foundation 8G~8I는 evidence-based로 순차 진행한다.
+> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once), 8G (Analysis Once per-symbol)는 **Day 0 roadmap**에 포함된다.
+> Foundation 8H~8I는 evidence-based로 순차 진행한다.
 
 ---
 
@@ -20,6 +20,7 @@
 | Scout Once manual packet | **있음** — Foundation 8D `ops/build_scout_manual_packet.py`, packet only (LLM call/raw validation 없음) |
 | Scout raw JSON validator | **있음** — Foundation 8E `ops/validate_scout_raw_json.py`, ScoutSummary validation only |
 | Allocator Once manual packet + validator | **있음** — Foundation 8F `ops/build_allocator_manual_packet.py`, `ops/validate_allocator_raw_json.py` |
+| Analysis Once manual packet + validator (per-symbol) | **있음** — Foundation 8G `ops/build_analysis_manual_packet.py`, `ops/validate_analysis_raw_json.py` |
 | DailySummary / Postmortem 자동 생성기 | **없음** |
 | Scheduler / launchd | **없음** |
 | KIS / live / tiny-live order | **이 workflow와 무관** — paper ledger only |
@@ -386,11 +387,11 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8D** | Scout Once manual LLM call | `ops/build_scout_manual_packet.py` — ScoutInput + scout_prompt (LLM call 없음) |
 | **8E** | Manual LLM JSON Intake Validator (Scout) | `ops/validate_scout_raw_json.py` — raw → validated ScoutSummary |
 | **8F** | Portfolio state snapshot + Allocator Once | `ops/build_allocator_manual_packet.py` + `ops/validate_allocator_raw_json.py` |
-| **8G** | Analysis Once | symbol/market별 Analysis 1회 |
+| **8G** | Analysis Once | `ops/build_analysis_manual_packet.py` + `ops/validate_analysis_raw_json.py` (per-symbol) |
 | **8H** | Production PaperLoopInput Assembler | validated Layer A → PaperLoopInput |
 | **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
 
-**8B·8C·8D·8E·8F는 Day 0에 포함.** 8G~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
+**8B·8C·8D·8E·8F·8G는 Day 0에 포함.** 8H~8I는 dependency order를 따르며, 각 단계는 이전 단계 PASS 후 진행한다.
 
 ### Universe v0 convention (Foundation 8C)
 
@@ -491,6 +492,43 @@ PYTHONPATH=src uv run python ops/validate_allocator_raw_json.py \
   --date-md runtime/research/YYYY-MM-DD/Date.md \
   --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
   --out-dir runtime/paper/YYYY-MM-DD/allocator \
+  --json
+```
+
+### Analysis Once convention (Foundation 8G)
+
+| Path | 용도 |
+|---|---|
+| `runtime/paper/YYYY-MM-DD/analysis/analysis_input.<market>.<symbol>.json` | Analysis packet builder output (lowercase market in filename) |
+| `runtime/paper/YYYY-MM-DD/analysis/analysis_prompt.<market>.<symbol>.md` | manual LLM copy/paste prompt |
+| `runtime/paper/YYYY-MM-DD/analysis/analysis_packet_summary.<market>.<symbol>.json` | machine-readable packet summary |
+| `runtime/paper/YYYY-MM-DD/analysis/analysis_output.<market>.<symbol>.raw.json` | operator manual raw LLM output (**8G packet builder가 생성하지 않음**) |
+| `runtime/paper/YYYY-MM-DD/analysis/analysis_output.<market>.<symbol>.validated.json` | validated AnalysisDecision JSON |
+
+8G packet builder + validator는 validated ScoutSummary + validated AllocatorDecision + portfolio state + Date.md/store context를 **symbol/market 1건**에 대해 사용한다.
+**LLM을 호출하지 않으며**, 주문 실행·PaperLoopInput assembly·PaperBroker/KIS 경로는 **8G 범위 밖**이다.
+`AnalysisDecision.created_at`은 timezone-aware datetime이면 충분하며, 8G는 ScoutSummary/AllocatorDecision/portfolio snapshot `as_of` 대비 freshness ordering을 검사하지 않는다.
+per-symbol allocator tolerance는 operator가 `--allocator-target-weight-percent`와 `--tolerance-percent`를 **둘 다** 명시할 때만 적용하며, AllocatorDecision aggregate `target_weights`에서 per-symbol weight를 **추론하지 않는다**.
+
+```bash
+PYTHONPATH=src uv run python ops/build_analysis_manual_packet.py \
+  --validated-scout runtime/paper/YYYY-MM-DD/scout/scout_output.validated.json \
+  --validated-allocator runtime/paper/YYYY-MM-DD/allocator/allocator_output.validated.json \
+  --allocator-validation-summary runtime/paper/YYYY-MM-DD/allocator/allocator_validation_summary.json \
+  --portfolio-state runtime/paper/YYYY-MM-DD/portfolio/portfolio_state.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --universe runtime/paper/universe.paper.toml \
+  --market KR \
+  --symbol SYNTH-KR-0001 \
+  --out-dir runtime/paper/YYYY-MM-DD/analysis \
+  --json
+PYTHONPATH=src uv run python ops/validate_analysis_raw_json.py \
+  --raw-json runtime/paper/YYYY-MM-DD/analysis/analysis_output.kr.SYNTH-KR-0001.raw.json \
+  --analysis-input runtime/paper/YYYY-MM-DD/analysis/analysis_input.kr.SYNTH-KR-0001.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/analysis \
   --json
 ```
 
