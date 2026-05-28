@@ -341,8 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     mode: ModeName = "normal"
 
     if args.verbose:
-        print(f"verbose: validate_only={'yes' if args.validate_only else 'no'}", file=out)
-        print(f"verbose: export_only={'yes' if args.export_only else 'no'}", file=out)
+        print(f"verbose: validate_only={'yes' if args.validate_only else 'no'}", file=sys.stderr)
+        print(f"verbose: export_only={'yes' if args.export_only else 'no'}", file=sys.stderr)
 
     try:
         _validate_mode_flags(args)

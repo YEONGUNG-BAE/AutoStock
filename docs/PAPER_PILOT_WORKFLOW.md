@@ -15,7 +15,7 @@
 | Automatic daily paper trading system | **아님** — manual + validated paper operation |
 | LLM orchestration entrypoint (Scout→Allocator→Analysis 일괄) | **없음** |
 | Production PaperLoopInput assembler | **없음** |
-| Date.md 자동 생성기 | **없음** |
+| Date.md export helper | **있음** — Foundation 8B `ops/research_source_intake.py`, manual/file-based only (scheduler/collector 없음) |
 | DailySummary / Postmortem 자동 생성기 | **없음** |
 | Scheduler / launchd | **없음** |
 | KIS / live / tiny-live order | **이 workflow와 무관** — paper ledger only |

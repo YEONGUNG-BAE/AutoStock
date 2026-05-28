@@ -268,6 +268,20 @@ def test_json_output_is_parseable_and_sanitized(tmp_path: Path, capsys: pytest.C
     assert "app_key" not in captured.out.lower()
 
 
+def test_json_with_verbose_keeps_stdout_pure_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source = tmp_path / "research_sources.jsonl"
+    _write_jsonl(source, _record_dict())
+
+    exit_code = main(["--source-jsonl", str(source), "--validate-only", "--json", "--verbose"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    payload = json.loads(captured.out.strip())
+    assert payload["status"] == "ok"
+    assert "verbose:" in captured.err
+    assert "verbose:" not in captured.out
+
+
 def test_validate_only_and_export_only_together_fail(tmp_path: Path) -> None:
     exit_code = main(
         [
