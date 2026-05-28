@@ -32,10 +32,10 @@
 - ~~Foundation 8B: Research Source Intake + Date.md Export.~~ Done: `ops/research_source_intake.py`.
 - ~~Foundation 8C: Universe v0 + Date.md prompt-reference smoke.~~ Done: `config/universe.paper.toml.example`, `ops/run_date_md_smoke.py`.
 - ~~Foundation 8D: Scout Once manual LLM call packet.~~ Done: `ops/build_scout_manual_packet.py`.
-  - **P2 hardening candidate (not blocking 8E):** `ops/build_scout_manual_packet.py` writes `scout_input.json`, `scout_prompt.md`, `scout_packet_summary.json` sequentially via `write_text()` after a preflight existence check. A mid-sequence failure (disk full, permission change, OS interrupt) can leave a partial packet on disk; recovery is `--force` re-run or manual cleanup. Apply atomic-write pattern (`tempfile.mkstemp` + `os.replace`, or stage-all-then-rename) before 30-trading-day pilot start, or fold into a broader ops-script atomic-write pass at 8H/8I.
+  - **P2 hardening candidate (not blocking 8G):** 8D/8E/8F ops scripts write three output files sequentially via `write_text()` after preflight existence checks. Mid-sequence failure can leave partial artifacts; recovery is `--force` re-run or manual cleanup. Apply atomic-write pattern before 30-trading-day pilot start, or fold into a broader ops-script atomic-write pass at 8H/8I.
 - ~~Foundation 8E: Manual LLM JSON Intake Validator (Scout).~~ Done: `ops/validate_scout_raw_json.py`.
+- ~~Foundation 8F: Portfolio state snapshot + Allocator Once.~~ Done: `ops/build_allocator_manual_packet.py`, `ops/validate_allocator_raw_json.py`, `docs/examples/portfolio_state.paper.example.json`.
 - **Evidence-based follow-ups (not pre-implemented):**
-  - Foundation 8F: Portfolio state snapshot + Allocator Once
   - Foundation 8G: Analysis Once
   - Foundation 8H: Production PaperLoopInput Assembler
   - Foundation 8I: End-to-End no-write rehearsal

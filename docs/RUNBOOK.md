@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `977 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1024 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`977 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1024 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -193,6 +193,41 @@ PYTHONPATH=src uv run python ops/validate_scout_raw_json.py \
 raw JSON은 **단일 JSON object만** 허용한다. markdown fence, fence 밖 prose, array/string root는 거부한다.
 `ScoutSummary.created_at`은 timezone-aware datetime이면 충분하며, 8E는 `ScoutInput.created_at` 대비 freshness ordering을 검사하지 않는다.
 automatic LLM call / Allocator / Analysis validation / trading **없음**.
+
+### Foundation 8F — Portfolio state snapshot + Allocator Once
+
+portfolio state 준비 + validated ScoutSummary 기반 Allocator manual packet:
+
+```bash
+cp docs/examples/portfolio_state.paper.example.json runtime/paper/YYYY-MM-DD/portfolio/portfolio_state.json
+PYTHONPATH=src uv run python ops/build_allocator_manual_packet.py \
+  --validated-scout runtime/paper/YYYY-MM-DD/scout/scout_output.validated.json \
+  --scout-validation-summary runtime/paper/YYYY-MM-DD/scout/scout_validation_summary.json \
+  --portfolio-state runtime/paper/YYYY-MM-DD/portfolio/portfolio_state.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --universe runtime/paper/universe.paper.toml \
+  --out-dir runtime/paper/YYYY-MM-DD/allocator \
+  --json
+```
+
+운영자는 `allocator_prompt.md`를 LLM/Ollama UI에 **수동 paste**하고 raw JSON을 `allocator_output.raw.json`에 **수동 저장**한 뒤 validator 실행:
+
+```bash
+PYTHONPATH=src uv run python ops/validate_allocator_raw_json.py \
+  --raw-json runtime/paper/YYYY-MM-DD/allocator/allocator_output.raw.json \
+  --allocator-input runtime/paper/YYYY-MM-DD/allocator/allocator_input.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/allocator \
+  --json
+```
+
+생성 파일: `allocator_output.validated.json`, `allocator_validation.txt`, `allocator_validation_summary.json`.
+
+raw allocator JSON은 **단일 JSON object만** 허용한다. markdown fence, fence 밖 prose, array/string root는 거부한다.
+`AllocatorDecision.created_at`은 timezone-aware datetime이면 충분하며, 8F는 ScoutSummary/portfolio snapshot `as_of` 대비 freshness ordering을 검사하지 않는다.
+automatic LLM call / Analysis / PaperLoopInput assembly / trading **없음**.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.

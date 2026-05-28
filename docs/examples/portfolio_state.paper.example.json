@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "portfolio_snapshot": {
+    "snapshot_id": "paper-portfolio-260528-1",
+    "as_of": "2026-05-28T09:30:00+09:00",
+    "positions": [
+      {
+        "symbol": "SYNTH-KR-0001",
+        "market": "KR",
+        "asset_class": "KR_EQUITY",
+        "account_role": "PAPER",
+        "quantity": "100",
+        "avg_cost": "800000",
+        "currency": "KRW",
+        "market_price": "800000"
+      }
+    ],
+    "cash": [
+      {
+        "currency": "KRW",
+        "amount": "20000000",
+        "account_role": "PAPER",
+        "as_of": "2026-05-28T09:30:00+09:00"
+      }
+    ],
+    "total_nav_krw": "100000000",
+    "cash_krw": "20000000",
+    "invested_percent": "80",
+    "mdd_percent": "0"
+  },
+  "nav_snapshot": {
+    "snapshot_id": "paper-nav-260528-1",
+    "as_of": "2026-05-28T09:30:00+09:00",
+    "total_nav_krw": "100000000",
+    "cash_krw": "20000000",
+    "invested_krw": "80000000",
+    "mdd_percent": "0"
+  },
+  "constraints": {
+    "max_position_weight_percent": "25",
+    "max_single_market_weight_percent": "70",
+    "min_cash_percent": "10",
+    "max_cash_percent": "30",
+    "allowed_markets": ["KR", "US"],
+    "notes": "Synthetic paper pilot constraints for Foundation 8F smoke. Not investment advice."
+  },
+  "metadata": {
+    "source": "operator-manual-paper-state",
+    "created_by": "foundation-8f-smoke",
+    "paper_only": true,
+    "notes": "Copy to runtime/paper/YYYY-MM-DD/portfolio/portfolio_state.json for manual pilot work."
+  }
+}
