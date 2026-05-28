@@ -1,7 +1,0 @@
-Synthetic builder: PASS
-scenario: normal-buy
-expected_status: FILLED
-output: runtime/paper/2026-05-26/paper_loop/paper_loop_input.SYNTH.normal-buy.json
-payload_hash: 42ed8049bd19
-validated: yes
-file_written: yes

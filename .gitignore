@@ -35,3 +35,4 @@ memory/
 
 # Runtime data directory at repository root only (not src/data/)
 /data/
+/runtime/
