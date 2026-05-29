@@ -3,8 +3,7 @@
 30거래일 paper pilot을 시작하기 **전**에, 하루 단위 paper 운용 절차와 산출물 convention을 고정한다.
 
 > **이 문서는 workflow skeleton이다.** 자동 orchestration, collector, scheduler를 구현하지 않는다.  
-> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once), 8G (Analysis Once per-symbol), 8H (PaperLoopInput assembler)는 **Day 0 roadmap**에 포함된다.  
-> Foundation 8I는 evidence-based로 순차 진행한다.
+> Foundation 8B (Research Source Intake + Date.md Export), 8C (Universe v0 + Date.md smoke), 8D (Scout Once manual packet), 8E (Scout raw JSON validator), 8F (Portfolio state + Allocator Once), 8G (Analysis Once per-symbol), 8H (PaperLoopInput assembler), **8I (End-to-End no-write rehearsal)**는 **Day 0 roadmap**에 포함된다.
 
 ---
 
@@ -389,9 +388,9 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8F** | Portfolio state snapshot + Allocator Once | `ops/build_allocator_manual_packet.py` + `ops/validate_allocator_raw_json.py` |
 | **8G** | Analysis Once | `ops/build_analysis_manual_packet.py` + `ops/validate_analysis_raw_json.py` (per-symbol) |
 | **8H** | Production PaperLoopInput Assembler | `ops/assemble_paper_loop_input.py` (per-symbol, no execution) |
-| **8I** | End-to-End no-write rehearsal | full chain `--no-write` rehearsal |
+| **8I** | End-to-End no-write rehearsal | `ops/rehearse_paper_loop_no_write.py` (validation-only, no PaperLoopRunner.run) |
 
-**8B·8C·8D·8E·8F·8G·8H는 Day 0에 포함.** 8I는 dependency order를 따르며, 8H PASS 후 진행한다.
+**8B·8C·8D·8E·8F·8G·8H·8I는 Day 0에 포함.** Controlled Day 1 walk-through는 8I PASS 후 진행한다.
 
 ### Universe v0 convention (Foundation 8C)
 
@@ -559,6 +558,32 @@ PYTHONPATH=src uv run python ops/assemble_paper_loop_input.py \
   --out-dir runtime/paper/YYYY-MM-DD/paper_loop \
   --json
 ```
+
+### No-write rehearsal convention (Foundation 8I)
+
+| Path | 용도 |
+|---|---|
+| `runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal.<market>.<symbol>.json` | machine-readable rehearsal record |
+| `runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal.<market>.<symbol>.txt` | human-readable rehearsal log |
+| `runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal_summary.<market>.<symbol>.json` | compact summary |
+
+8I rehearsal는 8H `paper_loop_input.<market>.<symbol>.json`을 입력으로 Date.md/store membership을 검증한 뒤, 기존 `ops/run_paper_once.py --no-write --json`만 subprocess로 호출한다.
+**`PaperLoopRunner.run()`을 호출하지 않는다.** 현재 `PaperLoopRunner.run()`은 decision snapshot·broker submit·ledger NAV write가 가능하므로 no-write rehearsal에 사용하지 않는다.
+**LLM·외부 API·KIS·OrderIntent 생성·ledger/fill/daily summary/postmortem 기록 없음.** ledger DB·decision DB는 rehearsal 전후로 없거나 byte-identical이어야 한다.
+
+```bash
+PYTHONPATH=src uv run python ops/rehearse_paper_loop_no_write.py \
+  --paper-loop-input runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_input.kr.SYNTH-KR-0001.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --ledger-db runtime/paper/ledger.sqlite3 \
+  --decision-db runtime/paper/decisions.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/rehearsal \
+  --no-write \
+  --json
+```
+
+Controlled Day 1 paper walk-through는 8I PASS 후 진행한다. real API fetchers, 30-trading-day pilot start, KIS read-only `--run`은 **별도 deferred 단계**이다.
 
 ### Controlled walk-through vs 30-trading-day pilot
 

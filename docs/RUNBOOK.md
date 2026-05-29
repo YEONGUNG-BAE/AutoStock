@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1105 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1136 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1105 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1136 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -291,6 +291,26 @@ PYTHONPATH=src uv run python ops/assemble_paper_loop_input.py \
 
 `broker_account_role`는 반드시 **PAPER**이다. market price는 operator가 context JSON에 수동 기록한다(외부 API fetch 없음).
 8H는 PaperLoopInput 조립·`PaperLoopInput.model_validate()`까지만 수행한다. PaperLoopRunner 실행·주문 생성·broker/KIS 호출·ledger/fill/daily summary/postmortem 기록 **없음**. 8I no-write rehearsal은 별도 단계.
+
+### Foundation 8I — End-to-End no-write rehearsal
+
+8H `paper_loop_input.<market>.<symbol>.json`을 입력으로 전체 chain의 validation-only 경로를 rehearsal한다. **외부 API·자동 LLM·실거래 없음.** `PaperLoopRunner.run()`을 호출하지 않으며, 기존 `ops/run_paper_once.py --no-write`만 subprocess로 실행한다. `--no-write`는 DB를 열지 않고 runner를 구성하지 않는 validation-only 경로이다. ledger DB·decision DB는 rehearsal 전후로 **없거나 byte/hash 동일**해야 한다. 기본 `--ledger-db`/`--decision-db`는 `runtime/paper/*.sqlite3`이지만, operator는 더 안전한 임시 경로를 넘길 수 있다.
+
+```bash
+mkdir -p runtime/paper/YYYY-MM-DD/rehearsal
+PYTHONPATH=src uv run python ops/rehearse_paper_loop_no_write.py \
+  --paper-loop-input runtime/paper/YYYY-MM-DD/paper_loop/paper_loop_input.kr.SYNTH-KR-0001.json \
+  --date-md runtime/research/YYYY-MM-DD/Date.md \
+  --store runtime/research/YYYY-MM-DD/date_id_sources.sqlite3 \
+  --ledger-db runtime/paper/ledger.sqlite3 \
+  --decision-db runtime/paper/decisions.sqlite3 \
+  --out-dir runtime/paper/YYYY-MM-DD/rehearsal \
+  --no-write \
+  --json
+sed -n '1,180p' runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal.kr.SYNTH-KR-0001.txt
+```
+
+생성 파일: `paper_loop_no_write_rehearsal.<market>.<symbol>.json`, `paper_loop_no_write_rehearsal.<market>.<symbol>.txt`, `paper_loop_no_write_rehearsal_summary.<market>.<symbol>.json`.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
