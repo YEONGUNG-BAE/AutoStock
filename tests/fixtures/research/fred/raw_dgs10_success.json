@@ -1,0 +1,12 @@
+{
+  "source_key": "fred",
+  "external_service": "FRED API",
+  "series_id": "DGS10",
+  "fetched_at": "2026-05-29T01:02:03+00:00",
+  "observation": {
+    "value": "4.25",
+    "source_timestamp": "2026-05-28T00:00:00+00:00",
+    "units": "Percent",
+    "frequency": "Daily"
+  }
+}

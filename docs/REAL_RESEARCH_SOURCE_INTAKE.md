@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** design-only (post-Foundation, pre-implementation)  
+> **Status:** 1A replay/fixture path **implemented**; 1B live FRED HTTP **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -150,7 +150,7 @@ This increment adds **real INPUT only**. **Write mode**, ledger/decision writes,
 
 **Placement:** fetchers sit **before** 8B. They **replace manual JSONL authoring** for supported facts; they do **not** replace 8B validation, store semantics, or Date.md export rules.
 
-**Future ops entrypoint (implementation PR, not this design):** e.g. `ops/fetch_research_sources.py` — orchestrates registry, snapshots, JSONL staging. It **calls** existing adapters; it does **not** embed trading logic.
+**Ops entrypoint (1A):** `ops/fetch_research_sources.py` — `--replay` / `--dry-run` only (no live HTTP, no API key). `--live-smoke` is **1B deferred**.
 
 ---
 
@@ -491,7 +491,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 # 6) Continue Controlled Day 1 chain from 8C … through 8I no-write
 ```
 
-**Note:** `ops/fetch_research_sources.py` is **proposed** — not implemented in this design task.
+**Note:** `ops/fetch_research_sources.py` implements **1A replay/fixture staging** only. Live FRED HTTP (`--live-smoke`) remains **1B**.
 
 ---
 

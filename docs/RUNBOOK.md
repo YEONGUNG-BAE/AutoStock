@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1136 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1148 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1136 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1148 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -132,7 +132,27 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 
 generated `runtime/research/` artifacts는 **commit하지 않는다**.
 
-**Post-Foundation (design):** real external sources는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) 설계대로 snapshot → `DateIdSourceRecord` JSONL을 staging한 뒤 **동일 8B script**로 ingest한다. v1 구현 전까지 operator-prepared JSONL 경로를 사용한다.
+**Post-Foundation (1A replay):** FRED snapshot replay staging은 `ops/fetch_research_sources.py` (**replay/fixture-only**, live HTTP 없음). 출력 JSONL은 기존 8B `--validate-only` / normal intake와 호환된다. live FRED HTTP는 **1B deferred**.
+
+```bash
+DAY=2026-05-29
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --replay \
+  --source fred \
+  --series-id DGS10 \
+  --date-id 260529-1 \
+  --as-of 2026-05-29T09:00:00+09:00 \
+  --snapshot tests/fixtures/research/fred/raw_dgs10_success.json \
+  --out-jsonl "runtime/research/${DAY}/research_sources.fred.jsonl" \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.fred.jsonl" \
+  --validate-only \
+  --json
+```
+
+**Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). v1 live-smoke(1B) 구현 전까지 operator-prepared JSONL 경로도 병행 가능.
 
 ### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
 
@@ -339,7 +359,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1136 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1148 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
