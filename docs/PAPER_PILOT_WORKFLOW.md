@@ -390,7 +390,7 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 | **8H** | Production PaperLoopInput Assembler | `ops/assemble_paper_loop_input.py` (per-symbol, no execution) |
 | **8I** | End-to-End no-write rehearsal | `ops/rehearse_paper_loop_no_write.py` (validation-only, no PaperLoopRunner.run) |
 
-**8B·8C·8D·8E·8F·8G·8H·8I는 Day 0에 포함.** Controlled Day 1 walk-through는 8I PASS 후 진행한다.
+**8B·8C·8D·8E·8F·8G·8H·8I (Foundation)는 CLOSED.** 다음 운영 단계는 **Controlled Day 1 paper walk-through** — 8B~8I를 순서대로 **1회** 수동 실행하고 8I no-write rehearsal에서 종료한다. 절차는 `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through 참조.
 
 ### Universe v0 convention (Foundation 8C)
 
@@ -583,12 +583,14 @@ PYTHONPATH=src uv run python ops/rehearse_paper_loop_no_write.py \
   --json
 ```
 
-Controlled Day 1 paper walk-through는 8I PASS 후 진행한다. real API fetchers, 30-trading-day pilot start, KIS read-only `--run`은 **별도 deferred 단계**이다.
+Controlled Day 1 paper walk-through는 Foundation 8B–8I chain을 **수동/file-based intake + manual LLM + validated JSON + 8I no-write rehearsal**까지 1회 검증하는 단계이며, **8I에서 종료**한다 (`docs/RUNBOOK.md` 참조). real API fetchers, 30-trading-day pilot start, KIS read-only `--run`은 **Controlled Day 1 이후 deferred**이다.
 
 ### Controlled walk-through vs 30-trading-day pilot
 
-- **Controlled Day 1 walk-through** — 8B~8I를 순서대로 **1회** 수동 검증. 30거래일 pilot **시작과 동일하지 않다**.
-- **30-trading-day paper pilot start** — repeatable manual intake discipline **또는** real API fetchers / repeatable intake automation이 갖춰진 뒤에만 시작한다.
+- **Controlled Day 1 walk-through** — Foundation 8B~8I ops chain을 **1회** 수동 검증하고 **8I no-write rehearsal에서 종료**. 30거래일 pilot **시작과 동일하지 않다**. runbook: `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through.
+- **Real API fetchers** — Controlled Day 1 **이후** deferred. FRED/DART/yfinance/news HTTP intake는 별도 구현·review 후.
+- **30-trading-day paper pilot start** — real API fetchers **또는** repeatable manual intake discipline + explicit readiness decision 이후.
+- **KIS read-only `--run`** — broker/write-mode paper loop **이후** deferred (`docs/TECH_DEBT.md` KIS endpoint/TR ID verification 참조).
 
 ### Evidence-based automation (8G~8I 내부 helper)
 

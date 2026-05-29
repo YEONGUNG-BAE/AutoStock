@@ -312,6 +312,367 @@ sed -n '1,180p' runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal
 
 생성 파일: `paper_loop_no_write_rehearsal.<market>.<symbol>.json`, `paper_loop_no_write_rehearsal.<market>.<symbol>.txt`, `paper_loop_no_write_rehearsal_summary.<market>.<symbol>.json`.
 
+## Controlled Day 1 paper walk-through
+
+Foundation 8B–8I 구현이 **CLOSED**된 뒤, operator가 **1회** 수행하는 end-to-end manual walk-through다. post-Foundation runtime smoke(8G prompt-hardening → 8G validator → 8H assembler → 8I no-write rehearsal)가 통과한 상태에서, 동일 도구 chain을 **운영 절차**로 문서화한 것이다.
+
+### Purpose
+
+- Foundation 8B–8I ops entrypoint가 실제 runtime artifact와 연결되는지 **수동으로 1회** 검증한다.
+- Layer A(manual research → manual LLM → validated JSON)와 Layer B assembly/no-write validation 경계가 operator workflow에서 동작하는지 확인한다.
+- **write-mode paper loop, broker, KIS, external API fetch 없이** chain closure를 확인한다.
+
+### Scope
+
+| 포함 | 제외 |
+|---|---|
+| manual/file-based research JSONL intake | real API fetchers (FRED/DART/yfinance/news HTTP) |
+| manual Ollama/LLM UI copy-paste | automatic LLM orchestration |
+| 8E/8F/8G raw JSON validators | validator bypass / hand-edited validated JSON |
+| 8H PaperLoopInput assembly | `PaperLoopRunner.run()` |
+| 8I no-write rehearsal (`run_paper_once_status == "VALIDATION_ONLY"`) | write-mode `ops/run_paper_once.py` |
+| ledger/decision DB **unchanged** invariant check | ledger writes, decision snapshots, fills, NAV, daily summary, postmortem |
+
+Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
+
+### Prerequisites
+
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1136 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+
+```bash
+./ops/acceptance_check.sh
+```
+
+| 항목 | 요구 |
+|---|---|
+| Universe TOML | `runtime/paper/universe.paper.toml` **우선**; 없으면 `cp config/universe.paper.toml.example runtime/paper/universe.paper.toml` |
+| Research JSONL | operator-prepared `runtime/research/${DAY}/research_sources.jsonl` |
+| Portfolio state | `runtime/paper/${DAY}/portfolio/portfolio_state.json` (예: `docs/examples/portfolio_state.paper.example.json` 복사 후 조정) |
+| Paper loop context | `runtime/paper/${DAY}/paper_loop/paper_loop_context.json` (예: `docs/examples/paper_loop_context.paper.example.json` 복사 후 조정) |
+| Ollama | 8D/8F/8G **manual LLM call** 단계에만 필요; ops script가 자동 호출하지 않음 |
+| KIS credentials | **불필요** |
+| External API credentials | **불필요** |
+| Git | `/runtime/`은 `.gitignore` 대상 — runtime output **commit 금지** |
+
+`DAY`는 trading/operating date placeholder다. 예: `DAY=2026-05-28`.
+
+### Runtime directory convention
+
+```bash
+DAY=YYYY-MM-DD
+```
+
+```text
+runtime/research/${DAY}/research_sources.jsonl
+runtime/research/${DAY}/date_id_sources.sqlite3
+runtime/research/${DAY}/Date.md
+
+runtime/paper/${DAY}/scout/
+runtime/paper/${DAY}/allocator/
+runtime/paper/${DAY}/analysis/
+runtime/paper/${DAY}/portfolio/
+runtime/paper/${DAY}/paper_loop/
+runtime/paper/${DAY}/rehearsal/
+```
+
+### Step-by-step command flow
+
+#### A. Prepare runtime directories
+
+```bash
+DAY=YYYY-MM-DD
+mkdir -p "runtime/research/${DAY}"
+mkdir -p "runtime/paper/${DAY}/"{scout,allocator,analysis,portfolio,paper_loop,rehearsal}
+
+# universe (prefer local runtime copy)
+test -f runtime/paper/universe.paper.toml || \
+  cp config/universe.paper.toml.example runtime/paper/universe.paper.toml
+
+# portfolio + paper loop context (from approved examples; adjust locally)
+cp docs/examples/portfolio_state.paper.example.json \
+  "runtime/paper/${DAY}/portfolio/portfolio_state.json"
+cp docs/examples/paper_loop_context.paper.example.json \
+  "runtime/paper/${DAY}/paper_loop/paper_loop_context.json"
+```
+
+operator는 `research_sources.jsonl`을 **직접 작성**한다. missing JSONL은 synthesize하지 않는다.
+
+#### B. 8B — Research source intake (manual JSONL → store → Date.md)
+
+real fetcher 없음. JSONL → `SQLiteDateIdSourceStore` → `Date.md`.
+
+```bash
+# optional: JSONL shape validation only (no store / no Date.md write)
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.jsonl" \
+  --validate-only \
+  --json
+
+# normal: JSONL → date_id_sources.sqlite3 → Date.md
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.jsonl" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --json
+```
+
+**Gate:** exit 0, `date_id_sources.sqlite3` 및 `Date.md` 생성.
+
+#### C. 8C — Date.md smoke (universe + store coverage)
+
+Controlled Day 1에서는 enabled symbol coverage 필수.
+
+```bash
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --require-symbol-coverage \
+  --json
+```
+
+**Gate:** exit 0, stdout JSON parseable.
+
+#### D. 8D — Scout manual packet → manual LLM → 8E validation
+
+**8D packet build** (LLM 호출 없음):
+
+```bash
+PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/paper/${DAY}/scout" \
+  --require-symbol-coverage \
+  --market-scope KR \
+  --json
+```
+
+**Manual LLM handoff:** `runtime/paper/${DAY}/scout/scout_prompt.md`를 Ollama/UI에 paste → raw JSON을 suggested path에 **수동 저장** (예: `scout_output.kr.raw.json`). ops script는 LLM을 호출하지 않는다.
+
+**8E validation:**
+
+```bash
+PYTHONPATH=src uv run python ops/validate_scout_raw_json.py \
+  --raw-json "runtime/paper/${DAY}/scout/scout_output.kr.raw.json" \
+  --scout-input "runtime/paper/${DAY}/scout/scout_input.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/paper/${DAY}/scout" \
+  --json
+```
+
+**Gate:** `scout_output.validated.json` 생성.
+
+#### E. 8F — Allocator packet → manual LLM → validation (`--store` required)
+
+**8F packet build:**
+
+```bash
+PYTHONPATH=src uv run python ops/build_allocator_manual_packet.py \
+  --validated-scout "runtime/paper/${DAY}/scout/scout_output.validated.json" \
+  --scout-validation-summary "runtime/paper/${DAY}/scout/scout_validation_summary.json" \
+  --portfolio-state "runtime/paper/${DAY}/portfolio/portfolio_state.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --universe runtime/paper/universe.paper.toml \
+  --out-dir "runtime/paper/${DAY}/allocator" \
+  --json
+```
+
+**Manual LLM handoff:** `allocator_prompt.md` paste → `allocator_output.raw.json` 수동 저장.
+
+**8F validation** (`--store` **required**):
+
+```bash
+PYTHONPATH=src uv run python ops/validate_allocator_raw_json.py \
+  --raw-json "runtime/paper/${DAY}/allocator/allocator_output.raw.json" \
+  --allocator-input "runtime/paper/${DAY}/allocator/allocator_input.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/paper/${DAY}/allocator" \
+  --json
+```
+
+**Gate:** `allocator_output.validated.json` 생성.
+
+#### F. 8G — Analysis packet → manual LLM → validation (per-symbol)
+
+8G prompt는 **AnalysisReason object schema**를 명시한다. 모든 `reasons` 필드(top-level, `bear`, `bull`, `risk_manager`, `fund_manager`)는 **string 배열이 아니라 object 배열**이어야 한다.
+
+**8G packet build:**
+
+```bash
+PYTHONPATH=src uv run python ops/build_analysis_manual_packet.py \
+  --validated-scout "runtime/paper/${DAY}/scout/scout_output.validated.json" \
+  --validated-allocator "runtime/paper/${DAY}/allocator/allocator_output.validated.json" \
+  --allocator-validation-summary "runtime/paper/${DAY}/allocator/allocator_validation_summary.json" \
+  --portfolio-state "runtime/paper/${DAY}/portfolio/portfolio_state.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --universe runtime/paper/universe.paper.toml \
+  --market KR \
+  --symbol SYNTH-KR-0001 \
+  --out-dir "runtime/paper/${DAY}/analysis" \
+  --json
+```
+
+prompt에 `## Required reasons object schema`, `## Minimal JSON skeleton`, `Never output reasons as strings.` 포함 여부 확인.
+
+**Manual LLM handoff:** `analysis_prompt.kr.SYNTH-KR-0001.md` paste → `analysis_output.kr.SYNTH-KR-0001.raw.json` 수동 저장.
+
+**8G validation:**
+
+```bash
+PYTHONPATH=src uv run python ops/validate_analysis_raw_json.py \
+  --raw-json "runtime/paper/${DAY}/analysis/analysis_output.kr.SYNTH-KR-0001.raw.json" \
+  --analysis-input "runtime/paper/${DAY}/analysis/analysis_input.kr.SYNTH-KR-0001.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/paper/${DAY}/analysis" \
+  --json
+```
+
+**Gate:** `analysis_output.kr.SYNTH-KR-0001.validated.json` 생성.
+
+#### G. 8H — PaperLoopInput assembler (no execution)
+
+```bash
+PYTHONPATH=src uv run python ops/assemble_paper_loop_input.py \
+  --validated-scout "runtime/paper/${DAY}/scout/scout_output.validated.json" \
+  --validated-allocator "runtime/paper/${DAY}/allocator/allocator_output.validated.json" \
+  --validated-analysis "runtime/paper/${DAY}/analysis/analysis_output.kr.SYNTH-KR-0001.validated.json" \
+  --portfolio-state "runtime/paper/${DAY}/portfolio/portfolio_state.json" \
+  --paper-loop-context "runtime/paper/${DAY}/paper_loop/paper_loop_context.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/paper/${DAY}/paper_loop" \
+  --json
+```
+
+assembly log 확인:
+
+```bash
+sed -n '1,180p' "runtime/paper/${DAY}/paper_loop/paper_loop_input_assembly.kr.SYNTH-KR-0001.txt"
+```
+
+**Gate:** log에 `PaperLoopInput model validation: PASS`, `execution: NOT RUN`, `order generation: NOT RUN`, `broker: NOT CALLED`, `KIS: NOT CALLED`.
+
+#### H. 8I — No-write rehearsal
+
+rehearsal 전 DB state capture:
+
+```bash
+ls -l runtime/paper/ledger.sqlite3 runtime/paper/decisions.sqlite3 2>/dev/null || true
+shasum -a 256 runtime/paper/ledger.sqlite3 runtime/paper/decisions.sqlite3 2>/dev/null || true
+```
+
+```bash
+PYTHONPATH=src uv run python ops/rehearse_paper_loop_no_write.py \
+  --paper-loop-input "runtime/paper/${DAY}/paper_loop/paper_loop_input.kr.SYNTH-KR-0001.json" \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --ledger-db runtime/paper/ledger.sqlite3 \
+  --decision-db runtime/paper/decisions.sqlite3 \
+  --out-dir "runtime/paper/${DAY}/rehearsal" \
+  --no-write \
+  --json
+```
+
+rehearsal log 확인:
+
+```bash
+sed -n '1,180p' "runtime/paper/${DAY}/rehearsal/paper_loop_no_write_rehearsal.kr.SYNTH-KR-0001.txt"
+```
+
+rehearsal 후 DB state capture:
+
+```bash
+ls -l runtime/paper/ledger.sqlite3 runtime/paper/decisions.sqlite3 2>/dev/null || true
+shasum -a 256 runtime/paper/ledger.sqlite3 runtime/paper/decisions.sqlite3 2>/dev/null || true
+```
+
+**Gate:** stdout JSON `status == "ok"`, `run_paper_once_status == "VALIDATION_ONLY"`. txt에 `run_paper_once --no-write: PASS`, `ledger_db unchanged: PASS`, `decision_db unchanged: PASS`, `PaperLoopRunner.run: NOT CALLED`, `PaperBroker: NOT CALLED`, `KIS: NOT CALLED`, `Order generation: NOT RUN`, `Execution artifacts: NOT CREATED`.
+
+### Validation gates (summary)
+
+| Step | Gate |
+|---|---|
+| 8B | store + Date.md from manual JSONL |
+| 8C | Date.md smoke PASS + symbol coverage |
+| 8E | Scout validation PASS |
+| 8F | Allocator validation PASS (`--store` required) |
+| 8G | Analysis validation PASS (reason objects, not strings) |
+| 8H | PaperLoopInput assembly PASS + execution guard lines |
+| 8I | no-write rehearsal PASS + `VALIDATION_ONLY` |
+
+### Failure handling
+
+- validator 실패 시 **즉시 중단**. raw JSON 또는 upstream input을 수정한 뒤 해당 step부터 재실행.
+- validator **우회 금지**. validated JSON **수동 편집 금지**.
+- required runtime artifact **synthesize 금지** (missing raw LLM output → manual LLM step 재실행).
+- missing portfolio/context → approved example/template에서 **준비**; 임의 placeholder invent 금지.
+- Date-ID membership 실패 → Date.md/store/input citation **수정**; check disable 금지.
+- no-write invariant(ledger/decision DB changed) 실패 → **즉시 중단**, DB path·side effect 조사 후 재개.
+
+### Success criteria
+
+Controlled Day 1 성공 조건:
+
+- 8B: manual JSONL → Date.md/store
+- 8C: Date.md smoke PASS
+- 8E: Scout validation PASS
+- 8F: Allocator validation PASS
+- 8G: Analysis validation PASS
+- 8H: PaperLoopInput assembly PASS
+- 8I: no-write rehearsal PASS
+- `run_paper_once_status == "VALIDATION_ONLY"`
+- ledger DB absent or byte/hash-identical before vs after
+- decision DB absent or byte/hash-identical before vs after
+- `git ls-files runtime` empty
+- external API / KIS / broker / write-mode paper loop **미사용**
+
+### Artifacts generated (local only)
+
+| Area | Examples |
+|---|---|
+| research | `research_sources.jsonl`, `date_id_sources.sqlite3`, `Date.md` |
+| scout | `scout_input.json`, `scout_prompt.md`, `scout_output.validated.json`, validation logs |
+| allocator | `allocator_input.json`, `allocator_prompt.md`, `allocator_output.validated.json`, validation logs |
+| analysis | `analysis_input.*.json`, `analysis_prompt.*.md`, `analysis_output.*.validated.json`, validation logs |
+| paper_loop | `paper_loop_input.*.json`, assembly txt/summary |
+| rehearsal | `paper_loop_no_write_rehearsal.*` json/txt/summary |
+
+### Git safety
+
+```bash
+git status -uall --short
+git ls-files runtime
+```
+
+Expected:
+
+```text
+git ls-files runtime
+# empty output
+```
+
+- **`runtime/` commit 금지**
+- Day 1 runtime output은 operational artifact이며 repository source가 아님
+- docs/source 변경만 의도적으로 commit
+
+### Next-step boundary (after Day 1)
+
+Controlled Day 1 PASS 후에도 **아래는 자동으로 진행하지 않는다**:
+
+1. real API fetchers (FRED/DART/yfinance/news HTTP intake)
+2. 30-trading-day paper pilot start
+3. KIS read-only `--run`
+4. write-mode `ops/run_paper_once.py` / `PaperLoopRunner.run()`
+5. broker order submission, ledger/decision DB writes, fills, NAV snapshots, daily summary, postmortem
+
+다음 단계는 **별도 readiness decision** 이후 real API fetchers 또는 repeatable intake automation 검토, 그 다음 pilot/KIS read-only planning이다.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 
