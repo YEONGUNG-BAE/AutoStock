@@ -19,6 +19,19 @@ sys.path.insert(0, str(REPO_ROOT / "ops"))
 
 from allocator.models import AllocatorDecision
 from build_analysis_manual_packet import (
+    PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID,
+    PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE,
+    PROMPT_DO_NOT_INVENT_DATE_IDS,
+    PROMPT_HEADING_MINIMAL_JSON_SKELETON,
+    PROMPT_HEADING_REQUIRED_REASONS_SCHEMA,
+    PROMPT_INVALID_REASONS_STRING_EXAMPLE,
+    PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS,
+    PROMPT_REASON_OBJECT_FIELDS,
+    PROMPT_REASONS_MUST_BE_OBJECTS,
+    PROMPT_TOP_LEVEL_REASONS_REQUIRED,
+    PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS,
+    PROMPT_VALID_REASONS_OBJECT_PREFIX,
+    SKELETON_PLACEHOLDER_DECISION_ID,
     PacketError,
     output_filenames,
     run_build_analysis_manual_packet,
@@ -282,6 +295,32 @@ def test_02_analysis_prompt_contains_required_guardrails(tmp_path: Path) -> None
     assert "bear must include" in prompt
     assert "Do not produce orders" in prompt
     assert "260528-1" in prompt
+    # Foundation 8G AnalysisReason prompt hardening
+    assert PROMPT_HEADING_REQUIRED_REASONS_SCHEMA in prompt
+    assert PROMPT_HEADING_MINIMAL_JSON_SKELETON in prompt
+    assert PROMPT_REASONS_MUST_BE_OBJECTS in prompt
+    assert PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS in prompt
+    assert PROMPT_TOP_LEVEL_REASONS_REQUIRED in prompt
+    assert PROMPT_REASON_OBJECT_FIELDS in prompt
+    assert PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS in prompt
+    assert PROMPT_DO_NOT_INVENT_DATE_IDS in prompt
+    assert PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE in prompt
+    assert PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID in prompt
+    assert "top-level `reasons`" in prompt
+    assert "bear.reasons" in prompt
+    assert "bull.reasons" in prompt
+    assert "risk_manager.reasons" in prompt
+    assert "fund_manager.reasons" in prompt
+    assert '"reason"' in prompt
+    assert '"date_id"' in prompt
+    assert '"source_name"' in prompt
+    assert '"quote"' in prompt
+    assert PROMPT_INVALID_REASONS_STRING_EXAMPLE in prompt
+    assert PROMPT_VALID_REASONS_OBJECT_PREFIX in prompt
+    assert "schema_name" in prompt
+    assert "analysis_decision.v1" in prompt
+    assert "Allowed Date-IDs" in prompt
+    assert SKELETON_PLACEHOLDER_DECISION_ID in prompt
 
 
 def test_03_analysis_input_contains_expected_core_fields(tmp_path: Path) -> None:

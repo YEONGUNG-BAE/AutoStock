@@ -31,6 +31,25 @@ from scout.models import ScoutSummary
 
 from analysis.models import ANALYSIS_DECISION_SCHEMA, SUMMARY_ONE_LINER_MAX_LENGTH
 
+# Prompt hardening 상수 — tests/test_analysis_manual_packet.py에서 동일 문자열을 assert한다.
+PROMPT_HEADING_REQUIRED_REASONS_SCHEMA = "## Required reasons object schema"
+PROMPT_HEADING_MINIMAL_JSON_SKELETON = "## Minimal JSON skeleton"
+PROMPT_REASONS_MUST_BE_OBJECTS = "Every reasons field must be an array of objects, never strings."
+PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS = "Never output reasons as strings."
+PROMPT_TOP_LEVEL_REASONS_REQUIRED = "Top-level reasons is required and must not be omitted."
+PROMPT_REASON_OBJECT_FIELDS = "Each reason object must contain: reason, date_id, source_name, quote."
+PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS = "Use only allowed Date-IDs, without brackets."
+PROMPT_DO_NOT_INVENT_DATE_IDS = "Do not invent Date-IDs."
+PROMPT_SKELETON_SHAPE_NOTE = (
+    "The JSON skeleton below is a shape example. Replace example prose and IDs with values "
+    "appropriate for this packet."
+)
+PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE = "Do not copy placeholder prose verbatim."
+PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID = "Do not copy placeholder decision_id verbatim."
+PROMPT_INVALID_REASONS_STRING_EXAMPLE = '"reasons": ["some text"]'
+PROMPT_VALID_REASONS_OBJECT_PREFIX = '"reasons": ['
+SKELETON_PLACEHOLDER_DECISION_ID = "analysis-decision-example-replace-me"
+
 StageName = Literal[
     "args",
     "scout_summary",
@@ -223,6 +242,187 @@ def _verify_cited_in_date_md(
             raise PacketError("date_md", f"{source_label} cited date_id missing from Date.md: {date_id}")
 
 
+def _extract_example_source_name(analysis_input: dict[str, Any]) -> str | None:
+    """패킷 scout_summary에서 skeleton용 source_name 후보를 추출한다. 없으면 null."""
+    scout_summary = analysis_input.get("scout_summary")
+    if not isinstance(scout_summary, dict):
+        return None
+    for group_key in ("positive_factors", "negative_factors", "neutral_factors"):
+        group = scout_summary.get(group_key)
+        if not isinstance(group, list):
+            continue
+        for factor in group:
+            if not isinstance(factor, dict):
+                continue
+            reasons = factor.get("reasons")
+            if not isinstance(reasons, list):
+                continue
+            for reason in reasons:
+                if not isinstance(reason, dict):
+                    continue
+                source_name = reason.get("source_name")
+                if isinstance(source_name, str) and source_name.strip():
+                    return source_name
+    return None
+
+
+def _reason_object_example(
+    *,
+    reason_text: str,
+    date_id: str,
+    source_name: str | None,
+) -> dict[str, Any]:
+    return {
+        "reason": reason_text,
+        "date_id": date_id,
+        "source_name": source_name,
+        "quote": None,
+    }
+
+
+def _build_minimal_analysis_skeleton(
+    *,
+    universe: str,
+    market: str,
+    symbol: str,
+    example_date_id: str,
+    source_name: str | None,
+    created_at_example: str,
+    allowed_date_ids: tuple[str, ...],
+) -> str:
+    """AnalysisDecision minimal JSON skeleton (shape example only)."""
+    reason = lambda text: _reason_object_example(
+        reason_text=text,
+        date_id=example_date_id,
+        source_name=source_name,
+    )
+    skeleton: dict[str, Any] = {
+        "decision_id": SKELETON_PLACEHOLDER_DECISION_ID,
+        "created_at": created_at_example,
+        "schema_name": ANALYSIS_DECISION_SCHEMA,
+        "universe": universe,
+        "symbol": symbol,
+        "market": market,
+        "summary_one_liner": "Replace with a concise summary under 200 characters.",
+        "bear": {
+            "summary": "Replace with bear-case summary.",
+            "risks": ["Replace with risk."],
+            "reasons": [reason("Replace with evidence-backed bear reason.")],
+        },
+        "bull": {
+            "summary": "Replace with bull-case summary.",
+            "catalysts": ["Replace with catalyst."],
+            "reasons": [reason("Replace with evidence-backed bull reason.")],
+        },
+        "risk_manager": {
+            "summary": "Replace with risk-manager summary.",
+            "risk_flags": ["Replace with risk flag."],
+            "max_weight_percent": 25,
+            "reasons": [reason("Replace with evidence-backed risk reason.")],
+        },
+        "fund_manager": {
+            "action": "hold",
+            "target_weight_percent": 10,
+            "rationale": "Replace with rationale.",
+            "reasons": [reason("Replace with evidence-backed fund-manager reason.")],
+        },
+        "reasons": [reason("Replace with top-level evidence-backed reason.")],
+        "metadata": {
+            "date_ids": [example_date_id],
+            "foundation": "8G",
+        },
+    }
+    return canonical_json_dumps(skeleton)
+
+
+def _build_required_reasons_schema_section(*, allowed_date_ids: tuple[str, ...]) -> list[str]:
+    """AnalysisReason object schema hardening 섹션."""
+    lines = [
+        PROMPT_HEADING_REQUIRED_REASONS_SCHEMA,
+        "",
+        PROMPT_REASONS_MUST_BE_OBJECTS,
+        PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS,
+        PROMPT_TOP_LEVEL_REASONS_REQUIRED,
+        PROMPT_REASON_OBJECT_FIELDS,
+        PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS,
+        PROMPT_DO_NOT_INVENT_DATE_IDS,
+        "",
+        "This applies to all five locations:",
+        "",
+        "- top-level `reasons`",
+        "- `bear.reasons`",
+        "- `bull.reasons`",
+        "- `risk_manager.reasons`",
+        "- `fund_manager.reasons`",
+        "",
+        "Each reason object fields:",
+        "",
+        "- `reason`: string",
+        "- `date_id`: string, must be one of the allowed Date-IDs, no brackets",
+        "- `source_name`: string or null",
+        "- `quote`: string or null",
+        "",
+        "Do **not** output:",
+        "",
+        f"- {PROMPT_INVALID_REASONS_STRING_EXAMPLE}",
+        "",
+        "Always output reason objects, for example:",
+        "",
+        '- `"reasons": [{"reason": "...", "date_id": "260528-1", "source_name": "operator-smoke", "quote": null}]`',
+        "",
+        "Role-level reasons are required: `bear.reasons`, `bull.reasons`, `risk_manager.reasons`, "
+        "`fund_manager.reasons`.",
+        "If evidence is limited, still provide at least one reason object citing an allowed Date-ID "
+        "rather than omitting the field.",
+        "Do **not** use bracketed Date-IDs like `[260528-1]`.",
+        "",
+    ]
+    if len(allowed_date_ids) > 1:
+        lines.extend(
+            [
+                "All `date_id` values in reason objects must be selected only from `allowed_date_ids` "
+                "listed below.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _build_minimal_skeleton_section(
+    *,
+    analysis_input: dict[str, Any],
+    allowed_date_ids: tuple[str, ...],
+    market: str,
+    symbol: str,
+) -> list[str]:
+    """Minimal JSON skeleton hardening 섹션."""
+    example_date_id = allowed_date_ids[0]
+    source_name = _extract_example_source_name(analysis_input)
+    created_at_example = str(analysis_input.get("created_at", "2026-05-29T12:00:00+09:00"))
+    skeleton_json = _build_minimal_analysis_skeleton(
+        universe=str(analysis_input.get("universe", "paper-v0")),
+        market=market,
+        symbol=symbol,
+        example_date_id=example_date_id,
+        source_name=source_name,
+        created_at_example=created_at_example,
+        allowed_date_ids=allowed_date_ids,
+    )
+    lines = [
+        PROMPT_HEADING_MINIMAL_JSON_SKELETON,
+        "",
+        PROMPT_SKELETON_SHAPE_NOTE,
+        PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE,
+        PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID,
+        "",
+        "```json",
+        skeleton_json,
+        "```",
+        "",
+    ]
+    return lines
+
+
 def _build_analysis_prompt(
     *,
     analysis_input: dict[str, Any],
@@ -263,8 +463,15 @@ def _build_analysis_prompt(
         "- risk_manager must include: summary, risk_flags, max_weight_percent (optional), reasons",
         "- fund_manager must include: action, target_weight_percent, rationale, reasons",
         "",
+        *_build_required_reasons_schema_section(allowed_date_ids=allowed_date_ids),
         f"Allowed Date-IDs: {', '.join(allowed_date_ids) if allowed_date_ids else '(none)'}",
         "",
+        *_build_minimal_skeleton_section(
+            analysis_input=analysis_input,
+            allowed_date_ids=allowed_date_ids,
+            market=market,
+            symbol=symbol,
+        ),
         "## After manual LLM call",
         "",
         f"Save the raw JSON response manually to: `{raw_output_path}`",
