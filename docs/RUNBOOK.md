@@ -132,6 +132,8 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 
 generated `runtime/research/` artifacts는 **commit하지 않는다**.
 
+**Post-Foundation (design):** real external sources는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) 설계대로 snapshot → `DateIdSourceRecord` JSONL을 staging한 뒤 **동일 8B script**로 ingest한다. v1 구현 전까지 operator-prepared JSONL 경로를 사용한다.
+
 ### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
 
 로컬 universe 파일 준비:
@@ -663,15 +665,17 @@ git ls-files runtime
 
 ### Next-step boundary (after Day 1)
 
+Controlled Day 1 PASS 후 **다음 설계 단계**는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) (**Real Research Source Intake v1**). read-only fetch → immutable snapshot → `DateIdSourceRecord` → **기존 8B** 경로; Scout/8C–8I chain은 unchanged; walk-through는 여전히 **8I no-write**에서 종료.
+
 Controlled Day 1 PASS 후에도 **아래는 자동으로 진행하지 않는다**:
 
-1. real API fetchers (FRED/DART/yfinance/news HTTP intake)
+1. real API fetcher **implementation** (FRED/yfinance/DART ops — design only until separate PR)
 2. 30-trading-day paper pilot start
 3. KIS read-only `--run`
 4. write-mode `ops/run_paper_once.py` / `PaperLoopRunner.run()`
 5. broker order submission, ledger/decision DB writes, fills, NAV snapshots, daily summary, postmortem
 
-다음 단계는 **별도 readiness decision** 이후 real API fetchers 또는 repeatable intake automation 검토, 그 다음 pilot/KIS read-only planning이다.
+다음 단계는 **Real Research Source Intake v1 구현** (FRED first) → repeatable intake 검증 → 별도 readiness decision → pilot/KIS read-only planning.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.

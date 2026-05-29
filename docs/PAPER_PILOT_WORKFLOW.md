@@ -585,6 +585,19 @@ PYTHONPATH=src uv run python ops/rehearse_paper_loop_no_write.py \
 
 Controlled Day 1 paper walk-through는 Foundation 8B–8I chain을 **수동/file-based intake + manual LLM + validated JSON + 8I no-write rehearsal**까지 1회 검증하는 단계이며, **8I에서 종료**한다 (`docs/RUNBOOK.md` 참조). real API fetchers, 30-trading-day pilot start, KIS read-only `--run`은 **Controlled Day 1 이후 deferred**이다.
 
+### Real Research Source Intake v1 (next stage — design)
+
+Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1** (design: [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md)).
+
+| 항목 | 내용 |
+|---|---|
+| 목적 | read-only external fetch → immutable snapshot → `DateIdSourceRecord` → **기존 8B** 경로 |
+| Scout | 변경 없음 — `Date.md` / `ScoutInput` only |
+| 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
+| KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
+| 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
+| 구현 상태 | **design-only** — `ops/fetch_research_sources.py` 등 미구현 |
+
 ### Controlled walk-through vs 30-trading-day pilot
 
 - **Controlled Day 1 walk-through** — Foundation 8B~8I ops chain을 **1회** 수동 검증하고 **8I no-write rehearsal에서 종료**. 30거래일 pilot **시작과 동일하지 않다**. runbook: `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through.
@@ -612,6 +625,7 @@ Controlled Day 1 paper walk-through는 Foundation 8B–8I chain을 **수동/file
 | 문서 | 용도 |
 |---|---|
 | [RUNBOOK.md](RUNBOOK.md) | ops entrypoint, acceptance, KIS smoke |
+| [REAL_RESEARCH_SOURCE_INTAKE.md](REAL_RESEARCH_SOURCE_INTAKE.md) | post-Foundation real source intake v1 design |
 | [DEBUG_EVENT_CODES.md](DEBUG_EVENT_CODES.md) | Debug event catalog |
 | [POSTMORTEM_ERROR_TAGS.md](POSTMORTEM_ERROR_TAGS.md) | Postmortem tag catalog |
 | [TECH_DEBT.md](TECH_DEBT.md) | P3 backlog, Foundation 후속 |

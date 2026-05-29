@@ -45,6 +45,8 @@
 
 ### Date-ID / Date.md
 - ~~Add a controlled Date.md export/update helper only after the manual Date-ID workflow is stable.~~ Done in Foundation 8B (`ops/research_source_intake.py`); real API fetchers remain deferred.
+- ~~Design Real Research Source Intake v1 (read-only fetch → snapshot → DateIdSourceRecord → 8B).~~ Done: `docs/REAL_RESEARCH_SOURCE_INTAKE.md` (design-only; FRED first; G1–G4 guards).
+- **Implement Real Research Source Intake v1** — FRED live-smoke + offline replay + fixture tests; proposed `ops/fetch_research_sources.py`; still terminates at 8I no-write; KIS out of scope.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 
 ### Ollama operation
