@@ -18,6 +18,53 @@ from pathlib import Path
 from typing import Any, Literal, TextIO
 
 from allocator.models import ALLOCATOR_DECISION_SCHEMA, SUMMARY_ONE_LINER_MAX_LENGTH
+
+# Prompt hardening 상수 — tests/test_allocator_manual_packet.py에서 동일 문자열을 assert한다.
+PROMPT_HEADING_REQUIRED_ALLOCATOR_REASON_SCHEMA = "## Required allocator reason object schema"
+PROMPT_HEADING_MINIMAL_ALLOCATOR_SKELETON = "## Minimal AllocatorDecision JSON skeleton"
+PROMPT_REASONS_MUST_BE_OBJECTS = "Every reasons field must be an array of objects, never strings."
+PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS = "Never output reasons as strings."
+PROMPT_TOP_LEVEL_REASONS_REQUIRED = "Top-level reasons is required and must not be omitted."
+PROMPT_REASON_OBJECT_FIELDS = "Each reason object must contain: reason, date_id, source_name, quote."
+PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS = "Use only allowed Date-IDs, without brackets."
+PROMPT_DO_NOT_INVENT_DATE_IDS = "Do not invent Date-IDs."
+PROMPT_DECISION_ID_REQUIRED = "decision_id is required."
+PROMPT_CREATED_AT_REQUIRED = "created_at is required."
+PROMPT_UNIVERSE_REQUIRED = "universe is required."
+PROMPT_SIGNAL_SUMMARY_REQUIRED = "signal_summary is required."
+PROMPT_CASH_MANAGER_REQUIRED = "cash_manager is required."
+PROMPT_ASSET_ALLOCATOR_SUMMARY_REASONS_REQUIRED = (
+    "asset_allocator.summary and asset_allocator.reasons are required."
+)
+PROMPT_CONSISTENCY_CHECKER_SUMMARY_REASONS_REQUIRED = (
+    "consistency_checker.summary and consistency_checker.reasons are required."
+)
+PROMPT_CASH_POLICY_RATIONALE_REASONS_REQUIRED = (
+    "cash_policy.rationale and cash_policy.reasons are required."
+)
+PROMPT_SKELETON_SHAPE_NOTE = (
+    "The JSON skeleton below is a shape example. Replace example prose and IDs with values "
+    "appropriate for this packet."
+)
+PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE = "Do not copy placeholder prose verbatim."
+PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID = "Do not copy placeholder decision_id verbatim."
+PROMPT_INVALID_REASONS_STRING_EXAMPLE = '"reasons": ["some text"]'
+PROMPT_VALID_REASONS_OBJECT_PREFIX = '"reasons": ['
+SKELETON_PLACEHOLDER_DECISION_ID = "allocator-decision-example-replace-me"
+SKELETON_GOLD_POLICY_MODE = "normal"
+SKELETON_TARGET_WEIGHTS: dict[str, str] = {"kr": "80", "us": "0", "gold": "20"}
+SKELETON_CASH_PERCENT = "20"
+PROMPT_TARGET_WEIGHTS_SUM_100 = "target_weights.kr + target_weights.us + target_weights.gold must equal 100."
+PROMPT_GOLD_NORMAL_BAND = 'If gold_policy_mode is "normal", gold target must be within 18~22.'
+PROMPT_GOLD_EXCEPTION_BAND = 'If gold_policy_mode is "exception", gold target must be within 15~25.'
+PROMPT_GOLD_ZERO_INVALID = "gold=0 is invalid in both normal and exception modes under the current validator."
+PROMPT_CASH_TARGET_EQUALS_RECOMMENDED = (
+    "cash_policy.cash_target_percent must equal cash_manager.recommended_cash_percent."
+)
+PROMPT_CONTROLLED_KR_SYNTHETIC_SKELETON = (
+    'For the controlled KR synthetic skeleton, use gold_policy_mode "normal" with '
+    "target_weights kr=80, us=0, gold=20."
+)
 from data.date_id_store import SQLiteDateIdSourceStore
 from decision.canonical_json import canonical_json_dumps
 from domain._datetime import parse_timezone_aware_datetime
@@ -269,6 +316,228 @@ def _load_scout_validation_summary(path: Path, *, expected_summary_id: str) -> d
     return payload
 
 
+def _extract_example_source_name(allocator_input: dict[str, Any]) -> str | None:
+    """패킷 scout_summary에서 skeleton용 source_name 후보를 추출한다. 없으면 null."""
+    scout_summary = allocator_input.get("scout_summary")
+    if not isinstance(scout_summary, dict):
+        return None
+    for group_key in ("positive_factors", "negative_factors", "neutral_factors"):
+        group = scout_summary.get(group_key)
+        if not isinstance(group, list):
+            continue
+        for factor in group:
+            if not isinstance(factor, dict):
+                continue
+            reasons = factor.get("reasons")
+            if not isinstance(reasons, list):
+                continue
+            for reason in reasons:
+                if not isinstance(reason, dict):
+                    continue
+                source_name = reason.get("source_name")
+                if isinstance(source_name, str) and source_name.strip():
+                    return source_name
+    return None
+
+
+def _reason_object_example(
+    *,
+    reason_text: str,
+    date_id: str,
+    source_name: str | None,
+) -> dict[str, Any]:
+    return {
+        "reason": reason_text,
+        "date_id": date_id,
+        "source_name": source_name,
+        "quote": None,
+    }
+
+
+def _build_minimal_allocator_skeleton(
+    *,
+    universe: str,
+    example_date_id: str,
+    source_name: str | None,
+    created_at_example: str,
+    min_cash_percent: str,
+    max_cash_percent: str,
+) -> str:
+    """AllocatorDecision minimal JSON skeleton (shape example only)."""
+    reason = lambda text: _reason_object_example(
+        reason_text=text,
+        date_id=example_date_id,
+        source_name=source_name,
+    )
+    target_weights = dict(SKELETON_TARGET_WEIGHTS)
+    skeleton: dict[str, Any] = {
+        "decision_id": SKELETON_PLACEHOLDER_DECISION_ID,
+        "created_at": created_at_example,
+        "schema_name": ALLOCATOR_DECISION_SCHEMA,
+        "universe": universe,
+        "summary_one_liner": "Replace with a concise summary under 200 characters.",
+        "gold_policy_mode": SKELETON_GOLD_POLICY_MODE,
+        "signal_summary": {
+            "summary": "Replace with signal summary.",
+            "reasons": [reason("Replace with evidence-backed signal reason.")],
+        },
+        "cash_manager": {
+            "summary": "Replace with cash-manager summary.",
+            "recommended_cash_percent": SKELETON_CASH_PERCENT,
+            "reasons": [reason("Replace with evidence-backed cash reason.")],
+        },
+        "asset_allocator": {
+            "summary": "Replace with asset allocation summary.",
+            "target_weights": dict(target_weights),
+            "reasons": [reason("Replace with evidence-backed asset allocation reason.")],
+        },
+        "consistency_checker": {
+            "passed": True,
+            "summary": "Replace with consistency summary.",
+            "issues": [],
+            "reasons": [reason("Replace with evidence-backed consistency reason.")],
+        },
+        "cash_policy": {
+            "cash_target_percent": SKELETON_CASH_PERCENT,
+            "min_cash_percent": min_cash_percent,
+            "max_cash_percent": max_cash_percent,
+            "rationale": "Replace with cash policy rationale.",
+            "reasons": [reason("Replace with evidence-backed cash policy reason.")],
+        },
+        "target_weights": dict(target_weights),
+        "reasons": [reason("Replace with top-level evidence-backed allocation reason.")],
+        "metadata": {
+            "date_ids": [example_date_id],
+            "foundation": "8F",
+        },
+    }
+    return canonical_json_dumps(skeleton)
+
+
+def _build_allocator_business_rules_section() -> list[str]:
+    """Allocator validator business rules hardening 섹션."""
+    return [
+        "## Allocator validator business rules",
+        "",
+        PROMPT_TARGET_WEIGHTS_SUM_100,
+        PROMPT_GOLD_NORMAL_BAND,
+        PROMPT_GOLD_EXCEPTION_BAND,
+        PROMPT_GOLD_ZERO_INVALID,
+        PROMPT_CASH_TARGET_EQUALS_RECOMMENDED,
+        PROMPT_CONTROLLED_KR_SYNTHETIC_SKELETON,
+        "",
+    ]
+
+
+def _build_required_allocator_reason_schema_section(*, allowed_date_ids: tuple[str, ...]) -> list[str]:
+    """AllocatorReason object schema hardening 섹션."""
+    lines = [
+        PROMPT_HEADING_REQUIRED_ALLOCATOR_REASON_SCHEMA,
+        "",
+        PROMPT_REASONS_MUST_BE_OBJECTS,
+        PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS,
+        PROMPT_TOP_LEVEL_REASONS_REQUIRED,
+        PROMPT_REASON_OBJECT_FIELDS,
+        PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS,
+        PROMPT_DO_NOT_INVENT_DATE_IDS,
+        "",
+        PROMPT_DECISION_ID_REQUIRED,
+        PROMPT_CREATED_AT_REQUIRED,
+        PROMPT_UNIVERSE_REQUIRED,
+        PROMPT_SIGNAL_SUMMARY_REQUIRED,
+        PROMPT_CASH_MANAGER_REQUIRED,
+        PROMPT_ASSET_ALLOCATOR_SUMMARY_REASONS_REQUIRED,
+        PROMPT_CONSISTENCY_CHECKER_SUMMARY_REASONS_REQUIRED,
+        PROMPT_CASH_POLICY_RATIONALE_REASONS_REQUIRED,
+        "",
+        "This applies to all reasons locations:",
+        "",
+        "- top-level `reasons`",
+        "- `signal_summary.reasons`",
+        "- `cash_manager.reasons`",
+        "- `asset_allocator.reasons`",
+        "- `consistency_checker.reasons`",
+        "- `cash_policy.reasons`",
+        "",
+        "Required nested fields must not be omitted:",
+        "",
+        "- `signal_summary.summary`",
+        "- `signal_summary.reasons`",
+        "- `cash_manager.summary`",
+        "- `cash_manager.recommended_cash_percent`",
+        "- `cash_manager.reasons`",
+        "- `asset_allocator.summary`",
+        "- `asset_allocator.target_weights`",
+        "- `asset_allocator.reasons`",
+        "- `consistency_checker.passed`",
+        "- `consistency_checker.summary`",
+        "- `consistency_checker.issues`",
+        "- `consistency_checker.reasons`",
+        "- `cash_policy.cash_target_percent`",
+        "- `cash_policy.rationale`",
+        "- `cash_policy.reasons`",
+        "",
+        "Do **not** output:",
+        "",
+        f"- {PROMPT_INVALID_REASONS_STRING_EXAMPLE}",
+        "",
+        "Always output reason objects, for example:",
+        "",
+        '- `"reasons": [{"reason": "...", "date_id": "260529-1", "source_name": "operator-day1", "quote": null}]`',
+        "",
+        "If evidence is limited, still provide at least one reason object citing an allowed Date-ID "
+        "rather than omitting the field.",
+        "Do **not** use bracketed Date-IDs like `[260529-1]`.",
+        "",
+    ]
+    if len(allowed_date_ids) > 1:
+        lines.extend(
+            [
+                "All `date_id` values in reason objects must be selected only from `allowed_date_ids` "
+                "listed below.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _build_minimal_allocator_skeleton_section(
+    *,
+    allocator_input: dict[str, Any],
+    allowed_date_ids: tuple[str, ...],
+) -> list[str]:
+    """Minimal AllocatorDecision JSON skeleton hardening 섹션."""
+    example_date_id = allowed_date_ids[0]
+    source_name = _extract_example_source_name(allocator_input)
+    created_at_example = str(allocator_input.get("created_at", "2026-05-29T12:00:00+09:00"))
+    constraints = allocator_input.get("constraints")
+    if not isinstance(constraints, dict):
+        constraints = {}
+    min_cash = str(constraints.get("min_cash_percent", "10"))
+    max_cash = str(constraints.get("max_cash_percent", "30"))
+    skeleton_json = _build_minimal_allocator_skeleton(
+        universe=str(allocator_input.get("universe", "paper-v0")),
+        example_date_id=example_date_id,
+        source_name=source_name,
+        created_at_example=created_at_example,
+        min_cash_percent=min_cash,
+        max_cash_percent=max_cash,
+    )
+    lines = [
+        PROMPT_HEADING_MINIMAL_ALLOCATOR_SKELETON,
+        "",
+        PROMPT_SKELETON_SHAPE_NOTE,
+        PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE,
+        PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID,
+        "",
+        "```json",
+        skeleton_json,
+        "```",
+        "",
+    ]
+    return lines
+
+
 def _build_allocator_prompt(
     *,
     allocator_input: dict[str, Any],
@@ -305,8 +574,14 @@ def _build_allocator_prompt(
         "- consistency_checker.passed must be true",
         "- all reasons must use canonical Date-ID strings without brackets",
         "",
+        *_build_required_allocator_reason_schema_section(allowed_date_ids=allowed_date_ids),
         f"Allowed Date-IDs: {', '.join(allowed_date_ids) if allowed_date_ids else '(none)'}",
         "",
+        *_build_allocator_business_rules_section(),
+        *_build_minimal_allocator_skeleton_section(
+            allocator_input=allocator_input,
+            allowed_date_ids=allowed_date_ids,
+        ),
         "## After manual LLM call",
         "",
         f"Save the raw JSON response manually to: `{raw_output_path}`",

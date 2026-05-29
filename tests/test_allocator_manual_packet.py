@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,36 @@ sys.path.insert(0, str(REPO_ROOT / "ops"))
 
 from build_allocator_manual_packet import (
     OUTPUT_FILES as PACKET_FILES,
+    PROMPT_ASSET_ALLOCATOR_SUMMARY_REASONS_REQUIRED,
+    PROMPT_CASH_MANAGER_REQUIRED,
+    PROMPT_CASH_POLICY_RATIONALE_REASONS_REQUIRED,
+    PROMPT_CASH_TARGET_EQUALS_RECOMMENDED,
+    PROMPT_CONSISTENCY_CHECKER_SUMMARY_REASONS_REQUIRED,
+    PROMPT_CONTROLLED_KR_SYNTHETIC_SKELETON,
+    PROMPT_CREATED_AT_REQUIRED,
+    PROMPT_DECISION_ID_REQUIRED,
+    PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID,
+    PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE,
+    PROMPT_DO_NOT_INVENT_DATE_IDS,
+    PROMPT_GOLD_EXCEPTION_BAND,
+    PROMPT_GOLD_NORMAL_BAND,
+    PROMPT_GOLD_ZERO_INVALID,
+    PROMPT_HEADING_MINIMAL_ALLOCATOR_SKELETON,
+    PROMPT_HEADING_REQUIRED_ALLOCATOR_REASON_SCHEMA,
+    PROMPT_INVALID_REASONS_STRING_EXAMPLE,
+    PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS,
+    PROMPT_REASON_OBJECT_FIELDS,
+    PROMPT_REASONS_MUST_BE_OBJECTS,
+    PROMPT_SIGNAL_SUMMARY_REQUIRED,
+    PROMPT_TOP_LEVEL_REASONS_REQUIRED,
+    PROMPT_TARGET_WEIGHTS_SUM_100,
+    PROMPT_UNIVERSE_REQUIRED,
+    PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS,
+    PROMPT_VALID_REASONS_OBJECT_PREFIX,
+    SKELETON_CASH_PERCENT,
+    SKELETON_GOLD_POLICY_MODE,
+    SKELETON_PLACEHOLDER_DECISION_ID,
+    SKELETON_TARGET_WEIGHTS,
     PacketError,
     load_portfolio_state,
     run_build_allocator_manual_packet,
@@ -259,6 +290,68 @@ def test_11_allocator_prompt_contains_required_guardrails(tmp_path: Path) -> Non
     assert "schema_name must be 'allocator_decision.v1'" in prompt
     assert "consistency_checker.passed must be true" in prompt
     assert "allocator_output.raw.json" in prompt
+    # Foundation 8F AllocatorReason prompt hardening
+    assert PROMPT_HEADING_REQUIRED_ALLOCATOR_REASON_SCHEMA in prompt
+    assert PROMPT_HEADING_MINIMAL_ALLOCATOR_SKELETON in prompt
+    assert PROMPT_REASONS_MUST_BE_OBJECTS in prompt
+    assert PROMPT_NEVER_OUTPUT_REASONS_AS_STRINGS in prompt
+    assert PROMPT_TOP_LEVEL_REASONS_REQUIRED in prompt
+    assert PROMPT_REASON_OBJECT_FIELDS in prompt
+    assert PROMPT_USE_ALLOWED_DATE_IDS_NO_BRACKETS in prompt
+    assert PROMPT_DO_NOT_INVENT_DATE_IDS in prompt
+    assert PROMPT_DECISION_ID_REQUIRED in prompt
+    assert PROMPT_CREATED_AT_REQUIRED in prompt
+    assert PROMPT_UNIVERSE_REQUIRED in prompt
+    assert PROMPT_SIGNAL_SUMMARY_REQUIRED in prompt
+    assert PROMPT_CASH_MANAGER_REQUIRED in prompt
+    assert PROMPT_ASSET_ALLOCATOR_SUMMARY_REASONS_REQUIRED in prompt
+    assert PROMPT_CONSISTENCY_CHECKER_SUMMARY_REASONS_REQUIRED in prompt
+    assert PROMPT_CASH_POLICY_RATIONALE_REASONS_REQUIRED in prompt
+    assert PROMPT_DO_NOT_COPY_PLACEHOLDER_PROSE in prompt
+    assert PROMPT_DO_NOT_COPY_PLACEHOLDER_DECISION_ID in prompt
+    assert "signal_summary.reasons" in prompt
+    assert "cash_manager.reasons" in prompt
+    assert "asset_allocator.reasons" in prompt
+    assert "consistency_checker.reasons" in prompt
+    assert "cash_policy.reasons" in prompt
+    assert '"reason"' in prompt
+    assert '"date_id"' in prompt
+    assert '"source_name"' in prompt
+    assert '"quote"' in prompt
+    assert PROMPT_INVALID_REASONS_STRING_EXAMPLE in prompt
+    assert PROMPT_VALID_REASONS_OBJECT_PREFIX in prompt
+    assert "schema_name" in prompt
+    assert "allocator_decision.v1" in prompt
+    assert "Allowed Date-IDs" in prompt
+    assert "260528-1" in prompt
+    assert SKELETON_PLACEHOLDER_DECISION_ID in prompt
+    # Allocator validator business rules (Foundation 8F skeleton fix)
+    assert PROMPT_TARGET_WEIGHTS_SUM_100 in prompt
+    assert PROMPT_GOLD_NORMAL_BAND in prompt
+    assert PROMPT_GOLD_EXCEPTION_BAND in prompt
+    assert PROMPT_GOLD_ZERO_INVALID in prompt
+    assert PROMPT_CASH_TARGET_EQUALS_RECOMMENDED in prompt
+    assert PROMPT_CONTROLLED_KR_SYNTHETIC_SKELETON in prompt
+    skeleton_section = prompt.split(PROMPT_HEADING_MINIMAL_ALLOCATOR_SKELETON, 1)[1]
+    skeleton_match = re.search(r"```json\n(\{.*?\})\n```", skeleton_section, re.DOTALL)
+    assert skeleton_match is not None
+    skeleton = json.loads(skeleton_match.group(1))
+    assert skeleton["gold_policy_mode"] == SKELETON_GOLD_POLICY_MODE
+    top_weights = skeleton["target_weights"]
+    allocator_weights = skeleton["asset_allocator"]["target_weights"]
+    assert int(top_weights["kr"]) + int(top_weights["us"]) + int(top_weights["gold"]) == 100
+    assert (
+        int(allocator_weights["kr"]) + int(allocator_weights["us"]) + int(allocator_weights["gold"])
+        == 100
+    )
+    assert top_weights["gold"] == SKELETON_TARGET_WEIGHTS["gold"]
+    assert allocator_weights["gold"] == SKELETON_TARGET_WEIGHTS["gold"]
+    assert top_weights == SKELETON_TARGET_WEIGHTS
+    assert allocator_weights == SKELETON_TARGET_WEIGHTS
+    assert skeleton["cash_policy"]["cash_target_percent"] == skeleton["cash_manager"][
+        "recommended_cash_percent"
+    ]
+    assert skeleton["cash_policy"]["cash_target_percent"] == SKELETON_CASH_PERCENT
 
 
 def test_12_existing_output_files_fail_without_force(tmp_path: Path) -> None:
