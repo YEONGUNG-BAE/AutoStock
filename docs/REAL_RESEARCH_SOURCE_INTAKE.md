@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3E5+** sector discovery / 3–5 company expansion **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3E5+** sector discovery / automatic universe expansion **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -664,6 +664,36 @@ PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
 ```
 
 Post-generate validation: `ops/validate_provider_mapping.py --universe … --provider-mapping … --json`
+
+---
+
+## 3F2 Generator-based KR expansion workflow (3F2)
+
+> **3F2 (implemented):** proves the existing 3F1 generator scales deterministically to 3–5 operator-curated candidates via **synthetic** checked-in fixtures only. Real large-cap expansion (Hyundai, NAVER, LG Chem, etc.) remains **operator-local** — requires a live/local 3C2 corp-code master snapshot; do **not** commit guessed or blank `corp_code` values for real companies. **Not** sector/universe discovery or ranking.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3F2 (A)** | Synthetic multi-candidate fixture (`corp_code_synthetic_multi.xml` + `kr_real_candidates.synthetic_multi.toml`) + generator scale tests | None |
+| **3F2 (B)** | Operator-local real 3–5 company expansion workflow (documented in RUNBOOK) | 3C2 snapshot fetch only (runtime artifact; never commit) |
+| **Next** | **3E5+** sector discovery / automatic universe expansion | Deferred |
+
+**3F2 synthetic scale proof (checked-in fixtures):**
+
+```bash
+uv run pytest tests/test_kr_real_generated_universe_expansion.py -v
+```
+
+Fixtures use explicit `SYNTH-*` company names and `9000xx` stock codes — not real company impersonation. DART `corp_code` is resolver-proven from the synthetic XML; candidate TOML must not include `corp_code`.
+
+**3F2 operator-local real expansion (not checked in):**
+
+1. Refresh local corp-code master snapshot via 3C2 (`ops/resolve_dart_corp_code.py --live-fetch …` → runtime ZIP; **never commit**).
+2. Prepare operator-curated candidate TOML with explicit `yfinance_provider_symbol` (`.KS`/`.KQ`); **no** `corp_code` field.
+3. Run `ops/generate_kr_provider_mapping.py` with local snapshot + candidates.
+4. Validate outputs with `ops/validate_provider_mapping.py`.
+5. Point 3E2/3E3/3E4 smoke flows at generated universe/mapping files.
+
+Repo checked-in corp-code fixtures contain verified real listed entries for **two** companies only (`005930` / `000660` in `corp_code_sample.xml`). A third real company requires operator-supplied snapshot data.
 
 ---
 

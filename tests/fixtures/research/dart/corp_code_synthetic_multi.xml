@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<result>
+  <list>
+    <corp_code>90000010</corp_code>
+    <corp_name>SYNTH-ALPHA</corp_name>
+    <stock_code>900001</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+  <list>
+    <corp_code>90000011</corp_code>
+    <corp_name>SYNTH-BETA</corp_name>
+    <stock_code>900002</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+  <list>
+    <corp_code>90000012</corp_code>
+    <corp_name>SYNTH-GAMMA</corp_name>
+    <stock_code>900003</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+  <list>
+    <corp_code>90000013</corp_code>
+    <corp_name>SYNTH-DELTA</corp_name>
+    <stock_code>900004</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+  <list>
+    <corp_code>90000014</corp_code>
+    <corp_name>SYNTH-EPSILON</corp_name>
+    <stock_code>900005</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+</result>

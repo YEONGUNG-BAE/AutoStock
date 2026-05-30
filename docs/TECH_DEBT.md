@@ -63,7 +63,8 @@
 - ~~Real Intake **3E3** — KR real sample live DART disclosure smoke~~ Done: `ops/run_kr_real_dart_smoke.py`, `tests/test_kr_real_dart_smoke.py`; provider mapping → OpenDART snapshot → adapter replay → combined-batch Date-ID → JSONL; 8B/8C no-require-coverage + Scout 3A.1 context verified in tests; no yfinance/FRED.
 - ~~Real Intake **3E4** — combined FRED+PRICE+DART context with Date.md/Scout budget caps~~ Done: `source_record_context_selector.py`, capped 8B `--context-budget-profile kr-real-smoke`, `ops/build_kr_real_combined_context_smoke.py`, `tests/test_combined_context_budget.py`; store retains all records; export cap only; 60KB guard unchanged.
 - ~~Real Intake **3F1** — fixture-first KR universe/provider mapping generator~~ Done: `kr_provider_mapping_generator.py`, `ops/generate_kr_provider_mapping.py`, candidate fixture + disambiguation XML; corp_code from local resolver only; stock_code normalization; self-validates via existing loaders. P3 cleanup: control-char rejection at parse/CLI/render (write-safety).
-- Real Intake **3E5+** — sector discovery, provider auto-refresh, live universe expansion to 3–5 companies — deferred.
+- ~~Real Intake **3F2** — generator-based KR expansion workflow~~ Done: synthetic 5-candidate fixtures + scale tests (`test_kr_real_generated_universe_expansion.py`); operator-local real expansion documented in RUNBOOK (3C2 snapshot → candidate TOML → generator → validate → 3E2/3E3/3E4). Provider auto-generation from operator-curated candidates is supported; sector discovery/ranking is not.
+- Real Intake **3E5+** — sector discovery, provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 
 ### Ollama operation

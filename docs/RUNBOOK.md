@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1433 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1445 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1433 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1445 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -472,7 +472,48 @@ PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
 
 Candidate TOML must not include `corp_code`; DART `corp_code`/`corp_name` come from local corp-code XML/ZIP via existing resolver. yfinance `provider_symbol` must be explicit (`.KS`/`.KQ`). Text fields reject ASCII control characters (codepoint `< 0x20` or `0x7F`) at parse/CLI/render before write. Sector discovery remains deferred.
 
-Expand to 3–5 real companies remains **deferred** (3E5+).
+**3F2 operator-local KR universe expansion (real 3–5 companies; not checked into repo):**
+
+Checked-in fixtures verify only two real listed companies (`005930` / `000660` in `tests/fixtures/research/dart/corp_code_sample.xml`). Do **not** commit candidate TOML or generated mapping with guessed `corp_code` for Hyundai, NAVER, LG Chem, etc. Live corp-code master snapshot is a **runtime artifact** — never commit under `runtime/` or elsewhere.
+
+1. **Obtain/refresh local corp-code master snapshot (3C2):**
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
+  --live-fetch \
+  --snapshot-out "runtime/research/${DAY}/sources/dart/corp_code_master.zip" \
+  --json
+```
+
+2. **Prepare operator-curated candidate TOML** (copy from `tests/fixtures/research/kr_candidates/kr_real_candidates.sample.toml` pattern): explicit `yfinance_provider_symbol`, `corp_name` for disambiguation, **no** `corp_code` field.
+
+3. **Generate universe + provider mapping:**
+
+```bash
+PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
+  --candidates /path/to/operator/kr_candidates.local.toml \
+  --corp-code-zip "runtime/research/${DAY}/sources/dart/corp_code_master.zip" \
+  --universe-out /tmp/universe.kr-real.local.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.local.toml \
+  --universe-name kr-real-local-v1 \
+  --provider-mapping-name kr-real-provider-mappings-local-v1 \
+  --force \
+  --json
+```
+
+4. **Validate generated files:**
+
+```bash
+PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
+  --universe /tmp/universe.kr-real.local.toml \
+  --provider-mapping /tmp/provider_mappings.kr-real.local.toml \
+  --json
+```
+
+5. **Use generated files in 3E2/3E3/3E4 flows** (`--universe`, `--provider-mapping` on smoke scripts / combined context builder).
+
+Generator N-scale proof (synthetic, checked-in): `uv run pytest tests/test_kr_real_generated_universe_expansion.py -v`. Sector discovery / automatic ranking remains **deferred** (3E5+).
 
 ```bash
 DAY=2026-05-30
@@ -707,7 +748,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1433 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1445 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
