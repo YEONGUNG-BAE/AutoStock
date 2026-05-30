@@ -270,6 +270,123 @@ stock_code = "KR:005930"
     assert entry.stock_code == "005930"
 
 
+def test_kr_top_level_and_dart_stock_code_mismatch_fails(tmp_path: Path) -> None:
+    mapping_path = tmp_path / "mismatch.toml"
+    _write_mapping(
+        mapping_path,
+        """
+version = 1
+name = "mismatch"
+description = "mismatch"
+
+[[mappings]]
+symbol = "SYNTH-KR-0001"
+market = "KR"
+enabled = true
+stock_code = "005930"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "000660"
+""",
+    )
+    with pytest.raises(ProviderMappingError, match="stock_code must match dart.stock_code"):
+        load_provider_mapping_toml(mapping_path)
+
+
+def test_kr_top_level_and_dart_stock_code_normalize_to_same_value(tmp_path: Path) -> None:
+    mapping_path = tmp_path / "match_normalized.toml"
+    _write_mapping(
+        mapping_path,
+        """
+version = 1
+name = "match-normalized"
+description = "match-normalized"
+
+[[mappings]]
+symbol = "SYNTH-KR-0001"
+market = "KR"
+enabled = true
+stock_code = "5930"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "KR:005930"
+""",
+    )
+    registry = load_provider_mapping_toml(mapping_path)
+    entry = registry.resolve(symbol="SYNTH-KR-0001", market="KR")
+    assert entry.stock_code == "005930"
+    assert entry.dart is not None
+    assert entry.dart.stock_code == "005930"
+
+
+def test_us_top_level_stock_code_fails(tmp_path: Path) -> None:
+    mapping_path = tmp_path / "us_stock_code.toml"
+    _write_mapping(
+        mapping_path,
+        """
+version = 1
+name = "us-stock-code"
+description = "us"
+
+[[mappings]]
+symbol = "SYNTH-US-0001"
+market = "US"
+enabled = true
+stock_code = "005930"
+
+[mappings.yfinance]
+provider_symbol = "AAPL"
+""",
+    )
+    with pytest.raises(ProviderMappingError, match="stock_code is only supported for KR market"):
+        load_provider_mapping_toml(mapping_path)
+
+
+def test_disabled_us_top_level_stock_code_fails(tmp_path: Path) -> None:
+    mapping_path = tmp_path / "disabled_us_stock_code.toml"
+    _write_mapping(
+        mapping_path,
+        """
+version = 1
+name = "disabled-us-stock-code"
+description = "us"
+
+[[mappings]]
+symbol = "SYNTH-US-0001"
+market = "US"
+enabled = false
+stock_code = "005930"
+
+[mappings.yfinance]
+provider_symbol = "AAPL"
+""",
+    )
+    with pytest.raises(ProviderMappingError, match="stock_code is only supported for KR market"):
+        load_provider_mapping_toml(mapping_path)
+
+
+def test_us_stock_code_aapl_fails_normalization(tmp_path: Path) -> None:
+    mapping_path = tmp_path / "us_aapl_stock_code.toml"
+    _write_mapping(
+        mapping_path,
+        """
+version = 1
+name = "us-aapl-stock-code"
+description = "us"
+
+[[mappings]]
+symbol = "SYNTH-US-0001"
+market = "US"
+enabled = true
+stock_code = "AAPL"
+""",
+    )
+    with pytest.raises(ProviderMappingError, match="numeric"):
+        load_provider_mapping_toml(mapping_path)
+
+
 def test_us_mapping_with_dart_provider_fails(tmp_path: Path) -> None:
     mapping_path = tmp_path / "us_dart.toml"
     _write_mapping(
@@ -297,6 +414,7 @@ def test_disabled_entries_parse_but_not_enabled(tmp_path: Path) -> None:
     registry = load_provider_mapping_toml(EXAMPLE_MAPPING)
     disabled = registry.resolve(symbol="SYNTH-US-0001", market="US")
     assert disabled.enabled is False
+    assert disabled.stock_code is None
     assert len(registry.enabled_mappings) == 1
 
 

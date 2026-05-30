@@ -230,6 +230,16 @@ def _validate_entry_market_rules(entry: ProviderMappingEntry, *, prefix: str) ->
     if entry.market == "US" and entry.dart is not None:
         raise ProviderMappingError(f"{prefix}: US mapping must not include DART provider")
 
+    if entry.market != "KR" and entry.stock_code is not None:
+        raise ProviderMappingError(f"{prefix}: stock_code is only supported for KR market")
+
+    if (
+        entry.stock_code is not None
+        and entry.dart is not None
+        and entry.stock_code != entry.dart.stock_code
+    ):
+        raise ProviderMappingError(f"{prefix}: stock_code must match dart.stock_code")
+
     if entry.market != "KR":
         return
 
