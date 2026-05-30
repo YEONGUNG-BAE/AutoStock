@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1369 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1388 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1369 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1388 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -345,7 +345,50 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
   --json
 ```
 
-DART disclosure live-smoke for real symbols is **3E3+** — not in this step.
+PRICE intake는 양수·currency·symbol/provider mapping 일치·source_timestamp·8B/8C round-trip을 검증한다. 종목별 hard-coded price magnitude band는 장기 시세 변동을 잘못 차단할 수 있으므로 두지 않는다.
+
+**3E3 KR real sample live DART disclosure smoke (operator explicit; DART only — no yfinance/FRED):**
+
+```bash
+DAY=2026-05-30
+export DART_API_KEY="..."
+PYTHONPATH=src uv run python ops/run_kr_real_dart_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --provider-mapping config/provider_mappings.kr-real.sample.toml \
+  --store "runtime/research/${DAY}/date_id_sources.kr_real_dart.sqlite3" \
+  --snapshot-dir "runtime/research/${DAY}/sources/dart" \
+  --out-jsonl "/tmp/autostock_kr_real_dart_260530.jsonl" \
+  --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --bgn-de 20250101 \
+  --api-key-env DART_API_KEY \
+  --force \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_dart_260530.jsonl \
+  --validate-only \
+  --json
+```
+
+Optional 8B normal + 8C without symbol coverage (DART records have `market=None` — context only, not PRICE coverage):
+
+```bash
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_dart_260530.jsonl \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --json
+
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --json
+```
+
+Do **not** use `--require-symbol-coverage` on 8C for DART-only JSONL — disclosure records do not satisfy PRICE symbol coverage.
+
+Combined FRED+PRICE+DART live context remains **deferred** (3E4+).
 
 ```bash
 DAY=2026-05-30
@@ -580,7 +623,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1369 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1388 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
