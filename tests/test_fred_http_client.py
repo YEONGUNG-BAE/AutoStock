@@ -124,14 +124,19 @@ def test_live_snapshot_payload_and_file_exclude_api_key(tmp_path: Path) -> None:
     assert "api_key=" not in written.lower()
 
 
-def test_fred_http_client_only_module_may_use_urllib_request() -> None:
-    http_client = (REPO_ROOT / "src" / "data" / "fred_http_client.py").read_text(encoding="utf-8").lower()
-    assert "urllib.request" in http_client
+def test_fred_and_dart_http_clients_may_use_urllib_request() -> None:
+    for relative in (
+        "src/data/fred_http_client.py",
+        "src/data/dart_http_client.py",
+    ):
+        http_client = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
+        assert "urllib.request" in http_client
 
     for relative in (
         "ops/fetch_research_sources.py",
         "src/data/research_source_fetcher.py",
         "src/data/fred_source_fetcher.py",
+        "src/data/dart_live_client.py",
     ):
         source = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
         assert "urllib.request" not in source, relative

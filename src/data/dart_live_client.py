@@ -85,7 +85,8 @@ def fetch_live_dart_snapshot(
     """fake/주입 transport로 OpenDART list 응답 → 3A replay 호환 immutable snapshot. store/JSONL write 금지."""
     if transport is None:
         raise DartLiveFetchError(
-            "transport is required for DART live snapshot fetch (3B1 has no default HTTP client)"
+            "transport is required for DART live snapshot fetch "
+            "(inject dart_http_client via ops --live-smoke --source dart)"
         )
 
     normalized_symbol = normalize_required_string(symbol, field_name="symbol")

@@ -53,7 +53,7 @@
 - ~~Implement Real Intake 3A — DART DISCLOSURE replay/fixture (`--replay --source dart`)~~ Done: `src/data/dart_source_fetcher.py`, store-seeded Date-ID batch allocation, fixtures + tests; JSONL round-trips through 8B; does not satisfy 8C symbol coverage.
 - ~~Implement Real Intake 3A.1 — Scout packet context for symbol-matched DART DISCLOSURE~~ Done: `ops/build_scout_manual_packet.py` symbol-only selection; `market=None` preserved; 8C coverage semantics unchanged.
 - ~~Real Intake **3B1** — DART live snapshot normalizer + fake HTTP transport tests~~ Done: `src/data/dart_live_client.py`, `tests/test_dart_live_client.py`; injected transport only; snapshot→3A replay→8B validate-only; collision + no-leak guards.
-- Real Intake **3B2** — DART operator `--live-smoke` (OpenDART API key, corp-code mapping, rate limits; snapshot→replay only).
+- ~~Real Intake **3B2** — DART operator `--live-smoke`~~ Done: `dart_http_client.py`, `run_live_smoke_dart`; env API key read only in DART live branch; snapshot→3A replay→JSONL.
 - Real Intake **3B3** — DART hardening (pagination, error schema, corp-code cache, retry/backoff) — optional after 3B2.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 

@@ -102,9 +102,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="directory for immutable live-smoke snapshot output (required for --live-smoke)",
     )
     parser.add_argument(
+        "--corp-code",
+        default=None,
+        help="OpenDART provider corp code (required for --live-smoke --source dart)",
+    )
+    parser.add_argument(
+        "--bgn-de",
+        default=None,
+        help="OpenDART search start date YYYYMMDD (required for --live-smoke --source dart)",
+    )
+    parser.add_argument(
+        "--end-de",
+        default=None,
+        help="optional OpenDART search end date YYYYMMDD (--live-smoke --source dart)",
+    )
+    parser.add_argument(
+        "--page-count",
+        type=int,
+        default=100,
+        help="OpenDART page_count for --live-smoke --source dart (default: 100)",
+    )
+    parser.add_argument(
         "--api-key-env",
         default=DEFAULT_API_KEY_ENV,
-        help="environment variable name for FRED API key (live-smoke only; value never logged)",
+        help="environment variable name for API key (FRED/DART live-smoke; value never logged)",
     )
     parser.add_argument(
         "--out-jsonl",
@@ -124,7 +145,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--live-smoke",
         action="store_true",
-        help="fetch live data via stdlib HTTP (fred) or yfinance (price), write snapshot + JSONL",
+        help="fetch live data via stdlib HTTP (fred/dart) or yfinance (price), write snapshot + JSONL",
     )
     parser.add_argument(
         "--force",
@@ -209,6 +230,7 @@ def _emit_result(payload: dict[str, Any], *, as_json: bool, out: TextIO) -> None
         "symbol",
         "market",
         "provider_symbol",
+        "corp_code",
         "records_count",
         "snapshot_path",
         "out_jsonl",
@@ -227,6 +249,7 @@ def _success_payload(
     symbol: str | None = None,
     market: str | None = None,
     provider_symbol: str | None = None,
+    corp_code: str | None = None,
     records_count: int | None = None,
     snapshot_path: Path | None = None,
     out_jsonl: Path | None = None,
@@ -245,6 +268,8 @@ def _success_payload(
         payload["market"] = market
     if provider_symbol is not None:
         payload["provider_symbol"] = provider_symbol
+    if corp_code is not None:
+        payload["corp_code"] = corp_code
     if records_count is not None:
         payload["records_count"] = records_count
     if snapshot_path is not None:
@@ -527,6 +552,94 @@ def run_live_smoke_price(
     )
 
 
+def run_live_smoke_dart(
+    *,
+    symbol: str,
+    corp_code: str,
+    bgn_de: str,
+    end_de: str | None,
+    page_count: int,
+    as_of: datetime,
+    snapshot_dir: Path,
+    api_key_env: str,
+    out_jsonl: Path,
+    force: bool,
+    store_path: Path,
+    fetched_at: datetime,
+    transport: Any | None = None,
+    urlopen_fn: Any | None = None,
+) -> dict[str, Any]:
+    """OpenDART live-smoke: HTTP → immutable snapshot → 3A replay → JSONL. store write는 8B만."""
+    if page_count <= 0:
+        raise FetchResearchSourcesError("args", "--page-count must be greater than 0")
+    _validate_store_parent_exists(store_path)
+
+    api_key = _read_api_key(api_key_env)
+
+    effective_transport = transport
+    if effective_transport is None:
+        from data.dart_http_client import fetch_opendart_list_response
+
+        def _http_transport(params: dict[str, str]) -> dict[str, Any]:
+            return dict(fetch_opendart_list_response(params, urlopen_fn=urlopen_fn))
+
+        effective_transport = _http_transport
+
+    from data.dart_live_client import DartLiveFetchError, fetch_live_dart_snapshot
+    from data.dart_source_fetcher import DartDisclosureSnapshotReplayFetcher
+
+    try:
+        snapshot_path = fetch_live_dart_snapshot(
+            symbol=symbol,
+            corp_code=corp_code,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            snapshot_dir=snapshot_dir,
+            fetched_at=fetched_at,
+            bgn_de=bgn_de,
+            end_de=end_de,
+            page_count=page_count,
+            transport=effective_transport,
+        )
+    except FileExistsError as exc:
+        raise FetchResearchSourcesError("snapshot", str(exc)) from exc
+    except DartLiveFetchError as exc:
+        raise FetchResearchSourcesError("fetch", exc.message) from exc
+
+    store = SQLiteDateIdSourceStore(store_path)
+    try:
+        try:
+            records = DartDisclosureSnapshotReplayFetcher().normalize_snapshot(
+                snapshot_path,
+                symbol=symbol,
+                as_of=as_of,
+                store=store,
+                limit=page_count,
+            )
+        except FileNotFoundError as exc:
+            raise FetchResearchSourcesError("snapshot", str(exc)) from exc
+        except ValueError as exc:
+            raise FetchResearchSourcesError("normalize", str(exc)) from exc
+    finally:
+        store.close()
+
+    try:
+        write_date_id_source_records_jsonl(out_jsonl, records, force=force)
+    except FileExistsError as exc:
+        raise FetchResearchSourcesError("write", str(exc)) from exc
+
+    return _success_payload(
+        mode="live-smoke",
+        stage="complete",
+        source="dart",
+        symbol=symbol,
+        corp_code=corp_code,
+        records_count=len(records),
+        snapshot_path=snapshot_path,
+        out_jsonl=out_jsonl,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     as_json = args.json
@@ -553,12 +666,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif mode == "live-smoke":
             normalized_source = args.source.strip().lower()
-            date_id = _require_value(args.date_id, flag="--date-id")
             as_of = _parse_as_of(_require_value(args.as_of, flag="--as-of"))
             snapshot_dir = _require_path(args.snapshot_dir, flag="--snapshot-dir")
             out_jsonl = _require_path(args.out_jsonl, flag="--out-jsonl")
             fetched_at = datetime.now().astimezone()
             if normalized_source == "fred":
+                date_id = _require_value(args.date_id, flag="--date-id")
                 series_id = _require_value(args.series_id, flag="--series-id")
                 payload = run_live_smoke_fred(
                     series_id=series_id,
@@ -571,6 +684,7 @@ def main(argv: list[str] | None = None) -> int:
                     fetched_at=fetched_at,
                 )
             elif normalized_source == "price":
+                date_id = _require_value(args.date_id, flag="--date-id")
                 symbol = _require_value(args.symbol, flag="--symbol")
                 market = _require_value(args.market, flag="--market")
                 provider_symbol = _require_value(args.provider_symbol, flag="--provider-symbol")
@@ -584,6 +698,30 @@ def main(argv: list[str] | None = None) -> int:
                     snapshot_dir=snapshot_dir,
                     out_jsonl=out_jsonl,
                     force=args.force,
+                    fetched_at=fetched_at,
+                )
+            elif normalized_source == "dart":
+                if args.date_id:
+                    raise FetchResearchSourcesError(
+                        "args",
+                        "--date-id is not supported for --live-smoke --source dart",
+                    )
+                symbol = _require_value(args.symbol, flag="--symbol")
+                corp_code = _require_value(args.corp_code, flag="--corp-code")
+                bgn_de = _require_value(args.bgn_de, flag="--bgn-de")
+                store_path = _require_path(args.store, flag="--store")
+                payload = run_live_smoke_dart(
+                    symbol=symbol,
+                    corp_code=corp_code,
+                    bgn_de=bgn_de,
+                    end_de=args.end_de,
+                    page_count=args.page_count,
+                    as_of=as_of,
+                    snapshot_dir=snapshot_dir,
+                    api_key_env=args.api_key_env,
+                    out_jsonl=out_jsonl,
+                    force=args.force,
+                    store_path=store_path,
                     fetched_at=fetched_at,
                 )
             else:

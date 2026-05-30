@@ -28,6 +28,9 @@ DART_SUCCESS_SNAPSHOT = (
     REPO_ROOT / "tests" / "fixtures" / "research" / "dart" / "raw_synth_dart_success.json"
 )
 DART_AS_OF = "2026-05-30T13:00:00+09:00"
+DART_SECRET = "SECRET_DART_KEY_TEST"
+DART_CORP_CODE = "00126380"
+DART_BGN_DE = "20260530"
 
 AS_OF = "2026-05-29T09:00:00+09:00"
 SECRET = "SECRET_FRED_KEY_TEST"
@@ -1287,6 +1290,301 @@ def test_price_live_smoke_json_and_verbose_keeps_stdout_pure_json(
     assert result.returncode == 0, result.stderr
     json.loads(result.stdout)
     assert "verbose:" in result.stderr
+
+
+def _success_opendart_list_body() -> dict[str, object]:
+    return {
+        "status": "000",
+        "message": "정상",
+        "page_no": 1,
+        "page_count": 100,
+        "total_count": 2,
+        "total_page": 1,
+        "list": [
+            {
+                "corp_code": DART_CORP_CODE,
+                "corp_name": "Synthetic Corp",
+                "stock_code": "000000",
+                "corp_cls": "Y",
+                "report_nm": "Synthetic DART report 1",
+                "rcept_no": "202605300001",
+                "flr_nm": "Synthetic Corp",
+                "rcept_dt": "20260530",
+                "rm": "",
+            },
+            {
+                "corp_code": DART_CORP_CODE,
+                "corp_name": "Synthetic Corp",
+                "stock_code": "000000",
+                "corp_cls": "Y",
+                "report_nm": "Synthetic DART report 2",
+                "rcept_no": "202605300002",
+                "flr_nm": "Synthetic Corp",
+                "rcept_dt": "20260530",
+                "rm": "",
+            },
+        ],
+    }
+
+
+def _patch_opendart_urlopen_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    body_payload = _success_opendart_list_body()
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return json.dumps(body_payload).encode("utf-8")
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        return FakeResponse()
+
+    monkeypatch.setenv("DART_API_KEY", DART_SECRET)
+    monkeypatch.setattr("data.dart_http_client.urlopen", fake_urlopen)
+
+
+def _patch_fixed_dart_fetched_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz: datetime.tzinfo | None = None) -> datetime:
+            if tz is None:
+                return FIXED_FETCHED_AT
+            return FIXED_FETCHED_AT.astimezone(tz)
+
+    monkeypatch.setattr("fetch_research_sources.datetime", FixedDateTime)
+
+
+def _dart_live_smoke_argv(
+    *,
+    snapshot_dir: Path,
+    out_jsonl: Path,
+    store_path: Path,
+    extra: list[str] | None = None,
+) -> list[str]:
+    argv = [
+        "--live-smoke",
+        "--source",
+        "dart",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--corp-code",
+        DART_CORP_CODE,
+        "--api-key-env",
+        "DART_API_KEY",
+        "--bgn-de",
+        DART_BGN_DE,
+        "--store",
+        str(store_path),
+        "--as-of",
+        DART_AS_OF,
+        "--snapshot-dir",
+        str(snapshot_dir),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    ]
+    if extra:
+        argv.extend(extra)
+    return argv
+
+
+def test_dart_live_smoke_success_snapshot_and_jsonl_exclude_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_opendart_urlopen_success(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+
+    exit_code = main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert DART_SECRET not in captured.out
+    assert DART_SECRET not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "live-smoke"
+    assert payload["source"] == "dart"
+    assert payload["corp_code"] == DART_CORP_CODE
+    assert payload["records_count"] == 2
+
+    snapshot_files = list(snapshot_dir.glob("raw_*.json"))
+    assert len(snapshot_files) == 1
+    snapshot_text = snapshot_files[0].read_text(encoding="utf-8")
+    assert DART_SECRET not in snapshot_text
+    assert "crtfc_key=" not in snapshot_text.lower()
+    assert out_jsonl.is_file()
+    assert DART_SECRET not in out_jsonl.read_text(encoding="utf-8")
+
+
+def test_dart_live_smoke_jsonl_round_trips_through_8b_validate_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_opendart_urlopen_success(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+    assert main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path)) == 0
+
+    intake = _run_intake_validate(out_jsonl)
+    assert intake.returncode == 0, intake.stderr
+    payload = json.loads(intake.stdout)
+    assert payload["status"] == "ok"
+    assert payload["records_valid"] == 2
+
+
+def test_dart_live_smoke_missing_api_key_fails_before_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+
+    exit_code = main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "args"
+    assert not out_jsonl.exists()
+    assert list(snapshot_dir.glob("raw_*.json")) == []
+
+
+def test_dart_live_smoke_blank_api_key_fails_before_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fetch_research_sources import main
+
+    monkeypatch.setenv("DART_API_KEY", "   ")
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+
+    exit_code = main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+    assert exit_code == 1
+    assert not out_jsonl.exists()
+
+
+def test_dart_live_smoke_rejects_date_id(tmp_path: Path) -> None:
+    from fetch_research_sources import main
+
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    exit_code = main(
+        _dart_live_smoke_argv(
+            snapshot_dir=snapshot_dir,
+            out_jsonl=out_jsonl,
+            store_path=store_path,
+            extra=["--date-id", "260530-1"],
+        )
+    )
+    assert exit_code == 1
+
+
+def test_dart_live_smoke_snapshot_collision_fails_without_jsonl_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_opendart_urlopen_success(monkeypatch)
+    _patch_fixed_dart_fetched_at(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+
+    assert main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path)) == 0
+    capsys.readouterr()
+    snapshot_files = list(snapshot_dir.glob("raw_*.json"))
+    assert len(snapshot_files) == 1
+    original_bytes = snapshot_files[0].read_bytes()
+    out_jsonl.unlink()
+
+    exit_code = main(
+        _dart_live_smoke_argv(
+            snapshot_dir=snapshot_dir,
+            out_jsonl=out_jsonl,
+            store_path=store_path,
+            extra=["--force"],
+        )
+    )
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "snapshot"
+    assert snapshot_files[0].read_bytes() == original_bytes
+    assert not out_jsonl.exists()
+
+
+def test_dart_live_smoke_does_not_write_store_during_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_opendart_urlopen_success(monkeypatch)
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+    before_store = SQLiteDateIdSourceStore(store_path)
+    before_count = len(before_store.list_records())
+    before_store.close()
+
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    assert (
+        main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+        == 0
+    )
+
+    after_store = SQLiteDateIdSourceStore(store_path)
+    try:
+        assert len(after_store.list_records()) == before_count
+    finally:
+        after_store.close()
+
+
+def test_research_intake_modules_do_not_use_urllib_except_http_clients() -> None:
+    """Real Intake 경로는 urllib 격리 — HTTP는 fred_http_client·dart_http_client만."""
+    for relative in (
+        "ops/fetch_research_sources.py",
+        "src/data/research_source_fetcher.py",
+        "src/data/fred_source_fetcher.py",
+        "src/data/price_source_fetcher.py",
+        "src/data/price_live_client.py",
+        "src/data/dart_source_fetcher.py",
+        "src/data/dart_live_client.py",
+    ):
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
+        assert "urllib.request" not in text, relative
+        assert "urllib.parse" not in text, relative
+        assert "urllib.error" not in text, relative
 
 
 def _run_dart_replay_cli(

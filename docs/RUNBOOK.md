@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1253 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1269 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1253 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1269 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -263,11 +263,35 @@ DART-only Scout packet (8D): `require_symbol_coverage=False`이면 symbol-matche
 
 ### DART live-smoke planning boundary
 
-- **3B1 implemented (fake transport only):** `src/data/dart_live_client.py` builds live-shaped snapshots via injected transport; tests prove snapshot → 3A replay → 8B validate-only. **No real network in CI.**
-- **3B0 is docs-only** — DART live OpenDART HTTP is **not** implemented yet.
-- Future DART live must follow: **live HTTP → immutable raw snapshot → existing 3A replay path → 8B JSONL** (never direct `DateIdSourceRecord` from HTTP).
-- Do **not** put API keys in snapshot files, JSONL, `Date.md`, logs, or committed runtime artifacts; use env var names only in config examples.
-- Do **not** run real OpenDART API until **3B2** and an explicit operator `--live-smoke` command exist.
+- **3B2 implemented:** explicit operator `--live-smoke --source dart` only (no scheduler). stdlib HTTP isolated in `src/data/dart_http_client.py`.
+- **3B1:** `dart_live_client.py` builds live-shaped snapshots from injected transport; CI uses fake `urlopen` only.
+- Path: **live HTTP → immutable raw snapshot → 3A replay → 8B JSONL** (never direct `DateIdSourceRecord` from HTTP).
+- API key: env var only (`DART_API_KEY` or `--api-key-env`); never commit keys or put them in snapshot/JSONL/Date.md/logs.
+- `--corp-code` is OpenDART provider corp code (operator-supplied); internal universe `symbol` is separate.
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --live-smoke \
+  --source dart \
+  --symbol SYNTH-KR-0001 \
+  --corp-code <OPERATOR_SUPPLIED_CORP_CODE> \
+  --api-key-env DART_API_KEY \
+  --bgn-de 20260530 \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --as-of 2026-05-30T13:00:00+09:00 \
+  --snapshot-dir "runtime/research/${DAY}/sources/dart" \
+  --out-jsonl "/tmp/autostock_dart_live_${DAY}.jsonl" \
+  --force \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "/tmp/autostock_dart_live_${DAY}.jsonl" \
+  --validate-only \
+  --json
+```
+
+- DART-only: do **not** use `--require-symbol-coverage` on 8C without PRICE coverage records.
 - Combined FRED+PRICE+DART smoke (8B/8C/8D) is **verified** with replay/fixture paths; live DART remains a separate follow-on.
 - Detail: [`docs/REAL_RESEARCH_SOURCE_INTAKE.md` §3B](REAL_RESEARCH_SOURCE_INTAKE.md#3b-dart-live-smoke-design).
 
@@ -478,7 +502,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1253 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1269 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
