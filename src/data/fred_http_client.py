@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode

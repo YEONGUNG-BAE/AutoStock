@@ -84,7 +84,6 @@ def fetch_live_snapshot(
     fetched_at: datetime,
     api_key_env: str,
     urlopen_fn: Any | None = None,
-    force: bool = False,
 ) -> Path:
     """live-smoke: FRED HTTP → immutable snapshot (urllib는 fred_http_client 전용)."""
     from data.fred_http_client import (
@@ -119,10 +118,8 @@ def fetch_live_snapshot(
     )
     filename = snapshot_filename_for_payload(payload, fetched_at=aware_fetched_at)
     snapshot_path = snapshot_dir / filename
-    if snapshot_path.exists() and not force:
-        raise FileExistsError(
-            f"snapshot already exists: {snapshot_path} (use --force to overwrite)"
-        )
+    if snapshot_path.exists():
+        raise FileExistsError(f"snapshot already exists: {snapshot_path}")
     write_live_snapshot_file(snapshot_path, payload, api_key=api_key)
     return snapshot_path
 

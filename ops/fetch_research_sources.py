@@ -302,7 +302,6 @@ def run_live_smoke(
             fetched_at=fetched_at,
             api_key_env=api_key_env,
             urlopen_fn=urlopen_fn,
-            force=force,
         )
     except FileExistsError as exc:
         raise FetchResearchSourcesError("snapshot", str(exc)) from exc
