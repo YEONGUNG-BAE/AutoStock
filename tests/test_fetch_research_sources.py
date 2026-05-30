@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OPS_SCRIPT = REPO_ROOT / "ops" / "fetch_research_sources.py"
@@ -12,6 +16,10 @@ INTAKE_SCRIPT = REPO_ROOT / "ops" / "research_source_intake.py"
 SUCCESS_SNAPSHOT = REPO_ROOT / "tests" / "fixtures" / "research" / "fred" / "raw_dgs10_success.json"
 
 AS_OF = "2026-05-29T09:00:00+09:00"
+SECRET = "SECRET_FRED_KEY_TEST"
+
+sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT / "ops"))
 
 
 def _run_fetch_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -101,6 +109,7 @@ def test_cli_replay_json_writes_jsonl(tmp_path: Path) -> None:
         "source": "fred",
         "series_id": "DGS10",
         "records_count": 1,
+        "snapshot_path": str(SUCCESS_SNAPSHOT),
         "out_jsonl": str(out_jsonl),
     }
     lines = out_jsonl.read_text(encoding="utf-8").splitlines()
@@ -224,6 +233,8 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         "httpx",
         "aiohttp",
         "urllib.request",
+        "urllib.parse",
+        "urllib.error",
         "yfinance",
         "kis",
         "paperbroker",
@@ -234,3 +245,132 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         source = path.read_text(encoding="utf-8").lower()
         for token in forbidden:
             assert token not in source, f"{path.name} must not reference {token!r}"
+
+
+def _patch_urlopen_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    body_payload = {
+        "observations": [
+            {"date": "2026-05-28", "value": "4.25"},
+        ]
+    }
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return json.dumps(body_payload).encode("utf-8")
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        return FakeResponse()
+
+    monkeypatch.setenv("FRED_API_KEY", SECRET)
+    monkeypatch.setattr("data.fred_http_client.urlopen", fake_urlopen)
+
+
+def _patch_urlopen_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raising_urlopen(request: object, timeout: float) -> object:
+        raise HTTPError(
+            url=f"https://api.stlouisfed.org/fred/series/observations?api_key={SECRET}&series_id=DGS10",
+            code=403,
+            msg="Forbidden",
+            hdrs={},
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setenv("FRED_API_KEY", SECRET)
+    monkeypatch.setattr("data.fred_http_client.urlopen", raising_urlopen)
+
+
+def test_live_smoke_success_snapshot_and_jsonl_exclude_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_urlopen_success(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "fred"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(
+        [
+            "--live-smoke",
+            "--source",
+            "fred",
+            "--series-id",
+            "DGS10",
+            "--date-id",
+            "260529-1",
+            "--as-of",
+            AS_OF,
+            "--snapshot-dir",
+            str(snapshot_dir),
+            "--out-jsonl",
+            str(out_jsonl),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "live-smoke"
+    assert out_jsonl.is_file()
+
+    snapshot_files = list(snapshot_dir.glob("raw_*.json"))
+    assert len(snapshot_files) == 1
+    snapshot_text = snapshot_files[0].read_text(encoding="utf-8")
+    assert SECRET not in snapshot_text
+    assert "api_key=" not in snapshot_text.lower()
+    snapshot = json.loads(snapshot_text)
+    assert "api_key" not in snapshot["request"]
+    assert "?" not in snapshot["request"]["base_url"]
+
+
+def test_live_smoke_http_error_does_not_leak_api_key_or_write_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_urlopen_http_error(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "fred"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(
+        [
+            "--live-smoke",
+            "--source",
+            "fred",
+            "--series-id",
+            "DGS10",
+            "--date-id",
+            "260529-1",
+            "--as-of",
+            AS_OF,
+            "--snapshot-dir",
+            str(snapshot_dir),
+            "--out-jsonl",
+            str(out_jsonl),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "error"
+    assert payload["stage"] == "fetch"
+    assert SECRET not in payload["error"]
+    assert not out_jsonl.exists()
+    assert list(snapshot_dir.glob("raw_*.json")) == []

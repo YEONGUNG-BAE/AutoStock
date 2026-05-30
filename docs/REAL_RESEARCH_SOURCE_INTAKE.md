@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay/fixture path **implemented**; 1B live FRED HTTP **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`)  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -150,7 +150,7 @@ This increment adds **real INPUT only**. **Write mode**, ledger/decision writes,
 
 **Placement:** fetchers sit **before** 8B. They **replace manual JSONL authoring** for supported facts; they do **not** replace 8B validation, store semantics, or Date.md export rules.
 
-**Ops entrypoint (1A):** `ops/fetch_research_sources.py` — `--replay` / `--dry-run` only (no live HTTP, no API key). `--live-smoke` is **1B deferred**.
+**Ops entrypoint:** `ops/fetch_research_sources.py` — `--replay` / `--dry-run` / `--live-smoke`. stdlib HTTP는 **`src/data/fred_http_client.py` only**; API key leakage hardening applies to live-smoke snapshots and CLI errors.
 
 ---
 

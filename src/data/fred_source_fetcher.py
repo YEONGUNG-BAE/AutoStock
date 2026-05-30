@@ -76,6 +76,57 @@ class FredSnapshotReplayFetcher:
         return [record]
 
 
+def fetch_live_snapshot(
+    *,
+    series_id: str,
+    api_key: str,
+    snapshot_dir: Path,
+    fetched_at: datetime,
+    api_key_env: str,
+    urlopen_fn: Any | None = None,
+    force: bool = False,
+) -> Path:
+    """live-smoke: FRED HTTP → immutable snapshot (urllib는 fred_http_client 전용)."""
+    from data.fred_http_client import (
+        DEFAULT_TIMEOUT_SECONDS,
+        build_live_snapshot_payload,
+        build_sanitized_request_metadata,
+        fetch_series_observations_body,
+        observation_mapping_from_api_body,
+        snapshot_filename_for_payload,
+        write_live_snapshot_file,
+    )
+
+    normalized_series_id = normalize_required_string(series_id, field_name="series_id")
+    aware_fetched_at = require_timezone_aware_datetime(fetched_at, field_name="fetched_at")
+    request_metadata = build_sanitized_request_metadata(
+        series_id=normalized_series_id,
+        api_key_env=api_key_env,
+        api_key_present=bool(api_key.strip()),
+    )
+    body = fetch_series_observations_body(
+        normalized_series_id,
+        api_key=api_key,
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+        urlopen_fn=urlopen_fn,
+    )
+    observation = observation_mapping_from_api_body(body)
+    payload = build_live_snapshot_payload(
+        series_id=normalized_series_id,
+        fetched_at=aware_fetched_at,
+        request_metadata=request_metadata,
+        observation=observation,
+    )
+    filename = snapshot_filename_for_payload(payload, fetched_at=aware_fetched_at)
+    snapshot_path = snapshot_dir / filename
+    if snapshot_path.exists() and not force:
+        raise FileExistsError(
+            f"snapshot already exists: {snapshot_path} (use --force to overwrite)"
+        )
+    write_live_snapshot_file(snapshot_path, payload, api_key=api_key)
+    return snapshot_path
+
+
 def _load_snapshot_object(snapshot_path: Path) -> dict[str, Any]:
     if not snapshot_path.is_file():
         raise FileNotFoundError(f"snapshot not found: {snapshot_path}")
