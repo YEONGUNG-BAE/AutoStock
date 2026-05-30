@@ -16,6 +16,11 @@ from typing import Any, Literal, TextIO
 from pydantic import ValidationError
 
 from data.date_id_store import DuplicateDateIdError, SQLiteDateIdSourceStore
+from data.source_record_context_selector import (
+    ContextBudgetCaps,
+    resolve_context_budget_caps,
+    select_context_records,
+)
 from decision.canonical_json import payload_sha256
 from domain._datetime import parse_timezone_aware_datetime
 from domain.source import DateIdSourceRecord
@@ -76,6 +81,30 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print non-sensitive metadata only",
     )
+    parser.add_argument(
+        "--context-budget-profile",
+        choices=["kr-real-smoke"],
+        default=None,
+        help="deterministic Date.md export context cap profile (store unchanged)",
+    )
+    parser.add_argument(
+        "--date-md-max-global-per-fact-source",
+        type=int,
+        default=None,
+        help="max global records per (fact_type, source_name) in Date.md export",
+    )
+    parser.add_argument(
+        "--date-md-max-price-per-symbol",
+        type=int,
+        default=None,
+        help="max PRICE records per (market, symbol, source_name) in Date.md export",
+    )
+    parser.add_argument(
+        "--date-md-max-disclosure-per-symbol",
+        type=int,
+        default=None,
+        help="max DISCLOSURE records per (symbol, source_name) in Date.md export",
+    )
     return parser
 
 
@@ -92,6 +121,25 @@ def _validate_mode_flags(args: argparse.Namespace) -> None:
         raise IntakeError(
             "args",
             "--validate-only and --export-only are mutually exclusive",
+        )
+
+
+def _validate_context_budget_caps(
+    caps: ContextBudgetCaps | None,
+    *,
+    args: argparse.Namespace,
+) -> None:
+    for flag_name, value in (
+        ("--date-md-max-global-per-fact-source", args.date_md_max_global_per_fact_source),
+        ("--date-md-max-price-per-symbol", args.date_md_max_price_per_symbol),
+        ("--date-md-max-disclosure-per-symbol", args.date_md_max_disclosure_per_symbol),
+    ):
+        if value is not None and value <= 0:
+            raise IntakeError("args", f"{flag_name} must be a positive integer")
+    if caps is not None and args.validate_only:
+        raise IntakeError(
+            "args",
+            "context budget caps apply to Date.md export only; not valid with --validate-only",
         )
 
 
@@ -210,6 +258,17 @@ def export_date_md(records: tuple[DateIdSourceRecord, ...], output_path: Path) -
     output_path.write_text(render_date_md(records), encoding="utf-8")
 
 
+def _records_for_date_md_export(
+    records: tuple[DateIdSourceRecord, ...],
+    *,
+    context_budget_caps: ContextBudgetCaps | None,
+) -> tuple[DateIdSourceRecord, ...]:
+    """Date.md export용 record subset. cap 미지정 시 store 순서 그대로 export."""
+    if context_budget_caps is None:
+        return records
+    return select_context_records(records, caps=context_budget_caps)
+
+
 def _save_records_to_store(store_path: Path, records: tuple[DateIdSourceRecord, ...]) -> int:
     store_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteDateIdSourceStore(store_path)
@@ -247,6 +306,8 @@ def _emit_result(payload: dict[str, Any], *, as_json: bool, out: TextIO) -> None
         "records_read",
         "records_valid",
         "records_saved",
+        "records_exported",
+        "context_budget_profile",
         "store",
         "date_md_out",
         "error",
@@ -262,6 +323,8 @@ def _success_payload(
     records_read: int = 0,
     records_valid: int = 0,
     records_saved: int | None = None,
+    records_exported: int | None = None,
+    context_budget_profile: str | None = None,
     store: Path | None = None,
     date_md_out: Path | None = None,
 ) -> dict[str, Any]:
@@ -274,6 +337,10 @@ def _success_payload(
     }
     if records_saved is not None:
         payload["records_saved"] = records_saved
+    if records_exported is not None:
+        payload["records_exported"] = records_exported
+    if context_budget_profile is not None:
+        payload["context_budget_profile"] = context_budget_profile
     if store is not None:
         payload["store"] = str(store)
     if date_md_out is not None:
@@ -305,30 +372,51 @@ def run_normal(
     store_path: Path,
     date_md_out: Path,
     force_date_md: bool,
+    context_budget_caps: ContextBudgetCaps | None = None,
+    context_budget_profile: str | None = None,
 ) -> dict[str, Any]:
     records, lines_read = parse_jsonl_records(source_jsonl)
     _preflight_date_md_out(date_md_out, force=force_date_md)
     records_saved = _save_records_to_store(store_path, records)
     saved_records = _load_records_from_store(store_path)
-    export_date_md(saved_records, date_md_out)
+    export_records = _records_for_date_md_export(
+        saved_records,
+        context_budget_caps=context_budget_caps,
+    )
+    export_date_md(export_records, date_md_out)
     return _success_payload(
         mode="normal",
         records_read=lines_read,
         records_valid=len(records),
         records_saved=records_saved,
+        records_exported=len(export_records),
+        context_budget_profile=context_budget_profile,
         store=store_path,
         date_md_out=date_md_out,
     )
 
 
-def run_export_only(*, store_path: Path, date_md_out: Path, force_date_md: bool) -> dict[str, Any]:
+def run_export_only(
+    *,
+    store_path: Path,
+    date_md_out: Path,
+    force_date_md: bool,
+    context_budget_caps: ContextBudgetCaps | None = None,
+    context_budget_profile: str | None = None,
+) -> dict[str, Any]:
     _preflight_date_md_out(date_md_out, force=force_date_md)
     records = _load_records_from_store(store_path)
-    export_date_md(records, date_md_out)
+    export_records = _records_for_date_md_export(
+        records,
+        context_budget_caps=context_budget_caps,
+    )
+    export_date_md(export_records, date_md_out)
     return _success_payload(
         mode="export-only",
         records_read=0,
         records_valid=len(records),
+        records_exported=len(export_records),
+        context_budget_profile=context_budget_profile,
         store=store_path,
         date_md_out=date_md_out,
     )
@@ -347,6 +435,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _validate_mode_flags(args)
         mode = _resolve_mode(args)
+        context_budget_caps = resolve_context_budget_caps(
+            profile=args.context_budget_profile,
+            max_global_per_fact_type_source=args.date_md_max_global_per_fact_source,
+            max_price_per_symbol_source=args.date_md_max_price_per_symbol,
+            max_disclosure_per_symbol_source=args.date_md_max_disclosure_per_symbol,
+        )
+        _validate_context_budget_caps(context_budget_caps, args=args)
 
         if mode == "validate-only":
             source_jsonl = _require_path(args.source_jsonl, flag="--source-jsonl")
@@ -358,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
                 store_path=store_path,
                 date_md_out=date_md_out,
                 force_date_md=args.force_date_md,
+                context_budget_caps=context_budget_caps,
+                context_budget_profile=args.context_budget_profile,
             )
         else:
             source_jsonl = _require_path(args.source_jsonl, flag="--source-jsonl")
@@ -368,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
                 store_path=store_path,
                 date_md_out=date_md_out,
                 force_date_md=args.force_date_md,
+                context_budget_caps=context_budget_caps,
+                context_budget_profile=args.context_budget_profile,
             )
     except IntakeError as exc:
         payload = _error_payload(mode=mode, stage=exc.stage, error=exc.message)

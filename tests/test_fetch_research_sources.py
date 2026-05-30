@@ -313,6 +313,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "ops" / "validate_provider_mapping.py",
         REPO_ROOT / "ops" / "run_kr_real_price_smoke.py",
         REPO_ROOT / "ops" / "run_kr_real_dart_smoke.py",
+        REPO_ROOT / "ops" / "build_kr_real_combined_context_smoke.py",
     ]
     forbidden = (
         "requests",
@@ -1732,6 +1733,7 @@ def test_research_intake_modules_do_not_use_urllib_except_http_clients() -> None
         "ops/validate_provider_mapping.py",
         "ops/run_kr_real_price_smoke.py",
         "ops/run_kr_real_dart_smoke.py",
+        "ops/build_kr_real_combined_context_smoke.py",
     ):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
         assert "urllib.request" not in text, relative

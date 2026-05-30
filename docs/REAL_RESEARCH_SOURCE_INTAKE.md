@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4+** combined FRED+PRICE+DART live context **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented** (`source_record_context_selector.py`, `--context-budget-profile kr-real-smoke`); **3E5+** expand to 3–5 real companies **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -534,7 +534,8 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 | **3E1** | `config/universe.kr-real.sample.toml` + `config/provider_mappings.kr-real.sample.toml` | None |
 | **3E2** | `ops/run_kr_real_price_smoke.py` (live PRICE smoke for KR real sample) | Operator explicit |
 | **3E3** | `ops/run_kr_real_dart_smoke.py` (live DART disclosure smoke for KR real sample) | Operator explicit |
-| **Next** | **3E4+** combined FRED+PRICE+DART live context | Operator explicit |
+| **3E4** | combined FRED+PRICE+DART context + Date.md/Scout budget caps | Operator explicit |
+| **Next** | **3E5+** expand to 3–5 real companies | Operator explicit |
 
 **Registry rules:**
 
@@ -548,18 +549,20 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 
 ---
 
-## 3E Static KR real-company sample universe (3E1–3E3)
+## 3E Static KR real-company sample universe (3E1–3E4)
 
 > **3E1 (implemented):** operator-defined static KR real-company sample universe + matching provider mapping registry. Local TOML only — no network, no env/API key, no Scout/Allocator/PaperLoop execution.
 > **3E2 (implemented):** operator-triggered live PRICE smoke for the KR real sample universe via provider mapping → yfinance snapshot → generic PRICE replay → JSONL. DART disclosure fetch not included.
-> **3E3 (implemented):** operator-triggered live DART disclosure smoke for the KR real sample universe via provider mapping → OpenDART snapshot → adapter replay → combined-batch Date-ID → JSONL. DART records are Scout **context** (`market=None`); they do not satisfy 8C PRICE symbol coverage. Combined FRED+PRICE+DART live context remains deferred.
+> **3E3 (implemented):** operator-triggered live DART disclosure smoke for the KR real sample universe via provider mapping → OpenDART snapshot → adapter replay → combined-batch Date-ID → JSONL. DART records are Scout **context** (`market=None`); they do not satisfy 8C PRICE symbol coverage.
+> **3E4 (implemented):** combined FRED macro + KR real PRICE + KR real DART context smoke with deterministic Date.md/Scout export caps (`--context-budget-profile kr-real-smoke`). Store retains all intake records; caps apply only at Date.md export boundary. Scout follows capped Date.md date_ids; 60KB guard unchanged.
 
 | Phase | Scope | Network |
 |---|---|---|
 | **3E1** | `config/universe.kr-real.sample.toml` + `config/provider_mappings.kr-real.sample.toml` + `tests/test_kr_real_sample_universe.py` | None |
 | **3E2** | `ops/run_kr_real_price_smoke.py` + `tests/test_kr_real_price_smoke.py` | Operator explicit (yfinance only) |
 | **3E3** | `ops/run_kr_real_dart_smoke.py` + `tests/test_kr_real_dart_smoke.py` | Operator explicit (DART only) |
-| **Next** | **3E4+** combined FRED+PRICE+DART live context; expand to 3–5 companies | Operator explicit |
+| **3E4** | `source_record_context_selector.py` + capped 8B export + `ops/build_kr_real_combined_context_smoke.py` + `tests/test_combined_context_budget.py` | Operator explicit (concat JSONL) |
+| **Next** | **3E5+** expand to 3–5 companies | Operator explicit |
 
 **3E1 universe (locally verified corp_code only):**
 
@@ -568,7 +571,7 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 | `005930` | Samsung Electronics | `00126380` — `tests/fixtures/research/dart/corp_code_sample.xml` |
 | `000660` | SK hynix | `00164779` — same fixture |
 
-Synthetic paper files (`config/universe.paper.toml.example`, `config/provider_mappings.paper.toml.example`) are unchanged. Additional real companies (Hyundai, NAVER, Kakao, etc.) are deferred until live corp-code master snapshot/resolver verification in **3E4+**.
+Synthetic paper files (`config/universe.paper.toml.example`, `config/provider_mappings.paper.toml.example`) are unchanged. Additional real companies (Hyundai, NAVER, Kakao, etc.) are deferred until live corp-code master snapshot/resolver verification in **3E5+**.
 
 **3E1 ops helper (static validation):**
 
@@ -615,6 +618,25 @@ PYTHONPATH=src uv run python ops/run_kr_real_dart_smoke.py \
 ```
 
 Path: provider mapping registry → `fetch_live_dart_snapshot()` → immutable DART snapshot → `DartSnapshotReplayClient` + `DartDisclosureAdapter` → combined-batch `allocate_date_ids_for_records()` → `disclosure_record_to_source_record()` → JSONL → existing 8B intake → 8C without `--require-symbol-coverage` → Scout packet context via existing 3A.1 symbol-only inclusion.
+
+**3E4 combined context + budget caps (operator explicit; concat JSONL + capped 8B export):**
+
+```bash
+cat /tmp/autostock_fred_260530.jsonl \
+  /tmp/autostock_kr_real_price_260530.jsonl \
+  /tmp/autostock_kr_real_dart_260530.jsonl \
+  > /tmp/autostock_kr_real_combined_260530.jsonl
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_combined_260530.jsonl \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --context-budget-profile kr-real-smoke \
+  --force-date-md \
+  --json
+```
+
+Profile defaults: macro/global latest **5** per `(fact_type, source_name)`; PRICE latest **1** per `(market, symbol, source_name)`; DISCLOSURE latest **5** per `(symbol, source_name)`. Store unchanged; Scout follows capped Date.md.
 
 ---
 

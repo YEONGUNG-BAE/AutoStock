@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1388 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1402 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1388 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1402 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -388,7 +388,70 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 
 Do **not** use `--require-symbol-coverage` on 8C for DART-only JSONL — disclosure records do not satisfy PRICE symbol coverage.
 
-Combined FRED+PRICE+DART live context remains **deferred** (3E4+).
+**3E4 KR real combined FRED + PRICE + DART context (operator explicit; context budget caps):**
+
+Manual per-source intake (recommended):
+
+```bash
+DAY=2026-05-30
+# 1) FRED macro JSONL (existing 1B live-smoke or replay)
+# 2) 3E2 KR real PRICE smoke → /tmp/autostock_kr_real_price_260530.jsonl
+# 3) 3E3 KR real DART smoke with --page-count 10 → /tmp/autostock_kr_real_dart_260530.jsonl
+
+cat /tmp/autostock_fred_260530.jsonl \
+  /tmp/autostock_kr_real_price_260530.jsonl \
+  /tmp/autostock_kr_real_dart_260530.jsonl \
+  > /tmp/autostock_kr_real_combined_260530.jsonl
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_combined_260530.jsonl \
+  --validate-only \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_combined_260530.jsonl \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --context-budget-profile kr-real-smoke \
+  --force-date-md \
+  --json
+
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --require-symbol-coverage \
+  --json
+
+PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
+  --universe config/universe.kr-real.sample.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --out-dir "runtime/research/${DAY}/scout" \
+  --market-scope KR \
+  --require-symbol-coverage \
+  --force \
+  --json
+```
+
+Or use the orchestration helper after concat JSONL exists:
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_real_combined_context_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --source-jsonl /tmp/autostock_kr_real_combined_260530.jsonl \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --scout-out-dir "runtime/research/${DAY}/scout" \
+  --context-budget-profile kr-real-smoke \
+  --force-date-md \
+  --force-scout \
+  --json
+```
+
+Context budget profile `kr-real-smoke` caps Date.md export only (store unchanged): macro/global latest 5 per `(fact_type, source_name)`, PRICE latest 1 per `(market, symbol, source_name)`, DISCLOSURE latest 5 per `(symbol, source_name)`. Scout follows capped Date.md date_ids; 60KB guard remains active.
+
+Expand to 3–5 real companies remains **deferred** (3E5+).
 
 ```bash
 DAY=2026-05-30
@@ -623,7 +686,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1388 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1402 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
