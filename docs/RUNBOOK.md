@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1318 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1340 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1318 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1340 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -292,6 +292,17 @@ PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
 
 Do **not** commit API keys or runtime snapshot ZIPs. Local XML/ZIP fallback (`--corp-code-xml` / `--corp-code-zip`) remains available without env vars.
 
+**3D1 provider mapping registry (local TOML only; no API key):**
+
+```bash
+PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
+  --universe config/universe.paper.toml.example \
+  --provider-mapping config/provider_mappings.paper.toml.example \
+  --json
+```
+
+Maps internal `(market, symbol)` to yfinance `provider_symbol` and DART `corp_code` via `config/provider_mappings.paper.toml.example`. No live API calls in this step.
+
 ```bash
 DAY=2026-05-30
 PYTHONPATH=src uv run python ops/fetch_research_sources.py \
@@ -525,7 +536,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1318 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1340 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

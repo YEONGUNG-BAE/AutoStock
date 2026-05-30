@@ -1,0 +1,37 @@
+# Paper pilot provider mapping registry v1 example.
+#
+# Maps internal universe (market, symbol) to external provider identifiers.
+# Copy to a local runtime file for actual pilot work if needed.
+# Do not commit runtime provider mapping files with secrets.
+
+version = 1
+name = "paper-provider-mappings-v1"
+description = "Provider identifier mappings for paper pilot symbols."
+
+[[mappings]]
+symbol = "SYNTH-KR-0001"
+market = "KR"
+display_name = "Samsung Electronics synthetic mapping"
+enabled = true
+stock_code = "005930"
+notes = "Maps synthetic smoke symbol to Samsung Electronics provider ids for intake smoke."
+
+[mappings.yfinance]
+provider_symbol = "005930.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "005930"
+corp_name = "삼성전자"
+
+[[mappings]]
+symbol = "SYNTH-US-0001"
+market = "US"
+display_name = "Synthetic disabled US mapping"
+enabled = false
+notes = "Disabled placeholder."
+
+[mappings.yfinance]
+provider_symbol = "AAPL"
+currency = "USD"

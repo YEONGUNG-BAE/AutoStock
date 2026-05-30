@@ -309,6 +309,8 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "src" / "data" / "dart_live_client.py",
         REPO_ROOT / "src" / "data" / "dart_corp_code_resolver.py",
         REPO_ROOT / "ops" / "resolve_dart_corp_code.py",
+        REPO_ROOT / "src" / "data" / "provider_mapping_registry.py",
+        REPO_ROOT / "ops" / "validate_provider_mapping.py",
     ]
     forbidden = (
         "requests",
@@ -1724,6 +1726,8 @@ def test_research_intake_modules_do_not_use_urllib_except_http_clients() -> None
         "src/data/dart_live_client.py",
         "src/data/dart_corp_code_resolver.py",
         "ops/resolve_dart_corp_code.py",
+        "src/data/provider_mapping_registry.py",
+        "ops/validate_provider_mapping.py",
     ):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
         assert "urllib.request" not in text, relative
