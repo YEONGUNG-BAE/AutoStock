@@ -159,15 +159,15 @@ def _run_live_fetch(
             f"API key env var {api_key_env.strip()!r} is missing or blank",
         )
 
+    from data.dart_corp_code_http_client import (
+        DartCorpCodeHttpError,
+        fetch_corp_code_zip_bytes,
+    )
+
     try:
         if fetch_zip_bytes is not None:
             zip_bytes = fetch_zip_bytes(api_key)
         else:
-            from data.dart_corp_code_http_client import (
-                DartCorpCodeHttpError,
-                fetch_corp_code_zip_bytes,
-            )
-
             zip_bytes = fetch_corp_code_zip_bytes(api_key=api_key)
     except DartCorpCodeHttpError as exc:
         raise ResolveCorpCodeError("fetch", exc.message) from exc

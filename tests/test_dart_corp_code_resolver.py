@@ -447,3 +447,59 @@ def test_cli_live_fetch_non_zip_response_stage_fetch_no_snapshot(
         )
     assert exc_info.value.stage == "fetch"
     assert list(snapshot_dir.glob("*.zip")) == []
+
+
+def test_cli_live_fetch_injected_http_error_stage_fetch_no_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from data.dart_corp_code_http_client import DartCorpCodeHttpError
+    from resolve_dart_corp_code import ResolveCorpCodeError, main, run_resolve_dart_corp_code
+
+    monkeypatch.setenv("DART_API_KEY", SECRET)
+    snapshot_dir = tmp_path / "snapshots"
+
+    def raising_fetch(_key: str) -> bytes:
+        raise DartCorpCodeHttpError(
+            "OpenDART corp-code HTTP request failed: crtfc_key=[REDACTED]"
+        )
+
+    with pytest.raises(ResolveCorpCodeError) as exc_info:
+        run_resolve_dart_corp_code(
+            live_fetch=True,
+            snapshot_dir=snapshot_dir,
+            stock_code="005930",
+            corp_name=None,
+            api_key_env="DART_API_KEY",
+            fetch_zip_bytes=raising_fetch,
+        )
+    assert exc_info.value.stage == "fetch"
+    assert SECRET not in exc_info.value.message
+    assert list(snapshot_dir.glob("*.zip")) == []
+
+    def patched_run(**kwargs: object) -> dict[str, object]:
+        return run_resolve_dart_corp_code(
+            fetch_zip_bytes=raising_fetch,
+            fetched_at=FETCHED_AT,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr("resolve_dart_corp_code.run_resolve_dart_corp_code", patched_run)
+    exit_code = main(
+        [
+            "--live-fetch",
+            "--snapshot-dir",
+            str(tmp_path / "snapshots_cli"),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    payload = json.loads(captured.out.strip())
+    assert payload["stage"] == "fetch"
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+    assert list((tmp_path / "snapshots_cli").glob("*.zip")) == []
