@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -141,10 +142,8 @@ def test_parse_corp_code_zip_rejects_multiple_xml_members(tmp_path: Path) -> Non
 
 
 def test_resolver_module_has_no_forbidden_tokens() -> None:
-    paths = (
-        REPO_ROOT / "src" / "data" / "dart_corp_code_resolver.py",
-        REPO_ROOT / "ops" / "resolve_dart_corp_code.py",
-    )
+    resolver_path = REPO_ROOT / "src" / "data" / "dart_corp_code_resolver.py"
+    ops_path = REPO_ROOT / "ops" / "resolve_dart_corp_code.py"
     forbidden_network = (
         "urllib.request",
         "urllib.parse",
@@ -157,14 +156,19 @@ def test_resolver_module_has_no_forbidden_tokens() -> None:
         "paperlooprunner",
         "submit_order",
     )
-    forbidden_secrets = ("DART_API_KEY", "FRED_API_KEY")
-    for path in paths:
-        source = path.read_text(encoding="utf-8")
-        lowered = source.lower()
-        for token in forbidden_network:
-            assert token not in lowered, f"{path.name} must not reference {token!r}"
-        for token in forbidden_secrets:
-            assert token not in source, f"{path.name} must not reference {token!r}"
+    resolver_source = resolver_path.read_text(encoding="utf-8")
+    resolver_lower = resolver_source.lower()
+    for token in forbidden_network:
+        assert token not in resolver_lower, f"{resolver_path.name} must not reference {token!r}"
+    for token in ("DART_API_KEY", "FRED_API_KEY"):
+        assert token not in resolver_source, f"{resolver_path.name} must not reference {token!r}"
+
+    ops_source = ops_path.read_text(encoding="utf-8")
+    ops_lower = ops_source.lower()
+    for token in forbidden_network:
+        assert token not in ops_lower, f"{ops_path.name} must not reference {token!r}"
+    module_level = ops_source.split("def ", 1)[0]
+    assert "dart_corp_code_http_client" not in module_level
 
 
 def test_fixtures_do_not_contain_api_key_strings() -> None:
@@ -233,3 +237,213 @@ def test_cli_invalid_file_json_error() -> None:
     payload = json.loads(result.stdout)
     assert payload["status"] == "error"
     assert payload["stage"] == "parse"
+
+
+def _sample_zip_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("CORPCODE.xml", SAMPLE_XML.read_text(encoding="utf-8"))
+    return buffer.getvalue()
+
+
+SECRET = "SECRET_DART_KEY_TEST"
+FETCHED_AT = datetime(2026, 5, 30, 0, 0, 0, tzinfo=UTC)
+
+
+def test_cli_live_fetch_success_with_injected_fetcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from resolve_dart_corp_code import run_resolve_dart_corp_code
+
+    monkeypatch.setenv("DART_API_KEY", SECRET)
+    snapshot_dir = tmp_path / "snapshots"
+
+    payload = run_resolve_dart_corp_code(
+        live_fetch=True,
+        snapshot_dir=snapshot_dir,
+        stock_code="005930",
+        corp_name=None,
+        api_key_env="DART_API_KEY",
+        fetch_zip_bytes=lambda _key: _sample_zip_bytes(),
+        fetched_at=FETCHED_AT,
+    )
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "live-fetch"
+    assert payload["corp_code"] == "00126380"
+    assert payload["corp_name"] == "삼성전자"
+    snapshot_path = Path(payload["snapshot_path"])
+    assert snapshot_path.is_file()
+    assert SECRET not in payload["snapshot_path"]
+    assert SECRET not in snapshot_path.read_bytes().decode("latin-1")
+
+
+def test_cli_live_fetch_json_stdout_no_secret_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from resolve_dart_corp_code import main, run_resolve_dart_corp_code as original_run
+
+    monkeypatch.setenv("DART_API_KEY", SECRET)
+
+    def patched_run(**kwargs: object) -> dict[str, object]:
+        return original_run(
+            fetch_zip_bytes=lambda _key: _sample_zip_bytes(),
+            fetched_at=FETCHED_AT,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr("resolve_dart_corp_code.run_resolve_dart_corp_code", patched_run)
+
+    exit_code = main(
+        [
+            "--live-fetch",
+            "--snapshot-dir",
+            str(tmp_path / "snapshots"),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+    payload = json.loads(captured.out.strip())
+    assert payload["status"] == "ok"
+    assert payload["corp_code"] == "00126380"
+
+
+def test_cli_live_fetch_missing_env_var_stage_args_no_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from resolve_dart_corp_code import main
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    exit_code = main(
+        [
+            "--live-fetch",
+            "--snapshot-dir",
+            str(tmp_path / "snapshots"),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    assert exit_code == 1
+    assert list((tmp_path / "snapshots").glob("*.zip")) == []
+
+
+def test_cli_live_fetch_blank_env_var_stage_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from resolve_dart_corp_code import main
+
+    monkeypatch.setenv("DART_API_KEY", "   ")
+    exit_code = main(
+        [
+            "--live-fetch",
+            "--snapshot-dir",
+            str(tmp_path / "snapshots"),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    payload = json.loads(captured.out.strip())
+    assert payload["stage"] == "args"
+
+
+def test_cli_live_fetch_blank_api_key_env_stage_args(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from resolve_dart_corp_code import main
+
+    exit_code = main(
+        [
+            "--live-fetch",
+            "--api-key-env",
+            "   ",
+            "--snapshot-dir",
+            str(tmp_path / "snapshots"),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    payload = json.loads(captured.out.strip())
+    assert payload["stage"] == "args"
+
+
+def test_cli_local_modes_do_not_require_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from resolve_dart_corp_code import main
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    exit_code = main(
+        [
+            "--corp-code-xml",
+            str(SAMPLE_XML),
+            "--stock-code",
+            "005930",
+            "--json",
+        ]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("extra_args",),
+    [
+        (("--corp-code-xml", str(SAMPLE_XML), "--live-fetch"),),
+        (("--corp-code-zip", "tests/fixtures/research/dart/corp_code_sample.zip", "--live-fetch"),),
+        (("--corp-code-xml", str(SAMPLE_XML), "--corp-code-zip", str(SAMPLE_XML)),),
+        (("--stock-code", "005930"),),
+    ],
+)
+def test_cli_exactly_one_source_mode_required(
+    extra_args: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from resolve_dart_corp_code import main
+
+    exit_code = main([*extra_args, "--stock-code", "005930", "--json"])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    payload = json.loads(captured.out.strip())
+    assert payload["stage"] == "args"
+
+
+def test_cli_live_fetch_non_zip_response_stage_fetch_no_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from resolve_dart_corp_code import ResolveCorpCodeError, run_resolve_dart_corp_code
+
+    monkeypatch.setenv("DART_API_KEY", SECRET)
+    snapshot_dir = tmp_path / "snapshots"
+
+    with pytest.raises(ResolveCorpCodeError) as exc_info:
+        run_resolve_dart_corp_code(
+            live_fetch=True,
+            snapshot_dir=snapshot_dir,
+            stock_code="005930",
+            corp_name=None,
+            api_key_env="DART_API_KEY",
+            fetch_zip_bytes=lambda _key: b"<result><status>010</status></result>",
+        )
+    assert exc_info.value.stage == "fetch"
+    assert list(snapshot_dir.glob("*.zip")) == []

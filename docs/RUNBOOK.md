@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1294 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1317 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1294 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1317 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -278,7 +278,19 @@ PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
   --json
 ```
 
-Live OpenDART corpCode master download is **deferred** (3C2). Do not paste API keys into fixture files.
+**3C2 live corp-code master fetch (operator explicit; requires `DART_API_KEY`):**
+
+```bash
+export DART_API_KEY="..."
+PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
+  --live-fetch \
+  --api-key-env DART_API_KEY \
+  --snapshot-dir "runtime/research/${DAY}/sources/dart_corp_code" \
+  --stock-code 005930 \
+  --json
+```
+
+Do **not** commit API keys or runtime snapshot ZIPs. Local XML/ZIP fallback (`--corp-code-xml` / `--corp-code-zip`) remains available without env vars.
 
 ```bash
 DAY=2026-05-30
@@ -513,7 +525,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1294 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1317 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

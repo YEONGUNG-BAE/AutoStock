@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); live corp-code download **3C2+**; provider mapping registry **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); provider mapping registry **deferred**; universe mutation **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -501,14 +501,15 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 
 ---
 
-## 3C DART corp-code resolver (fixture-first)
+## 3C DART corp-code resolver (fixture-first + live master fetch)
 
 > **3C1 (implemented):** local corp-code master XML/ZIP → `stock_code` → `corp_code`. No network, no API key, no env read.
+> **3C2 (implemented):** operator `--live-fetch` → OpenDART corpCode master ZIP snapshot → parse → `stock_code` → `corp_code`. Provider registry still deferred.
 
 | Phase | Scope | Network |
 |---|---|---|
 | **3C1** | `src/data/dart_corp_code_resolver.py` + `tests/fixtures/research/dart/corp_code_*.xml` | None |
-| **3C2** | Live OpenDART corpCode master download + cache | Operator explicit (deferred) |
+| **3C2** | `dart_corp_code_http_client.py` + immutable ZIP snapshot + resolver | Operator explicit |
 | **Next** | Provider mapping registry: internal symbol → yfinance ticker / DART corp_code | Design follow-on |
 
 **Resolver rules:**
@@ -519,7 +520,7 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 - Duplicate listed `stock_code` with same `corp_name` fails at parse; different `corp_name` requires `corp_name` at resolve time.
 - Optional ZIP: read single `.xml` member in-process (no `extractall`).
 
-**Ops helper (local file only):** `ops/resolve_dart_corp_code.py --corp-code-xml … --stock-code 005930 --json`
+**Ops helper:** `ops/resolve_dart_corp_code.py --corp-code-xml … --stock-code 005930 --json` (local) or `--live-fetch --snapshot-dir … --json` (operator live master)
 
 ---
 

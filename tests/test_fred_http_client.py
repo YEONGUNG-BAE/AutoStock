@@ -128,6 +128,7 @@ def test_fred_and_dart_http_clients_may_use_urllib_request() -> None:
     for relative in (
         "src/data/fred_http_client.py",
         "src/data/dart_http_client.py",
+        "src/data/dart_corp_code_http_client.py",
     ):
         http_client = (REPO_ROOT / relative).read_text(encoding="utf-8").lower()
         assert "urllib.request" in http_client

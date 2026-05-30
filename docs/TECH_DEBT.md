@@ -56,7 +56,7 @@
 - ~~Real Intake **3B2** — DART operator `--live-smoke`~~ Done: `dart_http_client.py`, `run_live_smoke_dart`; env API key read only in DART live branch; snapshot→3A replay→JSONL.
 - Real Intake **3B3** — DART hardening (pagination, error schema, corp-code cache, retry/backoff) — optional after 3B2.
 - ~~Real Intake **3C1** — DART corp-code resolver fixture-first (stock_code → corp_code)~~ Done: `src/data/dart_corp_code_resolver.py`, `ops/resolve_dart_corp_code.py`, fixtures + tests; no network/env.
-- Real Intake **3C2** — live OpenDART corpCode master download — deferred.
+- ~~Real Intake **3C2** — live OpenDART corpCode master download~~ Done: `dart_corp_code_http_client.py`, `dart_corp_code_live_client.py`, `--live-fetch` in `ops/resolve_dart_corp_code.py`; immutable ZIP snapshot → 3C1 parse/resolve; tests use injected transport only.
 - Provider mapping registry (internal symbol → yfinance / DART corp_code) — deferred.
 - Operator-defined real 3–5 company universe + combined FRED/PRICE/DART smoke repeat — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
