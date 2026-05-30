@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -94,8 +95,8 @@ def _optional_currency(value: str | None) -> str | None:
     return normalize_required_string(value, field_name="currency")
 
 
-def _extract_last_valid_close(history: Any) -> tuple[float, datetime, dict[str, Any]]:
-    """history DataFrame에서 마지막 유효 Close와 source timestamp를 추출한다."""
+def _extract_last_valid_close(history: Any) -> tuple[Any, datetime, dict[str, Any]]:
+    """history DataFrame에서 마지막 유효 Close(raw scalar)와 source timestamp를 추출한다."""
     if history is None or getattr(history, "empty", len(history) == 0):
         raise PriceLiveFetchError("yfinance history is empty")
     columns = getattr(history, "columns", None)
@@ -115,17 +116,27 @@ def _extract_last_valid_close(history: Any) -> tuple[float, datetime, dict[str, 
         )
 
     source_timestamp, timestamp_payload = _coerce_source_timestamp(last_index)
-    return close_float, source_timestamp, timestamp_payload
+    # raw scalar를 그대로 넘긴다 (R2): float 경유 표현 오염 없이 Decimal canonical화하기 위함.
+    return last_close, source_timestamp, timestamp_payload
 
 
-def _stringify_close_price(close_value: float) -> str:
-    """yfinance Close float를 deterministic decimal string으로 변환한다 (R2)."""
-    close_float = float(close_value)
-    if not math.isfinite(close_float) or close_float <= 0:
+def _stringify_close_price(close_value: Any) -> str:
+    """yfinance Close scalar를 deterministic decimal string으로 변환한다 (R2).
+
+    raw scalar(numpy/pandas)에서 직접 Decimal(str(...))로 가서 float 표현 오염을 피하고,
+    canonical fixed-point string(format ``f``)으로 저장한다.
+    """
+    try:
+        decimal_value = Decimal(str(close_value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PriceLiveFetchError(
+            f"yfinance Close is not a valid decimal, got {close_value!r}"
+        ) from exc
+    if not decimal_value.is_finite() or decimal_value <= Decimal("0"):
         raise PriceLiveFetchError(
             f"yfinance Close must be finite and > 0 for stringification, got {close_value!r}"
         )
-    return str(close_float)
+    return format(decimal_value, "f")
 
 
 def _coerce_source_timestamp(index_value: Any) -> tuple[datetime, dict[str, Any]]:
