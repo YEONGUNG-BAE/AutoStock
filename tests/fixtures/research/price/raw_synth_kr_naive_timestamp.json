@@ -1,0 +1,11 @@
+{
+  "source_key": "price",
+  "external_service": "generic-price-fixture",
+  "symbol": "SYNTH-KR-0001",
+  "market": "KR",
+  "fetched_at": "2026-05-30T01:02:03+00:00",
+  "price": "800000",
+  "currency": "KRW",
+  "source_timestamp": "2026-05-30T00:00:00",
+  "payload": {}
+}

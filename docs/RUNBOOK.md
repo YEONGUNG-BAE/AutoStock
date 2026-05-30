@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1164 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1181 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1164 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1181 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -132,7 +132,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 
 generated `runtime/research/` artifacts는 **commit하지 않는다**.
 
-**Post-Foundation (1A replay + 1B live-smoke):** FRED snapshot replay는 `--replay`; live HTTP는 `--live-smoke` (**stdlib HTTP는 `src/data/fred_http_client.py`에만 격리**). API key는 env에서만 읽으며 stdout/stderr/JSON/snapshot에 **값이 기록되지 않는다**.
+**Post-Foundation (1A replay + 1B live-smoke + 2A price replay):** FRED snapshot replay는 `--replay --source fred`; generic PRICE snapshot replay는 `--replay --source price --symbol … --market …` (universe symbol coverage 충족 가능). live HTTP는 `--live-smoke` (**FRED only**; stdlib HTTP는 `src/data/fred_http_client.py`에만 격리). API key는 env에서만 읽으며 stdout/stderr/JSON/snapshot에 **값이 기록되지 않는다**.
 
 ```bash
 DAY=2026-05-29
@@ -146,10 +146,39 @@ PYTHONPATH=src uv run python ops/fetch_research_sources.py \
   --out-jsonl "runtime/research/${DAY}/research_sources.fred.jsonl" \
   --json
 
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --replay \
+  --source price \
+  --symbol SYNTH-KR-0001 \
+  --market KR \
+  --date-id 260530-1 \
+  --as-of 2026-05-30T09:00:00+09:00 \
+  --snapshot tests/fixtures/research/price/raw_synth_kr_success.json \
+  --out-jsonl "runtime/research/${DAY}/research_sources.price.jsonl" \
+  --json
+
 PYTHONPATH=src uv run python ops/research_source_intake.py \
-  --source-jsonl "runtime/research/${DAY}/research_sources.fred.jsonl" \
+  --source-jsonl "runtime/research/${DAY}/research_sources.price.jsonl" \
   --validate-only \
   --json
+```
+
+PRICE replay → 8B normal → 8C smoke (enabled universe symbol coverage):
+
+```bash
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.price.jsonl" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --json
+
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --require-symbol-coverage \
+  --json
+# 기대: "missing_symbols": []
 ```
 
 **Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). v1 live-smoke(1B) 구현 전까지 operator-prepared JSONL 경로도 병행 가능.
@@ -359,7 +388,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1164 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1181 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

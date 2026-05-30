@@ -14,7 +14,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OPS_SCRIPT = REPO_ROOT / "ops" / "fetch_research_sources.py"
 INTAKE_SCRIPT = REPO_ROOT / "ops" / "research_source_intake.py"
+SMOKE_SCRIPT = REPO_ROOT / "ops" / "run_date_md_smoke.py"
 SUCCESS_SNAPSHOT = REPO_ROOT / "tests" / "fixtures" / "research" / "fred" / "raw_dgs10_success.json"
+PRICE_SUCCESS_SNAPSHOT = (
+    REPO_ROOT / "tests" / "fixtures" / "research" / "price" / "raw_synth_kr_success.json"
+)
+PRICE_MISMATCHED_SYMBOL_SNAPSHOT = (
+    REPO_ROOT / "tests" / "fixtures" / "research" / "price" / "raw_synth_kr_mismatched_symbol.json"
+)
+EXAMPLE_UNIVERSE = REPO_ROOT / "config" / "universe.paper.toml.example"
 
 AS_OF = "2026-05-29T09:00:00+09:00"
 SECRET = "SECRET_FRED_KEY_TEST"
@@ -46,6 +54,61 @@ def _run_intake_validate(jsonl_path: Path) -> subprocess.CompletedProcess[str]:
             "--source-jsonl",
             str(jsonl_path),
             "--validate-only",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _run_intake_normal(
+    *,
+    jsonl_path: Path,
+    store_path: Path,
+    date_md_out: Path,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(INTAKE_SCRIPT),
+            "--source-jsonl",
+            str(jsonl_path),
+            "--store",
+            str(store_path),
+            "--date-md-out",
+            str(date_md_out),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _run_date_md_smoke_cli(
+    *,
+    universe_path: Path,
+    date_md_path: Path,
+    store_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SMOKE_SCRIPT),
+            "--universe",
+            str(universe_path),
+            "--date-md",
+            str(date_md_path),
+            "--store",
+            str(store_path),
+            "--require-symbol-coverage",
             "--json",
         ],
         capture_output=True,
@@ -229,6 +292,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "ops" / "fetch_research_sources.py",
         REPO_ROOT / "src" / "data" / "research_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "fred_source_fetcher.py",
+        REPO_ROOT / "src" / "data" / "price_source_fetcher.py",
     ]
     forbidden = (
         "requests",
@@ -569,3 +633,226 @@ def test_mode_mutex_rejects_live_smoke_combined_with_other_modes(
     payload = json.loads(result.stdout)
     assert payload["status"] == "error"
     assert payload["stage"] == "args"
+
+
+def test_cli_replay_price_json_writes_jsonl(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "status": "ok",
+        "stage": "complete",
+        "mode": "replay",
+        "source": "price",
+        "symbol": "SYNTH-KR-0001",
+        "market": "KR",
+        "records_count": 1,
+        "snapshot_path": str(PRICE_SUCCESS_SNAPSHOT),
+        "out_jsonl": str(out_jsonl),
+    }
+    lines = out_jsonl.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["fact_type"] == "price"
+    assert record["symbol"] == "SYNTH-KR-0001"
+    assert record["market"] == "KR"
+
+
+def test_cli_replay_price_jsonl_round_trips_through_8b_validate_only(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    replay = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+    assert replay.returncode == 0, replay.stderr
+
+    intake = _run_intake_validate(out_jsonl)
+    assert intake.returncode == 0, intake.stderr
+    payload = json.loads(intake.stdout)
+    assert payload["status"] == "ok"
+    assert payload["records_valid"] == 1
+
+
+def test_cli_replay_price_8b_normal_and_8c_smoke_satisfies_symbol_coverage(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    date_md_path = tmp_path / "Date.md"
+    universe_path = tmp_path / "universe.toml"
+    universe_path.write_text(EXAMPLE_UNIVERSE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    replay = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+    assert replay.returncode == 0, replay.stderr
+
+    intake = _run_intake_normal(
+        jsonl_path=out_jsonl,
+        store_path=store_path,
+        date_md_out=date_md_path,
+    )
+    assert intake.returncode == 0, intake.stderr
+
+    smoke = _run_date_md_smoke_cli(
+        universe_path=universe_path,
+        date_md_path=date_md_path,
+        store_path=store_path,
+    )
+    assert smoke.returncode == 0, smoke.stderr
+    payload = json.loads(smoke.stdout)
+    assert payload["status"] == "ok"
+    assert payload["missing_symbols"] == []
+
+
+def test_cli_replay_price_fails_if_symbol_missing(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert payload["stage"] == "args"
+    assert "--symbol" in payload["error"]
+
+
+def test_cli_replay_price_fails_if_market_missing(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert payload["stage"] == "args"
+    assert "--market" in payload["error"]
+
+
+def test_cli_replay_price_fails_on_mismatched_snapshot_symbol(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_MISMATCHED_SYMBOL_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert payload["stage"] == "normalize"
+    assert "symbol mismatch" in payload["error"]
+
+
+def test_cli_replay_price_json_and_verbose_keeps_stdout_pure_json(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot",
+        str(PRICE_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+        "--verbose",
+    )
+
+    assert result.returncode == 0, result.stderr
+    json.loads(result.stdout)
+    assert "verbose:" in result.stderr

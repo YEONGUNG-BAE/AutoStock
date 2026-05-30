@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
 from typing import Protocol
 
 from decision.canonical_json import canonical_json_dumps
@@ -9,21 +7,15 @@ from domain.source import DateIdSourceRecord, FactType
 
 
 class SourceFetcher(Protocol):
-    """read-only research source snapshot normalizer contract (replay-only in 1A)."""
+    """read-only research source snapshot normalizer contract (replay-only).
+
+    normalize_snapshot 시그니처는 source별로 다르다 (fred=series_id, price=symbol/market).
+    Protocol은 source_key/fact_types만 공통 계약으로 강제한다. ops layer가 source별로 dispatch한다.
+    3번째+ source가 생기면 source-neutral identifier 계약으로 통합 검토 가능.
+    """
 
     source_key: str
     fact_types: tuple[FactType, ...]
-
-    def normalize_snapshot(
-        self,
-        snapshot_path: Path,
-        *,
-        series_id: str,
-        as_of: datetime,
-        date_id: str,
-    ) -> list[DateIdSourceRecord]:
-        """snapshot 파일만 읽어 DateIdSourceRecord 목록을 반환한다. network/store/Date.md write 금지."""
-        ...
 
 
 class UnsupportedSourceError(ValueError):
@@ -37,6 +29,10 @@ def get_source_fetcher(source_key: str) -> SourceFetcher:
         from data.fred_source_fetcher import FredSnapshotReplayFetcher
 
         return FredSnapshotReplayFetcher()
+    if normalized == "price":
+        from data.price_source_fetcher import GenericPriceSnapshotReplayFetcher
+
+        return GenericPriceSnapshotReplayFetcher()
     raise UnsupportedSourceError(f"unsupported source: {source_key!r}")
 
 

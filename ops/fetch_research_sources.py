@@ -47,7 +47,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--series-id",
         default=None,
-        help="requested series identifier (required for --replay and --live-smoke)",
+        help="requested series identifier (required for --replay --source fred and --live-smoke)",
+    )
+    parser.add_argument(
+        "--symbol",
+        default=None,
+        help="requested symbol (required for --replay --source price)",
+    )
+    parser.add_argument(
+        "--market",
+        default=None,
+        help="requested market (required for --replay --source price)",
     )
     parser.add_argument(
         "--date-id",
@@ -174,6 +184,8 @@ def _emit_result(payload: dict[str, Any], *, as_json: bool, out: TextIO) -> None
         "stage",
         "source",
         "series_id",
+        "symbol",
+        "market",
         "records_count",
         "snapshot_path",
         "out_jsonl",
@@ -189,6 +201,8 @@ def _success_payload(
     stage: str,
     source: str,
     series_id: str | None = None,
+    symbol: str | None = None,
+    market: str | None = None,
     records_count: int | None = None,
     snapshot_path: Path | None = None,
     out_jsonl: Path | None = None,
@@ -201,6 +215,10 @@ def _success_payload(
     }
     if series_id is not None:
         payload["series_id"] = series_id
+    if symbol is not None:
+        payload["symbol"] = symbol
+    if market is not None:
+        payload["market"] = market
     if records_count is not None:
         payload["records_count"] = records_count
     if snapshot_path is not None:
@@ -218,7 +236,14 @@ def _error_payload(*, stage: str, error: str) -> dict[str, Any]:
     }
 
 
-def run_dry_run(*, source: str, series_id: str | None, out_jsonl: Path | None) -> dict[str, Any]:
+def run_dry_run(
+    *,
+    source: str,
+    series_id: str | None = None,
+    symbol: str | None = None,
+    market: str | None = None,
+    out_jsonl: Path | None = None,
+) -> dict[str, Any]:
     try:
         get_source_fetcher(source)
     except UnsupportedSourceError as exc:
@@ -228,6 +253,8 @@ def run_dry_run(*, source: str, series_id: str | None, out_jsonl: Path | None) -
         stage="dry-run",
         source=source.strip().lower(),
         series_id=series_id,
+        symbol=symbol,
+        market=market,
         out_jsonl=out_jsonl,
     )
 
@@ -235,25 +262,45 @@ def run_dry_run(*, source: str, series_id: str | None, out_jsonl: Path | None) -
 def run_replay(
     *,
     source: str,
-    series_id: str,
     date_id: str,
     as_of: datetime,
     snapshot_path: Path,
     out_jsonl: Path,
     force: bool,
+    series_id: str | None = None,
+    symbol: str | None = None,
+    market: str | None = None,
 ) -> dict[str, Any]:
+    normalized_source = source.strip().lower()
     try:
         fetcher = get_source_fetcher(source)
     except UnsupportedSourceError as exc:
         raise FetchResearchSourcesError("args", str(exc)) from exc
 
     try:
-        records = fetcher.normalize_snapshot(
-            snapshot_path,
-            series_id=series_id,
-            as_of=as_of,
-            date_id=date_id,
-        )
+        if normalized_source == "fred":
+            if not series_id:
+                raise FetchResearchSourcesError("args", "--series-id is required for --replay --source fred")
+            records = fetcher.normalize_snapshot(
+                snapshot_path,
+                series_id=series_id,
+                as_of=as_of,
+                date_id=date_id,
+            )
+        elif normalized_source == "price":
+            if not symbol:
+                raise FetchResearchSourcesError("args", "--symbol is required for --replay --source price")
+            if not market:
+                raise FetchResearchSourcesError("args", "--market is required for --replay --source price")
+            records = fetcher.normalize_snapshot(
+                snapshot_path,
+                symbol=symbol,
+                market=market,
+                as_of=as_of,
+                date_id=date_id,
+            )
+        else:
+            raise FetchResearchSourcesError("args", f"replay unsupported for source: {source!r}")
     except FileNotFoundError as exc:
         raise FetchResearchSourcesError("snapshot", str(exc)) from exc
     except ValueError as exc:
@@ -268,7 +315,9 @@ def run_replay(
         mode="replay",
         stage="complete",
         source=fetcher.source_key,
-        series_id=series_id,
+        series_id=series_id if normalized_source == "fred" else None,
+        symbol=symbol if normalized_source == "price" else None,
+        market=market if normalized_source == "price" else None,
         records_count=len(records),
         snapshot_path=snapshot_path,
         out_jsonl=out_jsonl,
@@ -355,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = run_dry_run(
                 source=args.source,
                 series_id=args.series_id,
+                symbol=args.symbol,
+                market=args.market,
                 out_jsonl=out_jsonl,
             )
         elif mode == "live-smoke":
@@ -376,19 +427,21 @@ def main(argv: list[str] | None = None) -> int:
                 fetched_at=fetched_at,
             )
         else:
-            series_id = _require_value(args.series_id, flag="--series-id")
             date_id = _require_value(args.date_id, flag="--date-id")
             as_of = _parse_as_of(_require_value(args.as_of, flag="--as-of"))
             snapshot_path = _require_path(args.snapshot, flag="--snapshot")
             out_jsonl = _require_path(args.out_jsonl, flag="--out-jsonl")
+            normalized_source = args.source.strip().lower()
             payload = run_replay(
                 source=args.source,
-                series_id=series_id,
                 date_id=date_id,
                 as_of=as_of,
                 snapshot_path=snapshot_path,
                 out_jsonl=out_jsonl,
                 force=args.force,
+                series_id=args.series_id if normalized_source == "fred" else None,
+                symbol=args.symbol if normalized_source == "price" else None,
+                market=args.market if normalized_source == "price" else None,
             )
     except FetchResearchSourcesError as exc:
         payload = _error_payload(stage=exc.stage, error=exc.message)

@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`)  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented**; 2A generic PRICE replay **implemented** (urllib isolated in `fred_http_client.py`)  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -225,7 +225,8 @@ source_name = "dart"
 | Source key | External service | Adapter | Intermediate → Record | `FactType` | Required mapping notes |
 |---|---|---|---|---|---|
 | `fred` | [FRED API](https://fred.stlouisfed.org/docs/api/fred/) | `FredMacroAdapter` | `MacroDataPoint` → `macro_data_point_to_source_record()` | `MACRO` | `series_id` in payload; `summary` cites series + value + observation time |
-| `yfinance` | Yahoo Finance (yfinance library or equivalent read-only client) | `YFinancePriceAdapter` | `MarketDataPoint` → `market_data_point_to_source_record()` | `PRICE` | `symbol`, optional `market`; KR ticker conventions **must be verified at implementation** |
+| `price` | generic local price snapshot (replay/fixture) | `GenericPriceSnapshotReplayFetcher` | `MarketDataPoint` → `market_data_point_to_source_record()` | `PRICE` | `symbol`, `market`; **2A implemented** — satisfies universe symbol coverage via replay |
+| `yfinance` | Yahoo Finance (yfinance library or equivalent read-only client) | `YFinancePriceAdapter` | `MarketDataPoint` → `market_data_point_to_source_record()` | `PRICE` | `symbol`, optional `market`; KR ticker conventions **must be verified at implementation**; **live deferred** |
 | `dart` | [DART Open API](https://opendart.fss.or.kr/) | `DartDisclosureAdapter` | `DisclosureRecord` → `disclosure_record_to_source_record()` | `DISCLOSURE` | One disclosure → one record; `source_url` when available |
 | `kis` | KIS Open API | — | — | — | **DEFERRED** — not v1 ([G3](#g3-data-source-boundary-vs-deferred-kis)) |
 | `news` | TBD (Finnhub/Naver/etc.) | — | — | `NEWS` | **DEFERRED** — no adapter ops path in v1 |
@@ -391,7 +392,7 @@ Implementation must verify official id fields before coding.
 6. DART is deferred due to auth + corp-code + schema friction ([§10.3](#103-dart-style-disclosure)).
 7. yfinance is **second** candidate: valuable for `PRICE` + universe coverage but adds third-party package / unofficial API surface risk.
 
-**KR price note:** KIS-based KR `PRICE` remains **explicitly deferred** ([G3](#g3-data-source-boundary-vs-deferred-kis)). Until yfinance KR tickers or another non-KIS path is verified, operator may still add manual `PRICE` records for universe symbols.
+**KR price note:** KIS-based KR `PRICE` remains **explicitly deferred** ([G3](#g3-data-source-boundary-vs-deferred-kis)). Generic PRICE replay (2A) can satisfy universe symbol coverage offline; yfinance live and KIS read-only remain deferred.
 
 ### Minimal fields to ingest (FRED v1)
 
@@ -479,8 +480,12 @@ PYTHONPATH=src uv run python ops/fetch_research_sources.py \
   --day "${DAY}" \
   --replay
 
-# 4) Merge manual PRICE records if universe requires symbol coverage
-#    (append to research_sources.jsonl)
+# 4) Or replay generic PRICE snapshot for universe symbol coverage (no network)
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --replay --source price --symbol SYNTH-KR-0001 --market KR \
+  --date-id 260530-1 --as-of 2026-05-30T09:00:00+09:00 \
+  --snapshot tests/fixtures/research/price/raw_synth_kr_success.json \
+  --out-jsonl "runtime/research/${DAY}/research_sources.price.jsonl"
 
 # 5) Existing 8B (unchanged)
 PYTHONPATH=src uv run python ops/research_source_intake.py \
@@ -521,7 +526,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 | Item | Notes |
 |---|---|
 | **KIS read-only KR `PRICE`** | Explicitly out of v1 ([G3](#g3-data-source-boundary-vs-deferred-kis)); see `docs/TECH_DEBT.md` |
-| **yfinance `PRICE` fetcher** | Second source after FRED v1 proven; verify KR tickers + dependency policy |
+| **yfinance live `PRICE` fetcher** | Deferred; generic PRICE replay (2A) covers offline symbol coverage |
 | **DART `DISCLOSURE` fetcher** | Auth, corp-code map, rate limits, schema verification |
 | **`FactType.NEWS` intake** | No Phase 6 news adapter in repo; Finnhub/Naver env names exist in `config.full.example` only |
 | **`FactType.FLOW` / `FX`** | No adapter yet — new intermediate models + mapping PR required before fetcher |
