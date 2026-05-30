@@ -51,6 +51,7 @@
 - ~~Implement Real Intake 2A — generic PRICE snapshot replay (`--replay --source price`)~~ Done: `src/data/price_source_fetcher.py`, fixtures + tests; JSONL round-trips through 8B and satisfies 8C symbol coverage for matching universe symbols.
 - ~~Implement Real Intake 2B — yfinance PRICE live-smoke (`--live-smoke --source price`)~~ Done: `src/data/price_live_client.py` (lazy yfinance import), immutable generic PRICE snapshot → 2A replay; tests use injected ticker factory only.
 - ~~Implement Real Intake 3A — DART DISCLOSURE replay/fixture (`--replay --source dart`)~~ Done: `src/data/dart_source_fetcher.py`, store-seeded Date-ID batch allocation, fixtures + tests; JSONL round-trips through 8B; does not satisfy 8C symbol coverage.
+- ~~Implement Real Intake 3A.1 — Scout packet context for symbol-matched DART DISCLOSURE~~ Done: `ops/build_scout_manual_packet.py` symbol-only selection; `market=None` preserved; 8C coverage semantics unchanged.
 - DART live API / corp-code / API key — deferred (3B).
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 

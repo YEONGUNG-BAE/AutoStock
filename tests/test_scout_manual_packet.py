@@ -365,8 +365,51 @@ def test_global_records_are_included_by_default(tmp_path: Path) -> None:
     assert payload["records_count"] == 2
 
 
+def _dart_disclosure_record(
+    *,
+    date_id: str = "260528-1",
+    symbol: str = "SYNTH-KR-0001",
+    summary: str = "Synthetic DART disclosure for Scout packet test.",
+) -> DateIdSourceRecord:
+    return DateIdSourceRecord(
+        date_id=DateId(date_id),
+        fact_type=FactType.DISCLOSURE,
+        source_name="dart",
+        source_timestamp=__import__("datetime").datetime.fromisoformat(KST_TS),
+        created_at=__import__("datetime").datetime.fromisoformat(KST_CREATED),
+        summary=summary,
+        payload={"title": summary, "disclosure_id": "dart-fixture-1"},
+        symbol=symbol,
+        market=None,
+        source_url="https://dart.fss.or.kr/example/1",
+    )
+
+
+_MIXED_MARKET_UNIVERSE = """
+version = 1
+name = "mixed-v0"
+description = "Mixed market test universe."
+base_market = "BOTH"
+
+[[symbols]]
+symbol = "SYNTH-KR-0001"
+market = "KR"
+enabled = true
+
+[[symbols]]
+symbol = "SYNTH-US-0001"
+market = "US"
+enabled = true
+"""
+
+
 def test_partial_symbol_market_records_are_excluded(tmp_path: Path) -> None:
-    partial_symbol = _sample_record(date_id="260528-2", symbol="SYNTH-KR-0001", market=None)
+    partial_symbol = _sample_record(
+        date_id="260528-2",
+        symbol="SYNTH-KR-0001",
+        market=None,
+        fact_type=FactType.MANUAL,
+    )
     partial_market = _sample_record(date_id="260528-3", symbol=None, market="KR")
     out_dir = tmp_path / "scout"
     payload = _build_packet(
@@ -416,29 +459,129 @@ def test_require_symbol_coverage_failure_prevents_output_files(tmp_path: Path) -
     assert not any((out_dir / name).exists() for name in OUTPUT_FILES)
 
 
+def test_symbol_matched_disclosure_with_market_none_is_included(tmp_path: Path) -> None:
+    disclosure = _dart_disclosure_record()
+    out_dir = tmp_path / "scout"
+    payload = _build_packet(
+        tmp_path,
+        records=(disclosure,),
+        out_dir=out_dir,
+        require_symbol_coverage=False,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["records_count"] == 1
+
+    scout_input = ScoutInput.model_validate(
+        json.loads((out_dir / "scout_input.json").read_text(encoding="utf-8"))
+    )
+    assert len(scout_input.records) == 1
+    record = scout_input.records[0]
+    assert record.fact_type == FactType.DISCLOSURE
+    assert record.symbol == "SYNTH-KR-0001"
+    assert record.market is None
+    assert record.source_name == "dart"
+    assert record.date_id.value == "260528-1"
+
+
+def test_disclosure_excluded_when_symbol_not_in_kr_market_scope(tmp_path: Path) -> None:
+    us_disclosure = _dart_disclosure_record(
+        date_id="260528-1",
+        symbol="SYNTH-US-0001",
+    )
+    out_dir = tmp_path / "scout"
+    with pytest.raises(PacketError, match="no ScoutInput records matched"):
+        run_build_scout_manual_packet(
+            universe_path=_write_universe(tmp_path, text=_MIXED_MARKET_UNIVERSE),
+            date_md_path=_write_date_md(tmp_path, us_disclosure),
+            store_path=_write_store(tmp_path, us_disclosure),
+            out_dir=out_dir,
+            now=__import__("datetime").datetime.fromisoformat("2026-05-28T00:00:00+00:00"),
+            market_scope="KR",
+            fact_types=None,
+            max_records=None,
+            require_symbol_coverage=False,
+            force=False,
+        )
+
+
+def test_disclosure_included_in_both_scope_when_us_symbol_enabled(tmp_path: Path) -> None:
+    us_disclosure = _dart_disclosure_record(
+        date_id="260528-1",
+        symbol="SYNTH-US-0001",
+    )
+    out_dir = tmp_path / "scout"
+    payload = run_build_scout_manual_packet(
+        universe_path=_write_universe(tmp_path, text=_MIXED_MARKET_UNIVERSE),
+        date_md_path=_write_date_md(tmp_path, us_disclosure),
+        store_path=_write_store(tmp_path, us_disclosure),
+        out_dir=out_dir,
+        now=__import__("datetime").datetime.fromisoformat("2026-05-28T00:00:00+00:00"),
+        market_scope="BOTH",
+        fact_types=None,
+        max_records=None,
+        require_symbol_coverage=False,
+        force=False,
+    )
+    assert payload["records_count"] == 1
+    scout_input = ScoutInput.model_validate(
+        json.loads((out_dir / "scout_input.json").read_text(encoding="utf-8"))
+    )
+    assert scout_input.records[0].symbol == "SYNTH-US-0001"
+    assert scout_input.records[0].market is None
+
+
+def test_dart_only_scout_packet_succeeds_without_symbol_coverage(tmp_path: Path) -> None:
+    disclosure_one = _dart_disclosure_record(date_id="260528-1", symbol="SYNTH-KR-0001")
+    disclosure_two = _dart_disclosure_record(
+        date_id="260528-2",
+        symbol="SYNTH-KR-0001",
+        summary="Second synthetic DART disclosure.",
+    )
+    out_dir = tmp_path / "scout"
+    payload = _build_packet(
+        tmp_path,
+        records=(disclosure_one, disclosure_two),
+        out_dir=out_dir,
+        require_symbol_coverage=False,
+    )
+    assert payload["status"] == "ok"
+    assert payload["records_count"] == 2
+
+
+def test_mixed_price_and_dart_disclosure_included_with_market_preserved(tmp_path: Path) -> None:
+    price_record = _sample_record(
+        date_id="260528-1",
+        symbol="SYNTH-KR-0001",
+        market="KR",
+        fact_type=FactType.PRICE,
+    )
+    dart_record = _dart_disclosure_record(date_id="260528-2")
+    out_dir = tmp_path / "scout"
+    payload = _build_packet(
+        tmp_path,
+        records=(price_record, dart_record),
+        out_dir=out_dir,
+        require_symbol_coverage=False,
+    )
+    assert payload["records_count"] == 2
+
+    scout_input = ScoutInput.model_validate(
+        json.loads((out_dir / "scout_input.json").read_text(encoding="utf-8"))
+    )
+    by_fact_type = {record.fact_type: record for record in scout_input.records}
+    assert by_fact_type[FactType.PRICE].market == "KR"
+    assert by_fact_type[FactType.DISCLOSURE].market is None
+    assert by_fact_type[FactType.DISCLOSURE].symbol == "SYNTH-KR-0001"
+
+
 def test_market_scope_kr_excludes_enabled_us_symbol_records(tmp_path: Path) -> None:
-    mixed_universe = """
-version = 1
-name = "mixed-v0"
-description = "Mixed market test universe."
-base_market = "BOTH"
-
-[[symbols]]
-symbol = "SYNTH-KR-0001"
-market = "KR"
-enabled = true
-
-[[symbols]]
-symbol = "SYNTH-US-0001"
-market = "US"
-enabled = true
-"""
     kr_record = _sample_record(date_id="260528-1", symbol="SYNTH-KR-0001", market="KR")
     us_record = _sample_record(date_id="260528-2", symbol="SYNTH-US-0001", market="US")
     out_dir = tmp_path / "scout"
     payload = _build_packet(
         tmp_path,
-        universe_path=_write_universe(tmp_path, text=mixed_universe),
+        universe_path=_write_universe(tmp_path, text=_MIXED_MARKET_UNIVERSE),
         records=(kr_record, us_record),
         out_dir=out_dir,
         market_scope="KR",

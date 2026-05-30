@@ -127,6 +127,7 @@ def _select_store_records(
     enabled_pairs: set[tuple[str, str]],
 ) -> tuple[DateIdSourceRecord, ...]:
     """Date.md date_id + universe (market,symbol) + global record 필터."""
+    enabled_symbols = {symbol for (_market, symbol) in enabled_pairs}
     selected: list[DateIdSourceRecord] = []
     for record in store_records:
         if record.date_id.value not in date_ids:
@@ -135,6 +136,14 @@ def _select_store_records(
             selected.append(record)
             continue
         if record.symbol is None or record.market is None:
+            if (
+                record.fact_type == FactType.DISCLOSURE
+                and record.symbol is not None
+                and record.market is None
+                and record.symbol in enabled_symbols
+            ):
+                selected.append(record)
+                continue
             continue
         if (record.market, record.symbol) not in enabled_pairs:
             continue

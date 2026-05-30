@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1228 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1233 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1228 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1233 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -257,6 +257,8 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 # DART-only: --require-symbol-coverage 사용 금지 (DISCLOSURE records have market=None)
 ```
 
+DART-only Scout packet (8D): `require_symbol_coverage=False`이면 symbol-matched `DISCLOSURE`(`market=None`)가 Scout context에 포함되어 packet build가 성공할 수 있다. `--require-symbol-coverage`는 DART-only에서 여전히 실패한다.
+
 **Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md).
 
 ### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
@@ -295,6 +297,8 @@ PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \
   --max-records 20 \
   --json
 ```
+
+DART `DISCLOSURE`만 있는 경우: `--require-symbol-coverage` 없이 실행하면 symbol-matched disclosure가 Scout context에 포함된다 (`market=None` 유지). DART-only + `--require-symbol-coverage`는 8C와 동일하게 실패한다.
 
 생성 파일: `scout_input.json`, `scout_prompt.md`, `scout_packet_summary.json`.
 
@@ -464,7 +468,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1228 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1233 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
