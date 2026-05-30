@@ -100,6 +100,19 @@ def test_stringify_close_price_rejects_non_finite() -> None:
         _stringify_close_price(float("inf"))
 
 
+def test_stringify_close_price_does_not_float_coerce_raw_scalar() -> None:
+    """R2 회귀 가드: raw scalar를 float 경유 없이 Decimal(str(...))로 변환해야 한다."""
+
+    class RawScalar:
+        def __str__(self) -> str:
+            return "71500.10"
+
+        def __float__(self) -> float:
+            raise AssertionError("must not float-coerce before Decimal")
+
+    assert _stringify_close_price(RawScalar()) == "71500.10"
+
+
 def test_fetch_live_price_snapshot_writes_generic_price_json(tmp_path: Path) -> None:
     snapshot_path = fetch_live_price_snapshot(
         provider_symbol="005930.KS",
