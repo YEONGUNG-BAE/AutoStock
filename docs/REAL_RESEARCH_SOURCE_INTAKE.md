@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented** — DART live API/corp-code/API key deferred to 3B  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0** DART live-smoke design + fixture-first guardrails **documented** (not implemented); DART live HTTP **3B1–3B2+**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -378,6 +378,129 @@ Implementation must verify official id fields before coding.
 
 ---
 
+## 3B DART live-smoke design
+
+> **3B0 (this section):** design and fixture-first guardrails only. No live OpenDART HTTP, no new dependencies, no API key reads, no ops code changes.
+
+### Purpose
+
+- Fetch real DART disclosure data **only** under explicit operator command (future **3B2**).
+- Convert the live HTTP response into an **immutable raw snapshot** on disk.
+- **Replay** that snapshot through the **existing 3A** path (`DartDisclosureSnapshotReplayFetcher` → `DartDisclosureAdapter` → `DisclosureRecord` → `disclosure_record_to_source_record()`).
+- Emit **8B-compatible JSONL** for the unchanged `ops/research_source_intake.py` chain.
+- Keep DART `DISCLOSURE` as **symbol-level Scout context** via **3A.1** (`market=None`).
+- Keep **`PRICE`** as the source of **8C symbol coverage** (DART never substitutes for `(market, symbol)` coverage).
+
+**Target architecture (mandatory):**
+
+```text
+OpenDART live fetch
+  → immutable raw DART live snapshot
+  → DART snapshot replay/normalization path from 3A
+  → DartDisclosureAdapter
+  → DisclosureRecord
+  → disclosure_record_to_source_record()
+  → DateIdSourceRecord JSONL
+  → existing 8B intake
+  → Date.md/store
+  → Scout context via 3A.1
+```
+
+### Non-goals
+
+| Non-goal | Rationale |
+|---|---|
+| Autonomous trading | LLM decides; fetchers do not trade. |
+| Broker / KIS / PaperLoop execution | v1 intake stops at 8B → 8I no-write rehearsal. |
+| Scheduling / launchd / cron | Operator-triggered only in v1. |
+| Scout / Allocator / Analysis automation | Manual LLM handoff unchanged. |
+| Date-ID store bypass | **8B normal** remains the only store writer. |
+| Direct `DateIdSourceRecord` from live HTTP | Violates snapshot→replay boundary ([§3B Required boundary](#required-boundary)). |
+| Live API work in **3B0** | Docs-only; no network in this step. |
+| 30-trading-day pilot start | Separate readiness decision. |
+
+### Required boundary
+
+Live DART HTTP must **not** directly construct `DateIdSourceRecord`. The **only** allowed path:
+
+```text
+live response → raw snapshot → existing DART replay fetcher/adapter/mapper
+```
+
+Equivalent chain:
+
+```text
+DART live HTTP → raw snapshot → 3A replay path → 8B JSONL
+```
+
+Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. Normalization reuses `DartDisclosureSnapshotReplayFetcher` and existing mappers — same as FRED (1B) and yfinance PRICE (2B).
+
+### Snapshot immutability
+
+- Raw snapshots are **never overwritten** once written (same policy as FRED/yfinance live-smoke).
+- `--force` may apply **only** to output JSONL staging paths, **not** to raw snapshot files.
+- Snapshot path collision must **fail closed** before JSONL write (operator must pick a new path or new day folder).
+- Re-running live-smoke the same day creates a **new** snapshot file; operator merges/replaces staged JSONL consciously.
+
+### Secret handling
+
+- OpenDART API key (`DART_API_KEY` or equivalent) must **never** appear in: raw snapshot body, staged JSONL, `Date.md`, store rows, logs, stdout, stderr, or error JSON payloads.
+- Request metadata in snapshots may record **sanitized** fields only (e.g. env var **name**, key **present** boolean) — **never** the key value.
+- Later-phase tests (**3B1+**) must include **no-leak** assertions (mirror FRED 1B / yfinance 2B hardening).
+
+### Corp-code mapping
+
+- OpenDART list/detail APIs typically require a **provider-specific** company identifier (corp code), not necessarily the internal AutoStock universe `symbol`.
+- **3B design separates:**
+  - **Internal `symbol`** — e.g. `SYNTH-KR-0001` in `config/universe.paper.toml.example`
+  - **Provider corp code / ticker / DART identifier** — passed explicitly in a later phase (`--corp-code`, config table, or operator mapping file)
+- Do **not** assume internal `symbol` is directly usable by OpenDART without an explicit mapping step.
+- Corp-code download/cache is **3B3** optional hardening, not required for first live-smoke.
+
+### Date-ID allocation
+
+- Live DART may return **multiple** disclosures per fetch; keep **3A** policy:
+  - Replay/normalize stage reads **store state only** (plus in-memory reservation during a single fetch invocation).
+  - Date-ID allocation uses store-seeded canonical logic + in-memory reservation (same as 3A replay).
+  - **Fetch stage does not write store.**
+  - **`ops/research_source_intake.py` normal mode** remains the **only** store writer.
+- **Staging order warning:** run **8B normal** for prior source outputs (FRED, PRICE, etc.) **before** DART replay/live normalization so Date-ID allocation sees existing store state. Unstaged JSONL Date-IDs are **not** visible to allocation during fetch.
+
+### 8C / Scout semantics
+
+| Rule | Behavior |
+|---|---|
+| DART `DISCLOSURE` | `market=None` preserved end-to-end |
+| 8C symbol coverage | Satisfied by **`PRICE`** (or other `(market, symbol)` records), **not** DART |
+| DART-only + `--require-symbol-coverage` | Must **fail** (unchanged) |
+| Scout context (3A.1) | Include when `fact_type == DISCLOSURE`, symbol matches scope-enabled universe symbol, `market is None` |
+| Combined smoke | FRED `MACRO` + yfinance/generic `PRICE` + DART `DISCLOSURE` in one Scout packet — **verified** at runtime; PRICE supplies coverage, DART adds context |
+
+### Fixture-first plan
+
+| Phase | Scope | Network | Notes |
+|---|---|---|---|
+| **3B0** | Design + guardrails (this doc) | None | No code, no tests, no deps |
+| **3B1** | Fixture-first live snapshot normalizer + fake transport | **Fake HTTP only** in tests | Golden raw snapshot fixtures; snapshot → 3A replay → 8B `--validate-only`; snapshot collision tests; no-secret-leak tests; DART-only 8C coverage failure preserved; combined FRED+PRICE+DART Scout context preserved |
+| **3B2** | Operator-triggered DART `--live-smoke` | Real OpenDART (operator explicit) | No scheduler, no background job, no automatic market run, no write-mode paper loop, no broker/KIS |
+| **3B3** | Optional hardening | Real (operator) | Rate limits, pagination, corp-code cache, retry/backoff, error-schema guards |
+
+**3B1 test requirements (implementation PR, not 3B0):**
+
+- No real DART network in CI or unit tests.
+- Injected / fake HTTP transport only.
+- Golden raw snapshot fixtures under `tests/fixtures/research/dart/` (live-shaped bodies distinct from 3A replay fixtures if needed).
+- Path: snapshot → `DartDisclosureSnapshotReplayFetcher` → JSONL → 8B `--validate-only`.
+- Assert: DART-only `--require-symbol-coverage` still fails; combined macro + price + disclosure Scout packet still succeeds when `require_symbol_coverage=False` and PRICE present for coverage.
+- Assert: snapshot collision fails before JSONL write; API key never in snapshot/stdout/stderr/error JSON.
+
+**3B2 operator constraints (implementation PR, not 3B0):**
+
+- Explicit CLI invocation only (`ops/fetch_research_sources.py --live-smoke --source dart` or equivalent).
+- No launchd/cron, no PaperLoop hook, no KIS, no ledger writes.
+
+---
+
 ## 11. Recommended first source
 
 ### Choice: **FRED (`FactType.MACRO`)**
@@ -527,7 +650,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 |---|---|
 | **KIS read-only KR `PRICE`** | Explicitly out of v1 ([G3](#g3-data-source-boundary-vs-deferred-kis)); see `docs/TECH_DEBT.md` |
 | **yfinance live `PRICE` fetcher** | **2B implemented** — live-smoke only; writes generic PRICE snapshot then replays via 2A |
-| **DART live API / corp-code / API key** | **3B deferred** — 3A replay/fixture only |
+| **DART live API / corp-code / API key** | **3B0 documented** — live-smoke design + fixture-first plan in [§3B](#3b-dart-live-smoke-design); **3B1** fake transport + fixtures; **3B2** operator live-smoke; **3B3** hardening |
 | **`FactType.NEWS` intake** | No Phase 6 news adapter in repo; Finnhub/Naver env names exist in `config.full.example` only |
 | **`FactType.FLOW` / `FX`** | No adapter yet — new intermediate models + mapping PR required before fetcher |
 | **New `FactType` enum members** | Not in v1; requires domain rule review |

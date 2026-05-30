@@ -261,6 +261,15 @@ DART-only Scout packet (8D): `require_symbol_coverage=False`이면 symbol-matche
 
 **Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md).
 
+### DART live-smoke planning boundary
+
+- **3B0 is docs-only** — DART live OpenDART HTTP is **not** implemented yet.
+- Future DART live must follow: **live HTTP → immutable raw snapshot → existing 3A replay path → 8B JSONL** (never direct `DateIdSourceRecord` from HTTP).
+- Do **not** put API keys in snapshot files, JSONL, `Date.md`, logs, or committed runtime artifacts; use env var names only in config examples.
+- Do **not** run real OpenDART API until **3B2** and an explicit operator `--live-smoke` command exist.
+- Combined FRED+PRICE+DART smoke (8B/8C/8D) is **verified** with replay/fixture paths; live DART remains a separate follow-on.
+- Detail: [`docs/REAL_RESEARCH_SOURCE_INTAKE.md` §3B](REAL_RESEARCH_SOURCE_INTAKE.md#3b-dart-live-smoke-design).
+
 ### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
 
 로컬 universe 파일 준비:
