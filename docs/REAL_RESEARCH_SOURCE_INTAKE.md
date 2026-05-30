@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0** DART live-smoke design + fixture-first guardrails **documented** (not implemented); DART live HTTP **3B1–3B2+**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0** design **documented**; **3B1** live-shaped snapshot builder + fake transport tests **implemented** (`src/data/dart_live_client.py`); real OpenDART HTTP / `--live-smoke --source dart` **3B2+**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -481,7 +481,7 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 | Phase | Scope | Network | Notes |
 |---|---|---|---|
 | **3B0** | Design + guardrails (this doc) | None | No code, no tests, no deps |
-| **3B1** | Fixture-first live snapshot normalizer + fake transport | **Fake HTTP only** in tests | Golden raw snapshot fixtures; snapshot → 3A replay → 8B `--validate-only`; snapshot collision tests; no-secret-leak tests; DART-only 8C coverage failure preserved; combined FRED+PRICE+DART Scout context preserved |
+| **3B1** | Fixture-first live snapshot normalizer + fake transport | **Fake HTTP only** in tests | **Implemented:** `src/data/dart_live_client.py` + `tests/test_dart_live_client.py`; snapshot → 3A replay → 8B `--validate-only`; collision + no-leak guards; no real network |
 | **3B2** | Operator-triggered DART `--live-smoke` | Real OpenDART (operator explicit) | No scheduler, no background job, no automatic market run, no write-mode paper loop, no broker/KIS |
 | **3B3** | Optional hardening | Real (operator) | Rate limits, pagination, corp-code cache, retry/backoff, error-schema guards |
 

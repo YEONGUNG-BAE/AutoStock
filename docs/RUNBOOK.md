@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1233 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1253 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1233 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1253 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -263,6 +263,7 @@ DART-only Scout packet (8D): `require_symbol_coverage=False`이면 symbol-matche
 
 ### DART live-smoke planning boundary
 
+- **3B1 implemented (fake transport only):** `src/data/dart_live_client.py` builds live-shaped snapshots via injected transport; tests prove snapshot → 3A replay → 8B validate-only. **No real network in CI.**
 - **3B0 is docs-only** — DART live OpenDART HTTP is **not** implemented yet.
 - Future DART live must follow: **live HTTP → immutable raw snapshot → existing 3A replay path → 8B JSONL** (never direct `DateIdSourceRecord` from HTTP).
 - Do **not** put API keys in snapshot files, JSONL, `Date.md`, logs, or committed runtime artifacts; use env var names only in config examples.
@@ -477,7 +478,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1233 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1253 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

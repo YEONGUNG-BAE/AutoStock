@@ -303,6 +303,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "src" / "data" / "price_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "price_live_client.py",
         REPO_ROOT / "src" / "data" / "dart_source_fetcher.py",
+        REPO_ROOT / "src" / "data" / "dart_live_client.py",
     ]
     forbidden = (
         "requests",
