@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented** (`source_record_context_selector.py`, `--context-budget-profile kr-real-smoke`); **3E5+** expand to 3–5 real companies **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3E5+** sector discovery / 3–5 company expansion **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -637,6 +637,33 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 ```
 
 Profile defaults: macro/global latest **5** per `(fact_type, source_name)`; PRICE latest **1** per `(market, symbol, source_name)`; DISCLOSURE latest **5** per `(symbol, source_name)`. Store unchanged; Scout follows capped Date.md.
+
+---
+
+## 3F Fixture-first KR provider mapping generator (3F1)
+
+> **3F1 (implemented):** operator-curated KR candidate TOML + local corp-code XML/ZIP → generated universe TOML + provider mapping TOML. DART `corp_code` is resolver-proven; candidate file must not include `corp_code`. yfinance `provider_symbol` is explicit in candidate file. **Not** sector/universe discovery.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3F1** | `kr_provider_mapping_generator.py` + `ops/generate_kr_provider_mapping.py` + fixture candidates | None |
+| **Next** | **3E5+** sector discovery / expand to 3–5 companies | Deferred |
+
+**3F1 ops helper (local files only):**
+
+```bash
+PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
+  --candidates tests/fixtures/research/kr_candidates/kr_real_candidates.sample.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_sample.xml \
+  --universe-out /tmp/universe.kr-real.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.generated.toml \
+  --universe-name kr-real-generated-v1 \
+  --provider-mapping-name kr-real-provider-mappings-generated-v1 \
+  --force \
+  --json
+```
+
+Post-generate validation: `ops/validate_provider_mapping.py --universe … --provider-mapping … --json`
 
 ---
 

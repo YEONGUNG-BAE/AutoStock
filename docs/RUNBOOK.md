@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1402 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1425 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1402 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1425 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -451,6 +451,27 @@ PYTHONPATH=src uv run python ops/build_kr_real_combined_context_smoke.py \
 
 Context budget profile `kr-real-smoke` caps Date.md export only (store unchanged): macro/global latest 5 per `(fact_type, source_name)`, PRICE latest 1 per `(market, symbol, source_name)`, DISCLOSURE latest 5 per `(symbol, source_name)`. Scout follows capped Date.md date_ids; 60KB guard remains active.
 
+**3F1 KR universe/provider mapping generator (local files only; no live API/env/network):**
+
+```bash
+PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
+  --candidates tests/fixtures/research/kr_candidates/kr_real_candidates.sample.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_sample.xml \
+  --universe-out /tmp/universe.kr-real.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.generated.toml \
+  --universe-name kr-real-generated-v1 \
+  --provider-mapping-name kr-real-provider-mappings-generated-v1 \
+  --force \
+  --json
+
+PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
+  --universe /tmp/universe.kr-real.generated.toml \
+  --provider-mapping /tmp/provider_mappings.kr-real.generated.toml \
+  --json
+```
+
+Candidate TOML must not include `corp_code`; DART `corp_code`/`corp_name` come from local corp-code XML/ZIP via existing resolver. yfinance `provider_symbol` must be explicit (`.KS`/`.KQ`). Sector discovery remains deferred.
+
 Expand to 3–5 real companies remains **deferred** (3E5+).
 
 ```bash
@@ -686,7 +707,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1402 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1425 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
