@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1359 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1369 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1359 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1369 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -312,7 +312,40 @@ PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
   --json
 ```
 
-Static sample includes two locally verified KR companies (Samsung Electronics `005930`, SK hynix `000660`). Live yfinance/DART combined smoke is **3E2+** — not in this step.
+Static sample includes two locally verified KR companies (Samsung Electronics `005930`, SK hynix `000660`).
+
+**3E2 KR real sample live PRICE smoke (operator explicit; yfinance only — no DART/FRED API key):**
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/run_kr_real_price_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --provider-mapping config/provider_mappings.kr-real.sample.toml \
+  --store "runtime/research/${DAY}/date_id_sources.kr_real_price.sqlite3" \
+  --snapshot-dir "runtime/research/${DAY}/sources/price" \
+  --out-jsonl "/tmp/autostock_kr_real_price_260530.jsonl" \
+  --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --force \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl /tmp/autostock_kr_real_price_260530.jsonl \
+  --validate-only \
+  --json
+```
+
+Optional 8C symbol coverage after 8B normal:
+
+```bash
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe config/universe.kr-real.sample.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --require-symbol-coverage \
+  --json
+```
+
+DART disclosure live-smoke for real symbols is **3E3+** — not in this step.
 
 ```bash
 DAY=2026-05-30
@@ -547,7 +580,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1359 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1369 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
