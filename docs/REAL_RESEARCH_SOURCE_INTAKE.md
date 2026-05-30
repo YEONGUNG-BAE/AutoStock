@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented**; 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (urllib isolated in `fred_http_client.py`)  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented** — DART live API/corp-code/API key deferred to 3B  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -227,7 +227,7 @@ source_name = "dart"
 | `fred` | [FRED API](https://fred.stlouisfed.org/docs/api/fred/) | `FredMacroAdapter` | `MacroDataPoint` → `macro_data_point_to_source_record()` | `MACRO` | `series_id` in payload; `summary` cites series + value + observation time |
 | `price` | generic local price snapshot (replay/fixture) | `GenericPriceSnapshotReplayFetcher` | `MarketDataPoint` → `market_data_point_to_source_record()` | `PRICE` | `symbol`, `market`; **2A implemented** — satisfies universe symbol coverage via replay |
 | `yfinance` | Yahoo Finance (yfinance library; **unofficial external provider**) | `price_live_client` → `GenericPriceSnapshotReplayFetcher` | `MarketDataPoint` → `market_data_point_to_source_record()` | `PRICE` | **2B live-smoke implemented** — live fetch writes generic PRICE snapshot then replays via 2A; operator maps `--provider-symbol` to universe `--symbol`/`--market` |
-| `dart` | [DART Open API](https://opendart.fss.or.kr/) | `DartDisclosureAdapter` | `DisclosureRecord` → `disclosure_record_to_source_record()` | `DISCLOSURE` | One disclosure → one record; `source_url` when available |
+| `dart` | DART-like local disclosure snapshot (replay/fixture) | `DartDisclosureSnapshotReplayFetcher` | `DisclosureRecord` → `disclosure_record_to_source_record()` | `DISCLOSURE` | **3A implemented** — multi-record; auto Date-ID via `--store`; `market=None` (does not satisfy 8C symbol coverage) |
 | `kis` | KIS Open API | — | — | — | **DEFERRED** — not v1 ([G3](#g3-data-source-boundary-vs-deferred-kis)) |
 | `news` | TBD (Finnhub/Naver/etc.) | — | — | `NEWS` | **DEFERRED** — no adapter ops path in v1 |
 
@@ -527,7 +527,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 |---|---|
 | **KIS read-only KR `PRICE`** | Explicitly out of v1 ([G3](#g3-data-source-boundary-vs-deferred-kis)); see `docs/TECH_DEBT.md` |
 | **yfinance live `PRICE` fetcher** | **2B implemented** — live-smoke only; writes generic PRICE snapshot then replays via 2A |
-| **DART `DISCLOSURE` fetcher** | Auth, corp-code map, rate limits, schema verification |
+| **DART live API / corp-code / API key** | **3B deferred** — 3A replay/fixture only |
 | **`FactType.NEWS` intake** | No Phase 6 news adapter in repo; Finnhub/Naver env names exist in `config.full.example` only |
 | **`FactType.FLOW` / `FX`** | No adapter yet — new intermediate models + mapping PR required before fetcher |
 | **New `FactType` enum members** | Not in v1; requires domain rule review |

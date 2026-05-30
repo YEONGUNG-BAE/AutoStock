@@ -16,6 +16,7 @@ from typing import Any, Literal, TextIO
 
 from data.fred_http_client import DEFAULT_API_KEY_ENV, FredHttpError
 from data.fred_source_fetcher import fetch_live_snapshot
+from data.date_id_store import SQLiteDateIdSourceStore
 from data.research_source_fetcher import (
     UnsupportedSourceError,
     get_source_fetcher,
@@ -52,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--symbol",
         default=None,
-        help="requested symbol (required for --replay --source price)",
+        help="requested symbol (required for --replay --source price/dart)",
     )
     parser.add_argument(
         "--market",
@@ -72,7 +73,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--date-id",
         default=None,
-        help="Date-ID token YYMMDD-N (required for --replay and --live-smoke JSONL staging)",
+        help="Date-ID token YYMMDD-N (required for fred/price replay and live-smoke; not used for dart replay)",
+    )
+    parser.add_argument(
+        "--store",
+        default=None,
+        help="SQLite Date-ID store for --replay --source dart Date-ID allocation",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="max disclosures for --replay --source dart (default: 10)",
     )
     parser.add_argument(
         "--as-of",
@@ -269,6 +281,66 @@ def run_dry_run(
         series_id=series_id,
         symbol=symbol,
         market=market,
+        out_jsonl=out_jsonl,
+    )
+
+
+def _validate_store_parent_exists(store_path: Path) -> None:
+    if not store_path.parent.is_dir():
+        raise FetchResearchSourcesError(
+            "args",
+            f"store parent directory does not exist: {store_path.parent}",
+        )
+
+
+def run_replay_dart(
+    *,
+    symbol: str,
+    as_of: datetime,
+    snapshot_path: Path,
+    out_jsonl: Path,
+    force: bool,
+    store_path: Path,
+    limit: int,
+) -> dict[str, Any]:
+    if limit <= 0:
+        raise FetchResearchSourcesError("args", "--limit must be greater than 0")
+    _validate_store_parent_exists(store_path)
+
+    try:
+        fetcher = get_source_fetcher("dart")
+    except UnsupportedSourceError as exc:
+        raise FetchResearchSourcesError("args", str(exc)) from exc
+
+    store = SQLiteDateIdSourceStore(store_path)
+    try:
+        try:
+            records = fetcher.normalize_snapshot(
+                snapshot_path,
+                symbol=symbol,
+                as_of=as_of,
+                store=store,
+                limit=limit,
+            )
+        except FileNotFoundError as exc:
+            raise FetchResearchSourcesError("snapshot", str(exc)) from exc
+        except ValueError as exc:
+            raise FetchResearchSourcesError("normalize", str(exc)) from exc
+    finally:
+        store.close()
+
+    try:
+        write_date_id_source_records_jsonl(out_jsonl, records, force=force)
+    except FileExistsError as exc:
+        raise FetchResearchSourcesError("write", str(exc)) from exc
+
+    return _success_payload(
+        mode="replay",
+        stage="complete",
+        source=fetcher.source_key,
+        symbol=symbol,
+        records_count=len(records),
+        snapshot_path=snapshot_path,
         out_jsonl=out_jsonl,
     )
 
@@ -520,22 +592,40 @@ def main(argv: list[str] | None = None) -> int:
                     f"live-smoke unsupported for source: {args.source!r}",
                 )
         else:
-            date_id = _require_value(args.date_id, flag="--date-id")
             as_of = _parse_as_of(_require_value(args.as_of, flag="--as-of"))
             snapshot_path = _require_path(args.snapshot, flag="--snapshot")
             out_jsonl = _require_path(args.out_jsonl, flag="--out-jsonl")
             normalized_source = args.source.strip().lower()
-            payload = run_replay(
-                source=args.source,
-                date_id=date_id,
-                as_of=as_of,
-                snapshot_path=snapshot_path,
-                out_jsonl=out_jsonl,
-                force=args.force,
-                series_id=args.series_id if normalized_source == "fred" else None,
-                symbol=args.symbol if normalized_source == "price" else None,
-                market=args.market if normalized_source == "price" else None,
-            )
+            if normalized_source == "dart":
+                if args.date_id:
+                    raise FetchResearchSourcesError(
+                        "args",
+                        "--date-id is not supported for --replay --source dart",
+                    )
+                symbol = _require_value(args.symbol, flag="--symbol")
+                store_path = _require_path(args.store, flag="--store")
+                payload = run_replay_dart(
+                    symbol=symbol,
+                    as_of=as_of,
+                    snapshot_path=snapshot_path,
+                    out_jsonl=out_jsonl,
+                    force=args.force,
+                    store_path=store_path,
+                    limit=args.limit,
+                )
+            else:
+                date_id = _require_value(args.date_id, flag="--date-id")
+                payload = run_replay(
+                    source=args.source,
+                    date_id=date_id,
+                    as_of=as_of,
+                    snapshot_path=snapshot_path,
+                    out_jsonl=out_jsonl,
+                    force=args.force,
+                    series_id=args.series_id if normalized_source == "fred" else None,
+                    symbol=args.symbol if normalized_source == "price" else None,
+                    market=args.market if normalized_source == "price" else None,
+                )
     except FetchResearchSourcesError as exc:
         payload = _error_payload(stage=exc.stage, error=exc.message)
         _emit_result(payload, as_json=as_json, out=out)

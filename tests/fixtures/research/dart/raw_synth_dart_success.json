@@ -1,0 +1,24 @@
+{
+  "source_key": "dart",
+  "external_service": "dart-fixture",
+  "symbol": "SYNTH-KR-0001",
+  "fetched_at": "2026-05-30T13:00:00+09:00",
+  "disclosures": [
+    {
+      "title": "Synthetic DART disclosure fixture 1",
+      "source_timestamp": "2026-05-30T09:00:00+09:00",
+      "source_url": "https://dart.fss.or.kr/example/1",
+      "receipt_no": "202605300001",
+      "corp_name": "Synthetic Corp",
+      "report_type": "fixture"
+    },
+    {
+      "title": "Synthetic DART disclosure fixture 2",
+      "source_timestamp": "2026-05-30T10:00:00+09:00",
+      "source_url": "https://dart.fss.or.kr/example/2",
+      "receipt_no": "202605300002",
+      "corp_name": "Synthetic Corp",
+      "report_type": "fixture"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from decision.canonical_json import canonical_json_dumps
@@ -33,6 +34,10 @@ def get_source_fetcher(source_key: str) -> SourceFetcher:
         from data.price_source_fetcher import GenericPriceSnapshotReplayFetcher
 
         return GenericPriceSnapshotReplayFetcher()
+    if normalized == "dart":
+        from data.dart_source_fetcher import DartDisclosureSnapshotReplayFetcher
+
+        return DartDisclosureSnapshotReplayFetcher()
     raise UnsupportedSourceError(f"unsupported source: {source_key!r}")
 
 

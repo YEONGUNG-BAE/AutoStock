@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1204 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1228 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1204 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1228 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -222,7 +222,42 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 # 기대: "missing_symbols": []
 ```
 
-**Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). v1 live-smoke(1B) 구현 전까지 operator-prepared JSONL 경로도 병행 가능.
+**DART DISCLOSURE replay (fixture-only; no `--date-id`; uses `--store` for Date-ID allocation):**
+
+운영 순서: **먼저** FRED/PRICE 등 prior staged JSONL에 대해 8B normal을 실행해 store에 Date-ID를 반영한 뒤, DART replay를 실행한다. DART fetch stage는 store에 기록하지 않으며, unstaged JSONL의 Date-ID는 allocation에 반영되지 않는다.
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --replay \
+  --source dart \
+  --symbol SYNTH-KR-0001 \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --as-of 2026-05-30T13:00:00+09:00 \
+  --snapshot tests/fixtures/research/dart/raw_synth_dart_success.json \
+  --out-jsonl "runtime/research/${DAY}/research_sources.dart.jsonl" \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.dart.jsonl" \
+  --validate-only \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.dart.jsonl" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --json
+
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --json
+# DART-only: --require-symbol-coverage 사용 금지 (DISCLOSURE records have market=None)
+```
+
+**Post-Foundation (design):** broader real source intake 설계는 [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md).
 
 ### Foundation 8C — Universe v0 + Date.md prompt-reference smoke
 
@@ -429,7 +464,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1204 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1228 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

@@ -24,6 +24,10 @@ PRICE_MISMATCHED_SYMBOL_SNAPSHOT = (
     REPO_ROOT / "tests" / "fixtures" / "research" / "price" / "raw_synth_kr_mismatched_symbol.json"
 )
 EXAMPLE_UNIVERSE = REPO_ROOT / "config" / "universe.paper.toml.example"
+DART_SUCCESS_SNAPSHOT = (
+    REPO_ROOT / "tests" / "fixtures" / "research" / "dart" / "raw_synth_dart_success.json"
+)
+DART_AS_OF = "2026-05-30T13:00:00+09:00"
 
 AS_OF = "2026-05-29T09:00:00+09:00"
 SECRET = "SECRET_FRED_KEY_TEST"
@@ -96,22 +100,25 @@ def _run_date_md_smoke_cli(
     universe_path: Path,
     date_md_path: Path,
     store_path: Path,
+    require_symbol_coverage: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    argv = [
+        sys.executable,
+        str(SMOKE_SCRIPT),
+        "--universe",
+        str(universe_path),
+        "--date-md",
+        str(date_md_path),
+        "--store",
+        str(store_path),
+        "--json",
+    ]
+    if require_symbol_coverage:
+        argv.append("--require-symbol-coverage")
     return subprocess.run(
-        [
-            sys.executable,
-            str(SMOKE_SCRIPT),
-            "--universe",
-            str(universe_path),
-            "--date-md",
-            str(date_md_path),
-            "--store",
-            str(store_path),
-            "--require-symbol-coverage",
-            "--json",
-        ],
+        argv,
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
@@ -295,6 +302,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "src" / "data" / "fred_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "price_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "price_live_client.py",
+        REPO_ROOT / "src" / "data" / "dart_source_fetcher.py",
     ]
     forbidden = (
         "requests",
@@ -1275,6 +1283,261 @@ def test_price_live_smoke_json_and_verbose_keeps_stdout_pure_json(
             extra=["--verbose"],
         )
     )
+    assert result.returncode == 0, result.stderr
+    json.loads(result.stdout)
+    assert "verbose:" in result.stderr
+
+
+def _run_dart_replay_cli(
+    tmp_path: Path,
+    *,
+    out_jsonl: Path | None = None,
+    store_path: Path | None = None,
+    extra: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    resolved_out = out_jsonl or (tmp_path / "research_sources.jsonl")
+    resolved_store = store_path or (tmp_path / "date_id_sources.sqlite3")
+    argv = [
+        "--replay",
+        "--source",
+        "dart",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--store",
+        str(resolved_store),
+        "--as-of",
+        DART_AS_OF,
+        "--snapshot",
+        str(DART_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(resolved_out),
+        "--json",
+    ]
+    if extra:
+        argv.extend(extra)
+    return _run_fetch_cli(*argv)
+
+
+def test_cli_replay_dart_json_writes_jsonl(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    result = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=store_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "replay"
+    assert payload["source"] == "dart"
+    assert payload["symbol"] == "SYNTH-KR-0001"
+    assert payload["records_count"] == 2
+    lines = out_jsonl.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["fact_type"] == "disclosure"
+    assert first["date_id"] == "260530-1"
+
+
+def test_cli_replay_dart_jsonl_round_trips_through_8b_validate_only(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    replay = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl)
+    assert replay.returncode == 0, replay.stderr
+
+    intake = _run_intake_validate(out_jsonl)
+    assert intake.returncode == 0, intake.stderr
+    payload = json.loads(intake.stdout)
+    assert payload["status"] == "ok"
+    assert payload["records_valid"] == 2
+
+
+def test_cli_replay_dart_8b_normal_and_8c_smoke_without_symbol_coverage(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    date_md_path = tmp_path / "Date.md"
+    universe_path = tmp_path / "universe.toml"
+    universe_path.write_text(EXAMPLE_UNIVERSE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    replay = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=store_path)
+    assert replay.returncode == 0, replay.stderr
+
+    intake = _run_intake_normal(
+        jsonl_path=out_jsonl,
+        store_path=store_path,
+        date_md_out=date_md_path,
+    )
+    assert intake.returncode == 0, intake.stderr
+
+    smoke = _run_date_md_smoke_cli(
+        universe_path=universe_path,
+        date_md_path=date_md_path,
+        store_path=store_path,
+        require_symbol_coverage=False,
+    )
+    assert smoke.returncode == 0, smoke.stderr
+    payload = json.loads(smoke.stdout)
+    assert payload["status"] == "ok"
+    assert payload["missing_symbols"] != []
+
+
+def test_cli_replay_dart_8c_require_symbol_coverage_fails_for_dart_only(
+    tmp_path: Path,
+) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    date_md_path = tmp_path / "Date.md"
+    universe_path = tmp_path / "universe.toml"
+    universe_path.write_text(EXAMPLE_UNIVERSE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=store_path).returncode == 0
+    assert (
+        _run_intake_normal(
+            jsonl_path=out_jsonl,
+            store_path=store_path,
+            date_md_out=date_md_path,
+        ).returncode
+        == 0
+    )
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    smoke = subprocess.run(
+        [
+            sys.executable,
+            str(SMOKE_SCRIPT),
+            "--universe",
+            str(universe_path),
+            "--date-md",
+            str(date_md_path),
+            "--store",
+            str(store_path),
+            "--require-symbol-coverage",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    assert smoke.returncode != 0
+    payload = json.loads(smoke.stdout)
+    assert payload["status"] == "error"
+
+
+def test_cli_replay_dart_does_not_write_store_during_fetch(tmp_path: Path) -> None:
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+    before_store = SQLiteDateIdSourceStore(store_path)
+    before_count = len(before_store.list_records())
+    before_store.close()
+
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    assert _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=store_path).returncode == 0
+
+    after_store = SQLiteDateIdSourceStore(store_path)
+    try:
+        assert len(after_store.list_records()) == before_count
+    finally:
+        after_store.close()
+    assert out_jsonl.is_file()
+
+
+def test_cli_replay_dart_requires_store(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "dart",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--as-of",
+        DART_AS_OF,
+        "--snapshot",
+        str(DART_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "--store" in payload["error"]
+
+
+def test_cli_replay_dart_fails_if_store_parent_missing(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    missing_parent = tmp_path / "missing" / "date_id_sources.sqlite3"
+    result = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=missing_parent)
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "store parent directory does not exist" in payload["error"]
+
+
+def test_cli_replay_dart_accepts_empty_new_store_file(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "new_store.sqlite3"
+    result = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, store_path=store_path)
+    assert result.returncode == 0, result.stderr
+    assert store_path.is_file()
+
+
+def test_cli_replay_dart_rejects_date_id(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    result = _run_dart_replay_cli(
+        tmp_path,
+        out_jsonl=out_jsonl,
+        store_path=store_path,
+        extra=["--date-id", "260530-1"],
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "--date-id is not supported" in payload["error"]
+
+
+def test_cli_replay_dart_requires_symbol(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    result = _run_fetch_cli(
+        "--replay",
+        "--source",
+        "dart",
+        "--store",
+        str(store_path),
+        "--as-of",
+        DART_AS_OF,
+        "--snapshot",
+        str(DART_SUCCESS_SNAPSHOT),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "--symbol" in payload["error"]
+
+
+def test_cli_replay_dart_rejects_limit_zero(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    result = _run_dart_replay_cli(
+        tmp_path,
+        out_jsonl=out_jsonl,
+        store_path=store_path,
+        extra=["--limit", "0"],
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "--limit" in payload["error"]
+
+
+def test_cli_replay_dart_json_and_verbose_keeps_stdout_pure_json(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_dart_replay_cli(tmp_path, out_jsonl=out_jsonl, extra=["--verbose"])
     assert result.returncode == 0, result.stderr
     json.loads(result.stdout)
     assert "verbose:" in result.stderr
