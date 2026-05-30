@@ -1,0 +1,39 @@
+# Static KR real-company provider mapping registry (3E1).
+# corp_code values verified against tests/fixtures/research/dart/corp_code_sample.xml.
+# Local-file only — no live API calls.
+
+version = 1
+name = "kr-real-provider-mappings-v1"
+description = "Provider mappings for static KR real-company sample universe."
+
+[[mappings]]
+symbol = "005930"
+market = "KR"
+display_name = "Samsung Electronics"
+enabled = true
+stock_code = "005930"
+
+[mappings.yfinance]
+provider_symbol = "005930.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "005930"
+corp_name = "삼성전자"
+
+[[mappings]]
+symbol = "000660"
+market = "KR"
+display_name = "SK hynix"
+enabled = true
+stock_code = "000660"
+
+[mappings.yfinance]
+provider_symbol = "000660.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00164779"
+stock_code = "000660"
+corp_name = "SK하이닉스"

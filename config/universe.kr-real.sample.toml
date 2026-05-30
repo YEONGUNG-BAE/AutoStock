@@ -1,0 +1,20 @@
+# Static KR real-company sample universe (3E1).
+# Local-file only — not for live trading. Copy/adapt for operator smoke prep.
+# Do not commit runtime universe files with secrets.
+
+version = 1
+name = "kr-real-sample-v0"
+description = "Static KR real-company sample universe for provider mapping and intake smoke preparation."
+base_market = "KR"
+
+[[symbols]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Samsung Electronics"
+
+[[symbols]]
+symbol = "000660"
+market = "KR"
+enabled = true
+display_name = "SK hynix"

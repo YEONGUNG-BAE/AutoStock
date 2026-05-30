@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); real universe migration **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented** (`config/universe.kr-real.sample.toml`, `config/provider_mappings.kr-real.sample.toml`); **3E2+** live-smoke repeat and universe expansion **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -531,7 +531,8 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 | Phase | Scope | Network |
 |---|---|---|
 | **3D1** | `src/data/provider_mapping_registry.py` + `config/provider_mappings.paper.toml.example` | None |
-| **Next** | Operator-defined real 3–5 company universe migration | Design follow-on |
+| **3E1** | `config/universe.kr-real.sample.toml` + `config/provider_mappings.kr-real.sample.toml` | None |
+| **Next** | **3E2+** live FRED+PRICE+DART combined smoke repeat; expand to 3–5 companies after live corp-code verification | Operator explicit |
 
 **Registry rules:**
 
@@ -542,6 +543,35 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 - Disabled registry entries still pass schema validation but are excluded from enabled coverage counts.
 
 **Ops helper:** `ops/validate_provider_mapping.py --universe … --provider-mapping … --json`
+
+---
+
+## 3E Static KR real-company sample universe (3E1)
+
+> **3E1 (implemented):** operator-defined static KR real-company sample universe + matching provider mapping registry. Local TOML only — no network, no env/API key, no Scout/Allocator/PaperLoop execution.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3E1** | `config/universe.kr-real.sample.toml` + `config/provider_mappings.kr-real.sample.toml` + `tests/test_kr_real_sample_universe.py` | None |
+| **Next** | **3E2+** repeat combined FRED+PRICE+DART live-smoke against real symbols; expand to 3–5 companies after live corp-code snapshot verification | Operator explicit |
+
+**3E1 universe (locally verified corp_code only):**
+
+| Symbol | display_name | DART corp_code (fixture source) |
+|---|---|---|
+| `005930` | Samsung Electronics | `00126380` — `tests/fixtures/research/dart/corp_code_sample.xml` |
+| `000660` | SK hynix | `00164779` — same fixture |
+
+Synthetic paper files (`config/universe.paper.toml.example`, `config/provider_mappings.paper.toml.example`) are unchanged. Additional real companies (Hyundai, NAVER, Kakao, etc.) are deferred until **3E2+** live corp-code master snapshot/resolver verification.
+
+**Ops helper:**
+
+```bash
+PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
+  --universe config/universe.kr-real.sample.toml \
+  --provider-mapping config/provider_mappings.kr-real.sample.toml \
+  --json
+```
 
 ---
 
