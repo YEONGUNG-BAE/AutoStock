@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError
@@ -293,6 +294,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "src" / "data" / "research_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "fred_source_fetcher.py",
         REPO_ROOT / "src" / "data" / "price_source_fetcher.py",
+        REPO_ROOT / "src" / "data" / "price_live_client.py",
     ]
     forbidden = (
         "requests",
@@ -301,7 +303,6 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         "urllib.request",
         "urllib.parse",
         "urllib.error",
-        "yfinance",
         "kis",
         "paperbroker",
         "paperlooprunner",
@@ -853,6 +854,427 @@ def test_cli_replay_price_json_and_verbose_keeps_stdout_pure_json(tmp_path: Path
         "--verbose",
     )
 
+    assert result.returncode == 0, result.stderr
+    json.loads(result.stdout)
+    assert "verbose:" in result.stderr
+
+
+YFINANCE_ALLOWED = REPO_ROOT / "src" / "data" / "price_live_client.py"
+
+
+def test_pyproject_contains_yfinance_dependency() -> None:
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "yfinance" in text
+
+
+def test_price_live_client_references_yfinance() -> None:
+    source = YFINANCE_ALLOWED.read_text(encoding="utf-8")
+    assert "yfinance" in source
+
+
+def test_yfinance_import_only_in_price_live_client() -> None:
+    """R3: production src/·ops/ 모듈 중 yfinance import는 price_live_client.py만 허용."""
+    for root in (REPO_ROOT / "src", REPO_ROOT / "ops"):
+        for path in root.rglob("*.py"):
+            if path.resolve() == YFINANCE_ALLOWED.resolve():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if "import yfinance" in stripped or stripped.startswith("from yfinance"):
+                    raise AssertionError(f"{path} must not import yfinance")
+
+
+class _PriceFakeILoc:
+    def __init__(self, values: list[float]) -> None:
+        self._values = values
+
+    def __getitem__(self, idx: int) -> float:
+        return self._values[idx]
+
+
+class _PriceFakeCloseSeries:
+    def __init__(self, values: list[float], indices: list[object]) -> None:
+        self._values = values
+        self.index = indices
+        self.iloc = _PriceFakeILoc(values)
+
+    def dropna(self) -> _PriceFakeCloseSeries:
+        return self
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+class _PriceFakeHistory:
+    def __init__(
+        self,
+        closes: list[float],
+        indices: list[object],
+        *,
+        columns: list[str] | None = None,
+    ) -> None:
+        self._closes = closes
+        self._indices = indices
+        self.columns = list(columns) if columns is not None else ["Close"]
+
+    def __len__(self) -> int:
+        return len(self._closes)
+
+    @property
+    def empty(self) -> bool:
+        return len(self._closes) == 0
+
+    def __getitem__(self, key: str) -> _PriceFakeCloseSeries:
+        if key == "Close":
+            return _PriceFakeCloseSeries(self._closes, self._indices)
+        raise KeyError(key)
+
+
+class _PriceFakeTicker:
+    def __init__(self, *, history: _PriceFakeHistory | None, currency: str | None = None) -> None:
+        self._history = history
+        self.info = {"currency": currency} if currency else {}
+
+    def history(self, period: str, interval: str) -> _PriceFakeHistory | None:
+        return self._history
+
+
+def _default_price_fake_ticker_factory(_provider_symbol: str) -> _PriceFakeTicker:
+    return _PriceFakeTicker(
+        history=_PriceFakeHistory(
+            closes=[71500.0],
+            indices=[datetime(2026, 5, 30, tzinfo=UTC)],
+        ),
+        currency="KRW",
+    )
+
+
+def _patch_price_live_with_ticker_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: Callable[[str], _PriceFakeTicker],
+) -> None:
+    import data.price_live_client as price_live_client
+
+    real_fetch = price_live_client.fetch_live_price_snapshot
+
+    def bound_fetch(**kwargs: object) -> Path:
+        if kwargs.get("ticker_factory") is None:
+            kwargs["ticker_factory"] = factory
+        return real_fetch(**kwargs)
+
+    monkeypatch.setattr(price_live_client, "fetch_live_price_snapshot", bound_fetch)
+
+
+def _patch_price_live_with_fake_ticker_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_price_live_with_ticker_factory(monkeypatch, _default_price_fake_ticker_factory)
+
+
+def _price_live_smoke_argv(
+    *,
+    snapshot_dir: Path,
+    out_jsonl: Path,
+    extra: list[str] | None = None,
+) -> list[str]:
+    argv = [
+        "--live-smoke",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--provider-symbol",
+        "005930.KS",
+        "--currency",
+        "KRW",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot-dir",
+        str(snapshot_dir),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    ]
+    if extra:
+        argv.extend(extra)
+    return argv
+
+
+def test_price_live_smoke_success_writes_snapshot_and_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl))
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {
+        "status": "ok",
+        "stage": "complete",
+        "mode": "live-smoke",
+        "source": "price",
+        "symbol": "SYNTH-KR-0001",
+        "market": "KR",
+        "provider_symbol": "005930.KS",
+        "records_count": 1,
+        "snapshot_path": payload["snapshot_path"],
+        "out_jsonl": str(out_jsonl),
+    }
+    assert out_jsonl.is_file()
+    snapshot_files = list(snapshot_dir.glob("raw_*.json"))
+    assert len(snapshot_files) == 1
+    snapshot = json.loads(snapshot_files[0].read_text(encoding="utf-8"))
+    assert snapshot["source_key"] == "price"
+    assert snapshot["external_service"] == "yfinance"
+    assert snapshot["provider_symbol"] == "005930.KS"
+    assert "DataFrame" not in snapshot_files[0].read_text(encoding="utf-8")
+    assert len(json.dumps(snapshot["payload"])) < 500
+
+
+def test_price_live_smoke_jsonl_round_trips_through_8b_validate_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    assert main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl)) == 0
+
+    intake = _run_intake_validate(out_jsonl)
+    assert intake.returncode == 0, intake.stderr
+    payload = json.loads(intake.stdout)
+    assert payload["status"] == "ok"
+    assert payload["records_valid"] == 1
+
+
+def test_price_live_smoke_8b_normal_and_8c_smoke_satisfies_symbol_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    date_md_path = tmp_path / "Date.md"
+    universe_path = tmp_path / "universe.toml"
+    universe_path.write_text(EXAMPLE_UNIVERSE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl)) == 0
+
+    intake = _run_intake_normal(
+        jsonl_path=out_jsonl,
+        store_path=store_path,
+        date_md_out=date_md_path,
+    )
+    assert intake.returncode == 0, intake.stderr
+
+    smoke = _run_date_md_smoke_cli(
+        universe_path=universe_path,
+        date_md_path=date_md_path,
+        store_path=store_path,
+    )
+    assert smoke.returncode == 0, smoke.stderr
+    payload = json.loads(smoke.stdout)
+    assert payload["status"] == "ok"
+    assert payload["missing_symbols"] == []
+
+
+def test_price_live_smoke_empty_history_fails_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    def factory(_provider_symbol: str) -> _PriceFakeTicker:
+        return _PriceFakeTicker(history=_PriceFakeHistory(closes=[], indices=[]))
+
+    _patch_price_live_with_ticker_factory(monkeypatch, factory)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl))
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["stage"] == "fetch"
+    assert not out_jsonl.exists()
+    assert list(snapshot_dir.glob("raw_*.json")) == []
+
+
+def test_price_live_smoke_missing_close_column_fails_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    def factory(_provider_symbol: str) -> _PriceFakeTicker:
+        return _PriceFakeTicker(
+            history=_PriceFakeHistory(
+                closes=[100.0],
+                indices=[datetime(2026, 5, 30, tzinfo=UTC)],
+                columns=["Open"],
+            )
+        )
+
+    _patch_price_live_with_ticker_factory(monkeypatch, factory)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl))
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "fetch"
+    assert not out_jsonl.exists()
+
+
+def test_price_live_smoke_non_positive_close_fails_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    def factory(_provider_symbol: str) -> _PriceFakeTicker:
+        return _PriceFakeTicker(
+            history=_PriceFakeHistory(
+                closes=[0.0],
+                indices=[datetime(2026, 5, 30, tzinfo=UTC)],
+            )
+        )
+
+    _patch_price_live_with_ticker_factory(monkeypatch, factory)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl))
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "fetch"
+    assert not out_jsonl.exists()
+
+
+def test_price_live_smoke_missing_provider_symbol_fails_args(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        "--live-smoke",
+        "--source",
+        "price",
+        "--symbol",
+        "SYNTH-KR-0001",
+        "--market",
+        "KR",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot-dir",
+        str(tmp_path / "sources" / "price"),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert "--provider-symbol" in payload["error"]
+
+
+def test_price_live_smoke_missing_symbol_or_market_fails_args(tmp_path: Path) -> None:
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    base = [
+        "--live-smoke",
+        "--source",
+        "price",
+        "--provider-symbol",
+        "005930.KS",
+        "--date-id",
+        "260530-1",
+        "--as-of",
+        AS_OF,
+        "--snapshot-dir",
+        str(tmp_path / "sources" / "price"),
+        "--out-jsonl",
+        str(out_jsonl),
+        "--json",
+    ]
+    missing_symbol = _run_fetch_cli(*base, "--market", "KR")
+    assert missing_symbol.returncode == 1
+    assert "--symbol" in json.loads(missing_symbol.stdout)["error"]
+
+    missing_market = _run_fetch_cli(
+        *base,
+        "--symbol",
+        "SYNTH-KR-0001",
+    )
+    assert missing_market.returncode == 1
+    assert "--market" in json.loads(missing_market.stdout)["error"]
+
+
+def test_price_live_smoke_existing_snapshot_fails_even_with_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    _patch_fixed_fetched_at(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "price"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    assert main(_price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl)) == 0
+    capsys.readouterr()
+    snapshot_files = list(snapshot_dir.glob("raw_*.json"))
+    assert len(snapshot_files) == 1
+    original_bytes = snapshot_files[0].read_bytes()
+    out_jsonl.unlink()
+
+    exit_code = main(
+        _price_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, extra=["--force"])
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "snapshot"
+    assert snapshot_files[0].read_bytes() == original_bytes
+    assert not out_jsonl.exists()
+
+
+def test_price_live_smoke_json_and_verbose_keeps_stdout_pure_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    out_jsonl = tmp_path / "research_sources.jsonl"
+    result = _run_fetch_cli(
+        *_price_live_smoke_argv(
+            snapshot_dir=tmp_path / "sources" / "price",
+            out_jsonl=out_jsonl,
+            extra=["--verbose"],
+        )
+    )
     assert result.returncode == 0, result.stderr
     json.loads(result.stdout)
     assert "verbose:" in result.stderr

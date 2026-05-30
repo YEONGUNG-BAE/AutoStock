@@ -57,7 +57,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--market",
         default=None,
-        help="requested market (required for --replay --source price)",
+        help="requested market (required for --replay/--live-smoke --source price)",
+    )
+    parser.add_argument(
+        "--provider-symbol",
+        default=None,
+        help="yfinance provider ticker (required for --live-smoke --source price)",
+    )
+    parser.add_argument(
+        "--currency",
+        default=None,
+        help="optional currency override for --live-smoke --source price",
     )
     parser.add_argument(
         "--date-id",
@@ -102,12 +112,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--live-smoke",
         action="store_true",
-        help="fetch FRED via stdlib HTTP (fred_http_client), write snapshot + JSONL",
+        help="fetch live data via stdlib HTTP (fred) or yfinance (price), write snapshot + JSONL",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite existing --out-jsonl or snapshot file if present",
+        help="overwrite existing --out-jsonl if present; raw live snapshots are never overwritten",
     )
     parser.add_argument(
         "--json",
@@ -186,6 +196,7 @@ def _emit_result(payload: dict[str, Any], *, as_json: bool, out: TextIO) -> None
         "series_id",
         "symbol",
         "market",
+        "provider_symbol",
         "records_count",
         "snapshot_path",
         "out_jsonl",
@@ -203,6 +214,7 @@ def _success_payload(
     series_id: str | None = None,
     symbol: str | None = None,
     market: str | None = None,
+    provider_symbol: str | None = None,
     records_count: int | None = None,
     snapshot_path: Path | None = None,
     out_jsonl: Path | None = None,
@@ -219,6 +231,8 @@ def _success_payload(
         payload["symbol"] = symbol
     if market is not None:
         payload["market"] = market
+    if provider_symbol is not None:
+        payload["provider_symbol"] = provider_symbol
     if records_count is not None:
         payload["records_count"] = records_count
     if snapshot_path is not None:
@@ -324,9 +338,8 @@ def run_replay(
     )
 
 
-def run_live_smoke(
+def run_live_smoke_fred(
     *,
-    source: str,
     series_id: str,
     date_id: str,
     as_of: datetime,
@@ -337,10 +350,6 @@ def run_live_smoke(
     fetched_at: datetime,
     urlopen_fn: Any | None = None,
 ) -> dict[str, Any]:
-    normalized_source = source.strip().lower()
-    if normalized_source != "fred":
-        raise FetchResearchSourcesError("args", f"live-smoke unsupported for source: {source!r}")
-
     api_key = _read_api_key(api_key_env)
 
     try:
@@ -357,7 +366,7 @@ def run_live_smoke(
     except FredHttpError as exc:
         raise FetchResearchSourcesError("fetch", exc.message) from exc
 
-    fetcher = get_source_fetcher(source)
+    fetcher = get_source_fetcher("fred")
     try:
         records = fetcher.normalize_snapshot(
             snapshot_path,
@@ -378,6 +387,68 @@ def run_live_smoke(
         stage="complete",
         source=fetcher.source_key,
         series_id=series_id,
+        records_count=len(records),
+        snapshot_path=snapshot_path,
+        out_jsonl=out_jsonl,
+    )
+
+
+def run_live_smoke_price(
+    *,
+    symbol: str,
+    market: str,
+    provider_symbol: str,
+    currency: str | None,
+    date_id: str,
+    as_of: datetime,
+    snapshot_dir: Path,
+    out_jsonl: Path,
+    force: bool,
+    fetched_at: datetime,
+    ticker_factory: Any | None = None,
+) -> dict[str, Any]:
+    # yfinance는 price_live_client 내부 lazy import (R1). replay/FRED 경로는 이 모듈을 import하지 않는다.
+    from data.price_live_client import PriceLiveFetchError, fetch_live_price_snapshot
+
+    try:
+        snapshot_path = fetch_live_price_snapshot(
+            provider_symbol=provider_symbol,
+            symbol=symbol,
+            market=market,
+            currency=currency,
+            snapshot_dir=snapshot_dir,
+            fetched_at=fetched_at,
+            ticker_factory=ticker_factory,
+        )
+    except FileExistsError as exc:
+        raise FetchResearchSourcesError("snapshot", str(exc)) from exc
+    except PriceLiveFetchError as exc:
+        raise FetchResearchSourcesError("fetch", exc.message) from exc
+
+    fetcher = get_source_fetcher("price")
+    try:
+        records = fetcher.normalize_snapshot(
+            snapshot_path,
+            symbol=symbol,
+            market=market,
+            as_of=as_of,
+            date_id=date_id,
+        )
+    except ValueError as exc:
+        raise FetchResearchSourcesError("normalize", str(exc)) from exc
+
+    try:
+        write_date_id_source_records_jsonl(out_jsonl, records, force=force)
+    except FileExistsError as exc:
+        raise FetchResearchSourcesError("write", str(exc)) from exc
+
+    return _success_payload(
+        mode="live-smoke",
+        stage="complete",
+        source=fetcher.source_key,
+        symbol=symbol,
+        market=market,
+        provider_symbol=provider_symbol,
         records_count=len(records),
         snapshot_path=snapshot_path,
         out_jsonl=out_jsonl,
@@ -409,23 +480,45 @@ def main(argv: list[str] | None = None) -> int:
                 out_jsonl=out_jsonl,
             )
         elif mode == "live-smoke":
-            series_id = _require_value(args.series_id, flag="--series-id")
+            normalized_source = args.source.strip().lower()
             date_id = _require_value(args.date_id, flag="--date-id")
             as_of = _parse_as_of(_require_value(args.as_of, flag="--as-of"))
             snapshot_dir = _require_path(args.snapshot_dir, flag="--snapshot-dir")
             out_jsonl = _require_path(args.out_jsonl, flag="--out-jsonl")
             fetched_at = datetime.now().astimezone()
-            payload = run_live_smoke(
-                source=args.source,
-                series_id=series_id,
-                date_id=date_id,
-                as_of=as_of,
-                snapshot_dir=snapshot_dir,
-                api_key_env=args.api_key_env,
-                out_jsonl=out_jsonl,
-                force=args.force,
-                fetched_at=fetched_at,
-            )
+            if normalized_source == "fred":
+                series_id = _require_value(args.series_id, flag="--series-id")
+                payload = run_live_smoke_fred(
+                    series_id=series_id,
+                    date_id=date_id,
+                    as_of=as_of,
+                    snapshot_dir=snapshot_dir,
+                    api_key_env=args.api_key_env,
+                    out_jsonl=out_jsonl,
+                    force=args.force,
+                    fetched_at=fetched_at,
+                )
+            elif normalized_source == "price":
+                symbol = _require_value(args.symbol, flag="--symbol")
+                market = _require_value(args.market, flag="--market")
+                provider_symbol = _require_value(args.provider_symbol, flag="--provider-symbol")
+                payload = run_live_smoke_price(
+                    symbol=symbol,
+                    market=market,
+                    provider_symbol=provider_symbol,
+                    currency=args.currency,
+                    date_id=date_id,
+                    as_of=as_of,
+                    snapshot_dir=snapshot_dir,
+                    out_jsonl=out_jsonl,
+                    force=args.force,
+                    fetched_at=fetched_at,
+                )
+            else:
+                raise FetchResearchSourcesError(
+                    "args",
+                    f"live-smoke unsupported for source: {args.source!r}",
+                )
         else:
             date_id = _require_value(args.date_id, flag="--date-id")
             as_of = _parse_as_of(_require_value(args.as_of, flag="--as-of"))

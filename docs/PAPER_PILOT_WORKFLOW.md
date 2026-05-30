@@ -596,7 +596,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A FRED replay + 1B live-smoke + 2A generic PRICE replay** — `ops/fetch_research_sources.py`; urllib only in `fred_http_client.py` |
+| 구현 상태 | **1A FRED replay + 1B live-smoke + 2A generic PRICE replay + 2B yfinance PRICE live-smoke** — `ops/fetch_research_sources.py`; urllib only in `fred_http_client.py`; yfinance only in `price_live_client.py` (lazy) |
 
 ### Controlled walk-through vs 30-trading-day pilot
 

@@ -49,7 +49,7 @@
 - ~~Implement Real Intake 1A — FRED replay/fixture-only staging (`ops/fetch_research_sources.py --replay`).~~ Done: `src/data/research_source_fetcher.py`, `src/data/fred_source_fetcher.py`, fixtures + tests; JSONL round-trips through 8B `--validate-only`.
 - ~~Implement Real Intake 1B — FRED live-smoke HTTP client~~ Done: `src/data/fred_http_client.py` (urllib isolated), `--live-smoke`, API-key leakage hardening + tests.
 - ~~Implement Real Intake 2A — generic PRICE snapshot replay (`--replay --source price`)~~ Done: `src/data/price_source_fetcher.py`, fixtures + tests; JSONL round-trips through 8B and satisfies 8C symbol coverage for matching universe symbols.
-- yfinance live `PRICE` fetcher — deferred (generic PRICE replay covers offline symbol coverage).
+- ~~Implement Real Intake 2B — yfinance PRICE live-smoke (`--live-smoke --source price`)~~ Done: `src/data/price_live_client.py` (lazy yfinance import), immutable generic PRICE snapshot → 2A replay; tests use injected ticker factory only.
 - DART `DISCLOSURE` fetcher — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 

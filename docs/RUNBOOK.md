@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1181 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1203 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1181 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1203 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -132,7 +132,7 @@ PYTHONPATH=src uv run python ops/research_source_intake.py \
 
 generated `runtime/research/` artifacts는 **commit하지 않는다**.
 
-**Post-Foundation (1A replay + 1B live-smoke + 2A price replay):** FRED snapshot replay는 `--replay --source fred`; generic PRICE snapshot replay는 `--replay --source price --symbol … --market …` (universe symbol coverage 충족 가능). live HTTP는 `--live-smoke` (**FRED only**; stdlib HTTP는 `src/data/fred_http_client.py`에만 격리). API key는 env에서만 읽으며 stdout/stderr/JSON/snapshot에 **값이 기록되지 않는다**.
+**Post-Foundation (1A replay + 1B live-smoke + 2A price replay + 2B yfinance live-smoke):** FRED snapshot replay는 `--replay --source fred`; generic PRICE snapshot replay는 `--replay --source price --symbol … --market …`; yfinance PRICE live-smoke는 `--live-smoke --source price --provider-symbol …` (비공식 외부 provider; immutable snapshot → 2A replay). live HTTP는 FRED `--live-smoke` (**stdlib HTTP는 `src/data/fred_http_client.py`에만 격리**). API key는 FRED env에서만 읽으며 stdout/stderr/JSON/snapshot에 **값이 기록되지 않는다**.
 
 ```bash
 DAY=2026-05-29
@@ -168,6 +168,47 @@ PRICE replay → 8B normal → 8C smoke (enabled universe symbol coverage):
 ```bash
 PYTHONPATH=src uv run python ops/research_source_intake.py \
   --source-jsonl "runtime/research/${DAY}/research_sources.price.jsonl" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --date-md-out "runtime/research/${DAY}/Date.md" \
+  --json
+
+PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
+  --universe runtime/paper/universe.paper.toml \
+  --date-md "runtime/research/${DAY}/Date.md" \
+  --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
+  --require-symbol-coverage \
+  --json
+# 기대: "missing_symbols": []
+```
+
+**yfinance PRICE live-smoke (operator-only; unofficial provider):**
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/fetch_research_sources.py \
+  --live-smoke \
+  --source price \
+  --symbol SYNTH-KR-0001 \
+  --market KR \
+  --provider-symbol 005930.KS \
+  --currency KRW \
+  --date-id 260530-3 \
+  --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --snapshot-dir "runtime/research/${DAY}/sources/price" \
+  --out-jsonl "runtime/research/${DAY}/research_sources.price.live.jsonl" \
+  --json
+
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.price.live.jsonl" \
+  --validate-only \
+  --json
+```
+
+PRICE live-smoke → 8B normal → 8C smoke (symbol coverage):
+
+```bash
+PYTHONPATH=src uv run python ops/research_source_intake.py \
+  --source-jsonl "runtime/research/${DAY}/research_sources.price.live.jsonl" \
   --store "runtime/research/${DAY}/date_id_sources.sqlite3" \
   --date-md-out "runtime/research/${DAY}/Date.md" \
   --json
@@ -388,7 +429,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1181 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1203 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
