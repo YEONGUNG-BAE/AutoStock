@@ -460,6 +460,11 @@ def _parse_candidate_entry(raw: dict[str, Any], *, index: int) -> KrCandidateEnt
     )
 
 
+def _contains_control_character(value: str) -> bool:
+    """ASCII control(0x00–0x1F) 및 DEL(0x7F) 포함 여부."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value)
+
+
 def _required_text(value: Any, *, field_name: str) -> str:
     if value is None:
         raise KrProviderMappingGeneratorError("parse", f"{field_name} is required")
@@ -468,10 +473,21 @@ def _required_text(value: Any, *, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise KrProviderMappingGeneratorError("parse", f"{field_name} must not be blank")
+    if _contains_control_character(normalized):
+        raise KrProviderMappingGeneratorError(
+            "parse",
+            f"{field_name} contains a control character",
+        )
     return normalized
 
 
 def _toml_string(value: str) -> str:
+    # parse/args 검증 우회(programmatic API·resolver 출력) 방어 백스톱
+    if _contains_control_character(value):
+        raise KrProviderMappingGeneratorError(
+            "validate",
+            "rendered text contains a control character",
+        )
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 

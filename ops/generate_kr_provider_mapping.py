@@ -64,6 +64,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _contains_control_character(value: str) -> bool:
+    """ASCII control(0x00–0x1F) 및 DEL(0x7F) 포함 여부."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value)
+
+
+def _validate_cli_text_fields(args: argparse.Namespace) -> None:
+    """CLI name/description에 control char가 있으면 generator 호출 전에 거부한다."""
+    checks: tuple[tuple[str | None, str], ...] = (
+        (args.universe_name, "--universe-name"),
+        (args.provider_mapping_name, "--provider-mapping-name"),
+        (args.universe_description, "--universe-description"),
+        (args.provider_mapping_description, "--provider-mapping-description"),
+    )
+    for value, flag_name in checks:
+        if value is not None and _contains_control_character(value):
+            raise GenerateKrProviderMappingCliError(
+                "args",
+                f"{flag_name} contains a control character",
+            )
+
+
 def _resolve_corp_code_paths(args: argparse.Namespace) -> tuple[Path | None, Path | None]:
     corp_code_xml = Path(args.corp_code_xml) if args.corp_code_xml else None
     corp_code_zip = Path(args.corp_code_zip) if args.corp_code_zip else None
@@ -131,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     out: TextIO = sys.stdout
 
     try:
+        _validate_cli_text_fields(args)
         corp_code_xml, corp_code_zip = _resolve_corp_code_paths(args)
         payload = run_generate_kr_provider_mapping(
             candidates_path=Path(args.candidates),

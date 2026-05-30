@@ -34,8 +34,10 @@ sys.path.insert(0, str(REPO_ROOT / "ops"))
 
 from data.kr_provider_mapping_generator import (
     KrProviderMappingGeneratorError,
+    ResolvedKrCandidate,
     generate_kr_provider_mapping_files,
     parse_kr_candidates_toml,
+    render_provider_mapping_toml,
 )
 from data.provider_mapping_registry import (
     load_provider_mapping_toml,
@@ -537,6 +539,218 @@ def test_no_runtime_files_tracked_in_repo() -> None:
     )
     assert tracked.returncode == 0
     assert tracked.stdout.strip() == ""
+
+
+def _assert_outputs_not_created(tmp_path: Path) -> None:
+    universe_out = tmp_path / "universe.generated.toml"
+    mapping_out = tmp_path / "provider_mappings.generated.toml"
+    assert not universe_out.exists()
+    assert not mapping_out.exists()
+
+
+def test_candidate_display_name_control_char_rejected_at_parse(tmp_path: Path) -> None:
+    candidates = _write_candidates(
+        tmp_path,
+        """
+version = 1
+name = "control-display"
+description = "newline in display_name"
+
+[[candidates]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Samsung\\nElectronics"
+stock_code = "005930"
+corp_name = "삼성전자"
+yfinance_provider_symbol = "005930.KS"
+currency = "KRW"
+""",
+    )
+    with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+        parse_kr_candidates_toml(candidates)
+    assert exc_info.value.stage == "parse"
+    assert exc_info.value.message == "candidates[0].display_name contains a control character"
+
+
+def test_candidate_corp_name_tab_or_newline_rejected_at_parse(tmp_path: Path) -> None:
+    for escape_suffix, label in (("\\t", "tab"), ("\\n", "newline")):
+        candidates = _write_candidates(
+            tmp_path,
+            f"""
+version = 1
+name = "control-corp-{label}"
+description = "control in corp_name"
+
+[[candidates]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Samsung"
+stock_code = "005930"
+corp_name = "삼성{escape_suffix}전자"
+yfinance_provider_symbol = "005930.KS"
+currency = "KRW"
+""",
+        )
+        with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+            parse_kr_candidates_toml(candidates)
+        assert exc_info.value.stage == "parse"
+        assert exc_info.value.message == "candidates[0].corp_name contains a control character"
+
+
+def test_candidate_root_description_newline_rejected_at_parse(tmp_path: Path) -> None:
+    candidates = _write_candidates(
+        tmp_path,
+        """
+version = 1
+name = "control-root-desc"
+description = "line1\\nline2"
+
+[[candidates]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Samsung"
+stock_code = "005930"
+corp_name = "삼성전자"
+yfinance_provider_symbol = "005930.KS"
+currency = "KRW"
+""",
+    )
+    with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+        parse_kr_candidates_toml(candidates)
+    assert exc_info.value.stage == "parse"
+    assert exc_info.value.message == "description contains a control character"
+
+
+def test_candidate_nul_control_char_rejected_at_parse(tmp_path: Path) -> None:
+    candidates = _write_candidates(
+        tmp_path,
+        """
+version = 1
+name = "control-nul"
+description = "NUL in symbol"
+
+[[candidates]]
+symbol = "005930\\u0000"
+market = "KR"
+enabled = true
+display_name = "Samsung"
+stock_code = "005930"
+corp_name = "삼성전자"
+yfinance_provider_symbol = "005930.KS"
+currency = "KRW"
+""",
+    )
+    with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+        parse_kr_candidates_toml(candidates)
+    assert exc_info.value.stage == "parse"
+    assert exc_info.value.message == "candidates[0].symbol contains a control character"
+
+
+def test_parse_control_char_write_safety(tmp_path: Path) -> None:
+    candidates = _write_candidates(
+        tmp_path,
+        """
+version = 1
+name = "write-safety-parse"
+description = "fail before write"
+
+[[candidates]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Bad\\nName"
+stock_code = "005930"
+corp_name = "삼성전자"
+yfinance_provider_symbol = "005930.KS"
+currency = "KRW"
+""",
+    )
+    with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+        _generate(tmp_path, candidates_path=candidates)
+    assert exc_info.value.stage == "parse"
+    _assert_outputs_not_created(tmp_path)
+
+
+def test_cli_universe_name_newline_rejected_at_args(tmp_path: Path) -> None:
+    universe_out = tmp_path / "universe.toml"
+    mapping_out = tmp_path / "mapping.toml"
+    result = _run_cli(
+        "--candidates",
+        str(CANDIDATES_FIXTURE),
+        "--corp-code-xml",
+        str(CORP_CODE_SAMPLE_XML),
+        "--universe-out",
+        str(universe_out),
+        "--provider-mapping-out",
+        str(mapping_out),
+        "--universe-name",
+        "kr-real\ninjected",
+        "--provider-mapping-name",
+        "kr-real-provider-mappings-generated-v1",
+        "--json",
+    )
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert payload["error"] == "--universe-name contains a control character"
+    assert not universe_out.exists()
+    assert not mapping_out.exists()
+
+
+def test_cli_provider_mapping_description_newline_rejected_at_args(tmp_path: Path) -> None:
+    universe_out = tmp_path / "universe.toml"
+    mapping_out = tmp_path / "mapping.toml"
+    result = _run_cli(
+        "--candidates",
+        str(CANDIDATES_FIXTURE),
+        "--corp-code-xml",
+        str(CORP_CODE_SAMPLE_XML),
+        "--universe-out",
+        str(universe_out),
+        "--provider-mapping-out",
+        str(mapping_out),
+        "--universe-name",
+        "kr-real-generated-v1",
+        "--provider-mapping-name",
+        "kr-real-provider-mappings-generated-v1",
+        "--provider-mapping-description",
+        "desc\nline2",
+        "--json",
+    )
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["stage"] == "args"
+    assert payload["error"] == "--provider-mapping-description contains a control character"
+    assert not universe_out.exists()
+    assert not mapping_out.exists()
+
+
+def test_resolver_output_control_char_rejected_before_write() -> None:
+    resolved = (
+        ResolvedKrCandidate(
+            symbol="005930",
+            market="KR",
+            enabled=True,
+            display_name="Samsung",
+            stock_code="005930",
+            corp_name="삼성전자",
+            yfinance_provider_symbol="005930.KS",
+            currency="KRW",
+            corp_code="00126380",
+            dart_corp_name="삼성\x00전자",
+        ),
+    )
+    with pytest.raises(KrProviderMappingGeneratorError) as exc_info:
+        render_provider_mapping_toml(
+            name="kr-test",
+            description="test mapping",
+            resolved=resolved,
+        )
+    assert exc_info.value.stage == "validate"
+    assert exc_info.value.message == "rendered text contains a control character"
 
 
 def test_existing_3e_smoke_tests_remain_importable() -> None:
