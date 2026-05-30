@@ -482,18 +482,24 @@ Checked-in fixtures verify only two real listed companies (`005930` / `000660` i
 DAY=2026-05-30
 PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
   --live-fetch \
-  --snapshot-out "runtime/research/${DAY}/sources/dart/corp_code_master.zip" \
+  --api-key-env DART_API_KEY \
+  --snapshot-dir "runtime/research/${DAY}/sources/dart_corp_code" \
+  --stock-code 005930 \
   --json
 ```
+
+   `--snapshot-dir`는 immutable ZIP snapshot이 기록될 **디렉터리**다(`--live-fetch`에 필수). `--stock-code`는 snapshot 생성과 함께 corp_code 1건을 resolve하기 위해 required다 — 생성된 ZIP snapshot 자체는 전체 corp-code master로 재사용된다. 명령 출력 JSON의 **`snapshot_path`** 값(생성된 ZIP 경로)을 확인해 step 3에 전달한다.
 
 2. **Prepare operator-curated candidate TOML** (copy from `tests/fixtures/research/kr_candidates/kr_real_candidates.sample.toml` pattern): explicit `yfinance_provider_symbol`, `corp_name` for disambiguation, **no** `corp_code` field.
 
 3. **Generate universe + provider mapping:**
 
 ```bash
+# SNAPSHOT = step 1 출력 JSON의 snapshot_path 값 (파일명은 도구가 생성)
+SNAPSHOT="<snapshot_path from step 1>"
 PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
   --candidates /path/to/operator/kr_candidates.local.toml \
-  --corp-code-zip "runtime/research/${DAY}/sources/dart/corp_code_master.zip" \
+  --corp-code-zip "$SNAPSHOT" \
   --universe-out /tmp/universe.kr-real.local.toml \
   --provider-mapping-out /tmp/provider_mappings.kr-real.local.toml \
   --universe-name kr-real-local-v1 \
