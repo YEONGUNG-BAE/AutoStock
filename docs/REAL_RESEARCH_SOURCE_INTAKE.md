@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0** design **documented**; **3B1** live-shaped snapshot + fake transport **implemented**; **3B2** operator `--live-smoke --source dart` **implemented** (`dart_http_client.py` urllib isolated); **3B3** hardening deferred  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); live corp-code download **3C2+**; provider mapping registry **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -498,6 +498,28 @@ Any future `dart_http_client` (or similar) writes **raw snapshot bytes only**. N
 
 - Explicit CLI invocation only (`ops/fetch_research_sources.py --live-smoke --source dart` or equivalent).
 - No launchd/cron, no PaperLoop hook, no KIS, no ledger writes.
+
+---
+
+## 3C DART corp-code resolver (fixture-first)
+
+> **3C1 (implemented):** local corp-code master XML/ZIP → `stock_code` → `corp_code`. No network, no API key, no env read.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3C1** | `src/data/dart_corp_code_resolver.py` + `tests/fixtures/research/dart/corp_code_*.xml` | None |
+| **3C2** | Live OpenDART corpCode master download + cache | Operator explicit (deferred) |
+| **Next** | Provider mapping registry: internal symbol → yfinance ticker / DART corp_code | Design follow-on |
+
+**Resolver rules:**
+
+- Parse OpenDART corp-code master XML (`<result><list>…</list></result>`).
+- Normalize `stock_code` to 6 digits; accept unpadded input and optional `KR:` prefix.
+- Blank/unlisted entries (`stock_code` empty) are stored but not matched by stock lookup.
+- Duplicate listed `stock_code` with same `corp_name` fails at parse; different `corp_name` requires `corp_name` at resolve time.
+- Optional ZIP: read single `.xml` member in-process (no `extractall`).
+
+**Ops helper (local file only):** `ops/resolve_dart_corp_code.py --corp-code-xml … --stock-code 005930 --json`
 
 ---
 

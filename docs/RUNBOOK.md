@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1273 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1294 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1273 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1294 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -268,6 +268,17 @@ DART-only Scout packet (8D): `require_symbol_coverage=False`이면 symbol-matche
 - Path: **live HTTP → immutable raw snapshot → 3A replay → 8B JSONL** (never direct `DateIdSourceRecord` from HTTP).
 - API key: env var only (`DART_API_KEY` or `--api-key-env`); never commit keys or put them in snapshot/JSONL/Date.md/logs.
 - `--corp-code` is OpenDART provider corp code (operator-supplied); internal universe `symbol` is separate.
+
+**3C1 corp-code resolver (fixture/local XML only; no API key):**
+
+```bash
+PYTHONPATH=src uv run python ops/resolve_dart_corp_code.py \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_sample.xml \
+  --stock-code 005930 \
+  --json
+```
+
+Live OpenDART corpCode master download is **deferred** (3C2). Do not paste API keys into fixture files.
 
 ```bash
 DAY=2026-05-30
@@ -502,7 +513,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1273 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1294 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

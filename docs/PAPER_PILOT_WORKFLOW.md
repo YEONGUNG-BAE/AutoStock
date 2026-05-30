@@ -596,7 +596,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2** (DART `--live-smoke` operator-only, `dart_http_client.py`); combined smoke verified; 3B3 hardening deferred |
+| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1** (DART corp_code resolver fixture-first); combined smoke verified; 3C2 live corp-code download / provider registry deferred |
 
 ### Controlled walk-through vs 30-trading-day pilot
 

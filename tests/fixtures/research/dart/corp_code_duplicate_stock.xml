@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<result>
+  <list>
+    <corp_code>00126380</corp_code>
+    <corp_name>삼성전자</corp_name>
+    <stock_code>005930</stock_code>
+    <modify_date>20240101</modify_date>
+  </list>
+  <list>
+    <corp_code>00126381</corp_code>
+    <corp_name>삼성전자중복</corp_name>
+    <stock_code>005930</stock_code>
+    <modify_date>20240102</modify_date>
+  </list>
+</result>
