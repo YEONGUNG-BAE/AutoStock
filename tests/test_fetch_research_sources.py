@@ -1373,8 +1373,6 @@ def _dart_live_smoke_argv(
         "SYNTH-KR-0001",
         "--corp-code",
         DART_CORP_CODE,
-        "--api-key-env",
-        "DART_API_KEY",
         "--bgn-de",
         DART_BGN_DE,
         "--store",
@@ -1448,6 +1446,148 @@ def test_dart_live_smoke_jsonl_round_trips_through_8b_validate_only(
     payload = json.loads(intake.stdout)
     assert payload["status"] == "ok"
     assert payload["records_valid"] == 2
+
+
+def test_dart_live_smoke_without_api_key_env_reads_dart_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+    from urllib.parse import parse_qs, urlparse
+
+    body_payload = _success_opendart_list_body()
+    captured_crtfc_keys: list[str] = []
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return json.dumps(body_payload).encode("utf-8")
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        url_text = request.full_url  # type: ignore[attr-defined]
+        query = parse_qs(urlparse(url_text).query)
+        captured_crtfc_keys.append(query.get("crtfc_key", [""])[0])
+        return FakeResponse()
+
+    monkeypatch.setenv("DART_API_KEY", DART_SECRET)
+    monkeypatch.setenv("FRED_API_KEY", "SECRET_FRED_KEY_SHOULD_NOT_BE_USED")
+    monkeypatch.setattr("data.dart_http_client.urlopen", fake_urlopen)
+
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+
+    exit_code = main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert DART_SECRET not in captured.out
+    assert DART_SECRET not in captured.err
+    assert captured_crtfc_keys == [DART_SECRET]
+    assert out_jsonl.is_file()
+
+
+def test_dart_live_smoke_without_api_key_env_does_not_use_fred_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setenv("FRED_API_KEY", "SECRET_FRED_KEY_SHOULD_NOT_BE_USED")
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+
+    exit_code = main(_dart_live_smoke_argv(snapshot_dir=snapshot_dir, out_jsonl=out_jsonl, store_path=store_path))
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "SECRET_FRED_KEY_SHOULD_NOT_BE_USED" not in captured.out
+    assert "SECRET_FRED_KEY_SHOULD_NOT_BE_USED" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["stage"] == "args"
+    assert "DART_API_KEY" in payload["error"]
+    assert not out_jsonl.exists()
+    assert list(snapshot_dir.glob("raw_*.json")) == []
+
+
+def test_dart_live_smoke_explicit_custom_api_key_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    custom_secret = "SECRET_CUSTOM_DART_KEY_TEST"
+    _patch_opendart_urlopen_success(monkeypatch)
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setenv("CUSTOM_DART_KEY", custom_secret)
+
+    snapshot_dir = tmp_path / "sources" / "dart"
+    out_jsonl = tmp_path / "research_sources.dart.jsonl"
+    store_path = tmp_path / "date_id_sources.sqlite3"
+    from data import SQLiteDateIdSourceStore
+
+    SQLiteDateIdSourceStore(store_path).close()
+
+    exit_code = main(
+        _dart_live_smoke_argv(
+            snapshot_dir=snapshot_dir,
+            out_jsonl=out_jsonl,
+            store_path=store_path,
+            extra=["--api-key-env", "CUSTOM_DART_KEY"],
+        )
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert custom_secret not in captured.out
+    assert custom_secret not in captured.err
+    assert out_jsonl.is_file()
+
+
+def test_fred_live_smoke_without_api_key_env_still_defaults_to_fred_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fetch_research_sources import main
+
+    _patch_urlopen_success(monkeypatch)
+    snapshot_dir = tmp_path / "sources" / "fred"
+    out_jsonl = tmp_path / "research_sources.jsonl"
+
+    exit_code = main(
+        [
+            "--live-smoke",
+            "--source",
+            "fred",
+            "--series-id",
+            "DGS10",
+            "--date-id",
+            "260529-1",
+            "--as-of",
+            AS_OF,
+            "--snapshot-dir",
+            str(snapshot_dir),
+            "--out-jsonl",
+            str(out_jsonl),
+            "--json",
+        ]
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+    assert out_jsonl.is_file()
 
 
 def test_dart_live_smoke_missing_api_key_fails_before_fetch(

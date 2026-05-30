@@ -26,6 +26,9 @@ from domain._datetime import parse_timezone_aware_datetime
 
 ModeName = Literal["dry-run", "replay", "live-smoke"]
 
+# DART live-smoke 전용 env 이름. parser default는 FRED용이므로 분기에서 치환한다.
+DART_DEFAULT_API_KEY_ENV = "DART_API_KEY"
+
 
 class FetchResearchSourcesError(Exception):
     """fetch_research_sources 실패. stage와 sanitized message를 담는다."""
@@ -710,6 +713,13 @@ def main(argv: list[str] | None = None) -> int:
                 corp_code = _require_value(args.corp_code, flag="--corp-code")
                 bgn_de = _require_value(args.bgn_de, flag="--bgn-de")
                 store_path = _require_path(args.store, flag="--store")
+                dart_api_key_env = args.api_key_env
+                if dart_api_key_env == DEFAULT_API_KEY_ENV:
+                    # Source-specific default: parser-level default is FRED_API_KEY,
+                    # but DART must default to DART_API_KEY to avoid cross-source secret use.
+                    # Known limitation: an operator explicitly passing --api-key-env FRED_API_KEY
+                    # is indistinguishable from argparse's default and will be source-defaulted.
+                    dart_api_key_env = DART_DEFAULT_API_KEY_ENV
                 payload = run_live_smoke_dart(
                     symbol=symbol,
                     corp_code=corp_code,
@@ -718,7 +728,7 @@ def main(argv: list[str] | None = None) -> int:
                     page_count=args.page_count,
                     as_of=as_of,
                     snapshot_dir=snapshot_dir,
-                    api_key_env=args.api_key_env,
+                    api_key_env=dart_api_key_env,
                     out_jsonl=out_jsonl,
                     force=args.force,
                     store_path=store_path,
