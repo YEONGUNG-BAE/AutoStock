@@ -596,7 +596,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1 + 3G3-2 + 3G3-3 + 3G3-4A + 3G3-4B + 3G3-5 + 3G3-6 + 3G4-0 + 3G4-1 + 3G4-2 + 3G4-3 + 3G4-4 + 3G4-5 + 3G4-H1** (factor intake hardening); **3H0** docs-only end-to-end operator path checkpoint **complete**; **3H1** manifest/preflight helper **implemented**; **3H2** preflight hardening **implemented**; **3H3** structured follow-up plan JSON **implemented**; **3H4** structured plan validator **implemented**; **3G4+** factor hardening deferred; **3G3-6+** source-specific live adapter hardening deferred; **3H5+** end-to-end hardening deferred |
+| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1 + 3G3-2 + 3G3-3 + 3G3-4A + 3G3-4B + 3G3-5 + 3G3-6 + 3G4-0 + 3G4-1 + 3G4-2 + 3G4-3 + 3G4-4 + 3G4-5 + 3G4-H1** (factor intake hardening); **3H0** docs-only end-to-end operator path checkpoint **complete**; **3H1** manifest/preflight helper **implemented**; **3H2** preflight hardening **implemented**; **3H3** structured follow-up plan JSON **implemented**; **3H4** structured plan validator **implemented**; **3H5** validator command-line safety hardening **implemented**; **3G4+** factor hardening deferred; **3G3-6+** source-specific live adapter hardening deferred; **3H6+** end-to-end hardening deferred |
 
 - **3G4-4 source-specific factor fixture adapter** maps provider-shaped local factor payload → canonical 3G4-1 factor input TOML (local parser/mapper only; no trading/action/allocation output).
 - **3G4-5 operator-triggered factor source live smoke** fetches operator-supplied endpoint → immutable raw snapshot → optional 3G4-4 replay to canonical factor input TOML only (not scheduled; no env/API keys).
@@ -608,6 +608,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 - **3H2 preflight hardening implemented** — atomic summary/plan writes; write-error sanitization; positive allowlist validation for follow-up command plan; no workflow semantics change.
 - **3H3 structured follow-up plan JSON implemented** — optional `--structured-plan-out` / manifest `[outputs].structured_plan_out`; review/tooling only; preflight does not execute generated steps.
 - **3H4 structured plan validator implemented** — `ops/validate_kr_end_to_end_preflight_plan.py`; read-only schema/allowlist/review-only audit; optional before handoff; no command execution.
+- **3H5 validator command-line safety hardening implemented** — broad command substring false positives removed; structured-field rejection and exact unsafe execution token guard preserved; no validator contract change.
 
 - **Controlled Day 1 walk-through** — Foundation 8B~8I ops chain을 **1회** 수동 검증하고 **8I no-write rehearsal에서 종료**. 30거래일 pilot **시작과 동일하지 않다**. runbook: `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through.
 - **Real API fetchers** — Controlled Day 1 **이후** deferred. FRED/DART/yfinance/news HTTP intake는 별도 구현·review 후.

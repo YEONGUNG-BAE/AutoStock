@@ -1902,3 +1902,97 @@ def test_load_structured_preflight_plan_returns_object(tmp_path: Path) -> None:
     plan_path = _valid_structured_plan_path(tmp_path)
     loaded = load_structured_preflight_plan(plan_path)
     assert loaded["mode"] == "kr-end-to-end-intake-followup-plan"
+
+
+# --- 3H5: structured plan validator command-line safety hardening ---
+
+
+def test_validator_allowlisted_command_harmless_order_argument_accepted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/validate_provider_mapping.py "
+        "--manifest /tmp/manifest.toml --notes reorder-check-order",
+    ]
+    validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+
+
+def test_validator_allowlisted_command_harmless_action_argument_accepted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/validate_provider_mapping.py "
+        "--json --label post-action-review",
+    ]
+    validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+
+
+def test_validator_allowlisted_command_harmless_hold_prose_accepted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    concat = next(step for step in payload["steps"] if step["id"] == "concatenate-jsonl")
+    concat["command"] = [
+        "# Hold combined JSONL locally until operator review completes",
+        "# threshold check optional; no execution",
+    ]
+    validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+
+
+def test_validator_harmless_embedded_words_in_command_accepted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/validate_provider_mapping.py "
+        "--json --tag reorder-transaction-threshold",
+    ]
+    validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+
+
+def test_validator_endpoint_url_in_command_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = ["curl https://example.test/smoke"]
+    payload["steps"][0]["script"] = None
+    with pytest.raises(KrEndToEndPlanValidationError, match="endpoint URL") as exc:
+        validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert exc.value.stage == "validate"
+
+
+def test_validator_env_api_key_name_in_command_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = ["export DART_API_KEY=secret"]
+    payload["steps"][0]["script"] = None
+    with pytest.raises(KrEndToEndPlanValidationError, match="env or API key reference") as exc:
+        validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert exc.value.stage == "validate"
+
+
+def test_validator_exact_unsafe_execution_token_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    unsafe = "".join(("submit", "_", "order"))
+    payload["steps"][0]["command"] = [f"PYTHONPATH=src uv run python -m ops.{unsafe}"]
+    payload["steps"][0]["script"] = None
+    with pytest.raises(KrEndToEndPlanValidationError, match="unsafe execution token") as exc:
+        validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert exc.value.stage == "validate"
+
+
+def test_validator_substring_words_with_generic_terms_accepted_when_safe(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    concat = next(step for step in payload["steps"] if step["id"] == "concatenate-jsonl")
+    concat["command"] = [
+        "# reorder files after transaction log threshold review",
+        "# placeholder only — not an executable instruction",
+    ]
+    validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+
+
+def test_validator_unknown_structured_field_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["unexpected_field"] = "value"
+    with pytest.raises(KrEndToEndPlanValidationError, match="unknown fields") as exc:
+        validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert exc.value.stage == "validate"
+
+
+def test_validator_forbidden_structured_allocation_field_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["allocation"] = "50%"
+    with pytest.raises(KrEndToEndPlanValidationError, match="unknown fields") as exc:
+        validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert exc.value.stage == "validate"

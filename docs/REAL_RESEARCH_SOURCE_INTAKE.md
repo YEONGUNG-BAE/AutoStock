@@ -1817,16 +1817,34 @@ Independent read-only validator for the 3H3 structured follow-up plan JSON artif
 |---|---|
 | **CLI** | `ops/validate_kr_end_to_end_preflight_plan.py --structured-plan PATH [--json]` |
 | **Validation** | `version=1`, `mode=kr-end-to-end-intake-followup-plan`, `generated_by`, `review_only=true`, non-empty `steps[]`, canonical step-id subset/order, per-step allowlist + `script`/`command` consistency |
-| **Safety** | Rejects endpoint URLs, env/API key references, trading/order/allocation fields, config-promotion commands, invented 3H0/3H1 commands |
+| **Safety** | Rejects endpoint URLs, env/API key references, trading/order/allocation **structured fields**, config-promotion commands, invented 3H0/3H1 commands; command-line safety uses exact unsafe execution token guard (not broad trading substring scan) |
 | **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
 
 Optional but recommended before operator handoff or downstream tooling ingestion.
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H5+ (unimplemented)**
+### 3H5 — structured follow-up plan validator command-line safety hardening
 
-**3H5+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Refine 3H4 validator command-line safety without changing the public validator contract — preserve schema/allowlist/review-only checks while avoiding broad command substring false positives (e.g. harmless `reorder`, `transaction`, `threshold` arguments).
+
+**Behavior (read-only; no execution change):**
+
+| Area | Behavior |
+|---|---|
+| **Command-line safety** | Endpoint/env/invented/config-promotion rejection unchanged; broad trading substring scan removed from command strings |
+| **Exact-token guard** | Boundary-aware unsafe execution token check for manual/comment steps outside positive allowlist |
+| **Structured fields** | Trading/order/allocation forbidden keys still rejected via `_TRADING_FORBIDDEN_KEYS` / `_walk_forbidden_field_names` |
+| **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H6+ (unimplemented)**
+
+**3H6+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

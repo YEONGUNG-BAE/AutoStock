@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KR end-to-end structured follow-up plan validator (3H4).
+"""KR end-to-end structured follow-up plan validator (3H4/3H5).
 
 3H3 structured JSON plan → schema/allowlist/review-only 검증만 수행.
 명령 실행·live fetch/smoke·config mutation/trading 없음.
@@ -33,6 +33,13 @@ _FOLLOWUP_COMMAND_ALLOWLIST = frozenset(
     }
 )
 _FOLLOWUP_OPS_SCRIPT_PATTERN = re.compile(r"ops/[a-z_]+\.py")
+
+# manual/comment step 등 allowlist 밖 실행 구문을 잡기 위한 경계 기반 exact-token 가드.
+_UNSAFE_EXECUTION_TOKEN = "".join(("submit", "_", "order"))
+_UNSAFE_EXECUTION_TOKEN_PATTERN = re.compile(
+    rf"\b{re.escape(_UNSAFE_EXECUTION_TOKEN)}\b",
+    re.IGNORECASE,
+)
 
 _CANONICAL_STEP_IDS: tuple[str, ...] = (
     "validate-provider-mapping",
@@ -198,14 +205,17 @@ def _validate_sensitive_string(value: str, *, context: str) -> None:
 
 
 def _validate_command_line_safety(line: str) -> None:
+    """command line에 대한 보수적 안전 검사.
+
+    trading/allocation/action 등은 structured JSON key 검증(_walk_forbidden_field_names)에 맡기고,
+    command string은 endpoint/env/invented/config-promotion + exact unsafe execution token만 검사한다.
+    """
     _validate_sensitive_string(line, context="command")
-    lowered = line.lower()
-    for token in ("submit_", "order", "allocation", "action", "buy", "sell", "hold"):
-        if token in lowered:
-            raise KrEndToEndPlanValidationError(
-                "validate",
-                "structured plan command contains trading or allocation token",
-            )
+    if _UNSAFE_EXECUTION_TOKEN_PATTERN.search(line):
+        raise KrEndToEndPlanValidationError(
+            "validate",
+            "structured plan command contains unsafe execution token",
+        )
 
 
 def _walk_forbidden_field_names(value: object) -> None:
