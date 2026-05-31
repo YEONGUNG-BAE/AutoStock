@@ -1,0 +1,82 @@
+{
+  "source_format": "synthetic-provider-v1",
+  "as_of": "2026-05-30T00:00:00+09:00",
+  "market": "KR",
+  "items": [
+    {
+      "stockCode": "900001",
+      "displayName": "SYNTH Alpha Display",
+      "corpName": "SYNTH-ALPHA",
+      "ticker": "900001.KS",
+      "currency": "KRW",
+      "sectorCode": "SEMICONDUCTORS",
+      "industryLabel": "Memory",
+      "enabled": true,
+      "eligible": true,
+      "priority": 10,
+      "note": "Synthetic provider fixture only.",
+      "lastUpdated": "2026-05-30T00:00:00+09:00",
+      "sourceUrl": "fixture://synthetic-provider/900001"
+    },
+    {
+      "stockCode": "900002",
+      "displayName": "SYNTH Beta Display",
+      "corpName": "SYNTH-BETA",
+      "ticker": "900002.KS",
+      "currency": "KRW",
+      "sectorCode": "INTERNET",
+      "industryLabel": "Platform",
+      "enabled": true,
+      "eligible": true,
+      "priority": 20,
+      "note": "Synthetic provider fixture only.",
+      "lastUpdated": "2026-05-30T00:00:00+09:00",
+      "sourceUrl": "fixture://synthetic-provider/900002"
+    },
+    {
+      "stockCode": "900003",
+      "displayName": "SYNTH Gamma Display",
+      "corpName": "SYNTH-GAMMA",
+      "ticker": "900003.KS",
+      "currency": "KRW",
+      "sectorCode": "SEMICONDUCTORS",
+      "industryLabel": "Fabless",
+      "enabled": true,
+      "eligible": true,
+      "priority": 30,
+      "note": "Synthetic provider fixture only.",
+      "lastUpdated": "2026-05-30T00:00:00+09:00",
+      "sourceUrl": "fixture://synthetic-provider/900003"
+    },
+    {
+      "stockCode": "900004",
+      "displayName": "SYNTH Delta Display",
+      "corpName": "SYNTH-DELTA",
+      "ticker": "900004.KS",
+      "currency": "KRW",
+      "sectorCode": "INTERNET",
+      "industryLabel": "Commerce",
+      "enabled": false,
+      "eligible": true,
+      "priority": 40,
+      "note": "Synthetic provider fixture only; disabled for selection tests.",
+      "lastUpdated": "2026-05-30T00:00:00+09:00",
+      "sourceUrl": "fixture://synthetic-provider/900004"
+    },
+    {
+      "stockCode": "900005",
+      "displayName": "SYNTH Epsilon Display",
+      "corpName": "SYNTH-EPSILON",
+      "ticker": "900005.KS",
+      "currency": "KRW",
+      "sectorCode": "SEMICONDUCTORS",
+      "industryLabel": "Equipment",
+      "enabled": true,
+      "eligible": false,
+      "priority": 50,
+      "note": "Synthetic provider fixture only; ineligible for selection tests.",
+      "lastUpdated": "2026-05-30T00:00:00+09:00",
+      "sourceUrl": "fixture://synthetic-provider/900005"
+    }
+  ]
+}

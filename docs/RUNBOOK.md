@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1658 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1703 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1658 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1703 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -715,7 +715,30 @@ Approved follow-up: raw snapshot / candidate pool → 3G3-2 ranked mapping workf
 
 Synthetic proof: `uv run pytest tests/test_kr_discovery_http_client.py tests/test_kr_discovery_live_smoke_cli.py -v`.
 
-Live factor scoring remains **deferred** (3G3-5+).
+**3G3-5 fixture-first discovery schema mapper (local fixture mapping; not live endpoint integration):**
+
+Maps a source-specific local fixture payload (`synthetic-provider-v1`) into the canonical discovery transport shape expected by 3G3-4A. This is **not** live discovery and **not** endpoint-specific live integration.
+
+```bash
+PYTHONPATH=src uv run python ops/map_kr_discovery_fixture.py \
+  --source-payload tests/fixtures/research/kr_discovery/source_payload_synthetic_provider_v1.json \
+  --snapshot-dir /tmp/kr_discovery_snapshots \
+  --fetched-at 2026-05-30T00:00:00+09:00 \
+  --as-of 2026-05-30T00:00:00+09:00 \
+  --universe-hint synthetic-provider-v1 \
+  --external-service synthetic-provider-fixture \
+  --candidate-pool-out /tmp/kr_discovery_candidate_pool.toml \
+  --pool-name kr-discovery-mapped-pool-v1 \
+  --pool-description "Synthetic provider mapped KR discovery candidate pool." \
+  --force \
+  --json
+```
+
+Approved path: source-specific fixture → canonical snapshot → candidate pool → 3G1 selector → 3G3-1 ranker (local signals) → 3F1 generator (local corp-code) → validation → 3E2/3E3/3E4 → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_discovery_schema_mapper.py -v`.
+
+Live factor scoring and source-specific live endpoint adapter remain **deferred** (3G3-5+).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -956,7 +979,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1658 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1703 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
