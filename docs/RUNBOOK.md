@@ -589,6 +589,24 @@ Missing corp-code **mode** (neither `--corp-code-xml` nor `--corp-code-zip`) fai
 
 Synthetic workflow proof: `uv run pytest tests/test_kr_real_sector_pool_workflow.py -v`.
 
+**3G3-0 operator note — live discovery/ranking not available yet:**
+
+The **current approved real expansion path** remains operator-local only:
+
+1. Obtain **3C2** corp-code master snapshot (runtime artifact; never commit).
+2. Prepare operator **real sector pool TOML** (explicit `yfinance_provider_symbol`; no `corp_code`).
+3. Run **`ops/build_kr_real_sector_pool_mapping.py`** (3G2 helper).
+4. Validate generated universe/provider mapping.
+5. Use generated files in **3E2/3E3/3E4** flows.
+
+**Do not:**
+
+- run live discovery/ranking commands — they **do not exist yet**
+- proceed directly from ranking/discovery output to trading or portfolio execution
+- mutate checked-in `config/universe*.toml` or `config/provider_mappings*.toml` from discovery output
+
+Future ranking output is **advisory metadata only** (see [3G3-0 guardrails](REAL_RESEARCH_SOURCE_INTAKE.md#3g3-0-live-discoveryranking-guardrails-design-only) in Real Research Source Intake design doc).
+
 ```bash
 DAY=2026-05-30
 PYTHONPATH=src uv run python ops/fetch_research_sources.py \

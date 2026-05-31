@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3E5+** live sector discovery / ranking / automatic universe expansion **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3+** live sector discovery / ranking / factor scoring **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -764,6 +764,136 @@ PYTHONPATH=src uv run python ops/build_kr_real_sector_pool_mapping.py \
 **Operator chain:** 3C2 corp-code snapshot (runtime artifact; never commit) → operator sector pool TOML (explicit yfinance symbols) → 3G2 helper → generated universe/mapping → 3E2/3E3/3E4 flows.
 
 Error stages: missing corp-code **mode** → `args`; missing corp-code **file** → `resolve` (from 3F1 generator).
+
+---
+
+## 3G3-0 Live discovery/ranking guardrails (design-only)
+
+> **3G3-0 (documented, not implemented):** design checkpoint before live sector discovery, ranking, or factor scoring. **3G1/3G2** closed the operator-local sector pool workflow. Live/automatic discovery, ranking, factor scoring, and automatic universe expansion remain **deferred**.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3G3-0** | Guardrails G1–G6 documented below | None |
+| **Next** | **3G3-1+** fixture-first ranking, live discovery adapter, factor scoring | Deferred |
+
+### G1 — Operator control and read-only boundary
+
+Live sector discovery/ranking must **not** directly mutate:
+
+- universe config
+- provider mapping config
+- runtime trading state
+- broker state
+- PaperLoop state
+
+Any discovered or ranked candidates must first be written as a **reviewable candidate pool or candidate list artifact**.
+
+Operator approval remains required before:
+
+- generating universe/provider mapping
+- running PRICE/DART/FRED smoke
+- building Scout context
+- any downstream portfolio process
+
+### G2 — Source provenance and snapshot/replay boundary
+
+Any live discovery source must have a **raw snapshot or deterministic local fixture** before it can influence generated configs.
+
+Examples:
+
+- KRX listing / sector source → raw snapshot or checked-in fixture
+- DART corp-code master → existing **3C2** local snapshot path
+- price/fundamental metadata → raw snapshot first, then replay/normalize
+
+Live response must **not** directly mutate universe/provider mapping.
+
+### G3 — Ranking/factor scoring boundary
+
+Ranking/factor scoring is **analysis metadata**, not trading instruction.
+
+Future ranking output must be:
+
+- deterministic
+- explainable
+- local-file reproducible
+- separated from execution
+- free of broker/write side effects
+
+Ranking must **not** call:
+
+- `PaperLoopRunner`
+- broker `submit_order`
+- KIS write path
+- allocator execution path
+
+Ranking may produce candidate annotations such as:
+
+- sector
+- industry
+- liquidity proxy
+- market cap proxy (if source exists)
+- operator notes
+- score version
+- source timestamp
+
+Ranking must **not** produce:
+
+- buy/sell orders
+- allocation percentages
+- executable trading decisions
+
+### G4 — Secret/network isolation
+
+Any future live discovery implementation must:
+
+- read env only in an explicit live operator command
+- use source-specific env names
+- never default one provider’s key to another provider’s env variable
+- sanitize stdout/stderr/error JSON
+- keep raw keys out of snapshots and generated configs
+- be testable with fake transport / fixtures only
+- avoid live network calls in tests
+
+### G5 — Approved universe expansion path
+
+The **only** approved path from discovery/ranking output to downstream research smoke:
+
+```text
+live/fixture source
+→ raw snapshot/local fixture
+→ sector-tagged candidate pool (3G1 pool schema)
+→ 3G1 selector/export
+   - export_selected_candidates()
+   - drops root base_market
+   - drops entry sector/industry/eligible/priority/notes/corp_code
+→ 3F1 generator
+   - generate_kr_provider_mapping_files()
+   - DART corp_code = resolver-only
+   - yfinance provider_symbol = explicit candidate input
+→ provider mapping validation
+   - validate_provider_mappings_cover_universe(require_yfinance=True, require_dart=True)
+→ 3E2 PRICE smoke
+→ 3E3 DART smoke
+→ 3E4 combined context
+→ operator review
+```
+
+**Not allowed:**
+
+- automatic direct mutation of `config/universe*.toml` or `config/provider_mappings*.toml`
+- any shortcut that skips raw snapshot/local fixture, 3G1 export, 3F1 generator, provider mapping validation, or operator review
+
+### G6 — Recommended phase split (future; not implemented now)
+
+| Phase | Scope |
+|---|---|
+| **3G3-1** | Fixture-first ranking model — synthetic pool only; deterministic score fields; no live API; no trading; no universe mutation; output is ranked pool or selected candidate TOML |
+| **3G3-2** | Operator-local real ranking input — operator supplies real pool + optional local snapshots; ranking local-only; output reviewable before generation |
+| **3G3-3** | Live discovery source adapter design — docs/spec first; fake transport tests first; raw snapshot boundary; no direct config mutation |
+| **3G3-4** | First live discovery smoke — explicit operator command only; env read only in live command; fake transport tests; snapshot under `runtime/`; no generated config commit |
+| **3G4+** | Factor scoring / ranking hardening — scoring versioning; source timestamps; explainability fields; regression fixtures; operator approval path |
+
+Do **not** implement these phases until a separate intake task explicitly requests them.
 
 ---
 
