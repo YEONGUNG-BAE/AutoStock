@@ -1319,7 +1319,7 @@ Factor scoring must not call:
 
 - **3G4-1:** fixture-first factor signal generator
 - **3G4-2:** factor scorer → 3G3-1 ranking signal TOML integration
-- **3G4-3:** operator-local real factor input bundle
+- **3G4-3:** operator-local real factor input bundle — **implemented** (see [3G4-3](#3g4-3--operator-local-factor-input-bundle-workflow))
 - **3G4-4:** source-specific factor adapter design
 - **3G4-5:** first operator-triggered live factor smoke
 - **3G4+ hardening:** calibration, provenance, drift checks, explainability
@@ -1432,6 +1432,52 @@ PYTHONPATH=src uv run python ops/build_kr_factor_ranked_mapping.py \
 ```
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_ranked_mapping_workflow.py -v`.
+
+---
+
+## 3G4-3 — operator-local factor input bundle workflow
+
+**Status:** implemented
+
+**Purpose:**
+Thin operator-local bundle manifest wrapper over 3G4-2. Bundles candidate pool path, factor input TOML path, and local corp-code XML/ZIP snapshot path into one reviewable manifest. No new scoring/ranking/provider-mapping logic — reviewable artifacts only.
+
+**Scope:**
+
+| Component | Path | Network |
+|---|---|---|
+| **3G4-3** | `ops/build_kr_factor_bundle_mapping.py` + synthetic bundle fixture + tests | None |
+
+**Orchestration path:**
+
+```text
+operator-local bundle manifest TOML
+→ run_build_kr_factor_ranked_mapping()  # 3G4-2 (3G4-1 + 3G3-2)
+→ factor signals TOML + ranked JSON + selected candidates + universe/mapping TOML
+→ operator review
+```
+
+**Rules:**
+
+- Reuses **3G4-2**; scoring formula remains in **3G4-1**; ranking remains in **3G3-1/3G3-2**
+- Output is reviewable artifacts only — no trading/action/allocation fields
+- `--out-dir` override recommended for operator runs (`/tmp/...` or `runtime/...`)
+- Lower-level error stages preserved (`parse`, `generate`, `rank`, `resolve`, `write`, `validate`)
+- No live factor scoring
+
+**3G4-3 ops helper (local files only; no env/API keys):**
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_factor_bundle_mapping.py \
+  --bundle tests/fixtures/research/kr_factors/kr_factor_bundle.synthetic.toml \
+  --out-dir /tmp/kr_factor_bundle_outputs \
+  --force \
+  --json
+```
+
+Approved follow-up: generated universe/provider mapping → 3E2/3E3/3E4 smoke → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_bundle_workflow.py -v`.
 
 ---
 

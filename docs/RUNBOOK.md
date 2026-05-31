@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1845 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1891 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1845 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1891 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -841,6 +841,22 @@ Approved follow-up: generated universe/provider mapping → 3E2/3E3/3E4 smoke �
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_ranked_mapping_workflow.py -v`.
 
+**3G4-3 factor input bundle workflow (local manifest wrapper over 3G4-2; reviewable artifacts only):**
+
+Operator-local bundle manifest TOML chains candidate pool + factor inputs + corp-code snapshot paths into 3G4-2. Scoring formula remains in 3G4-1; ranking remains in 3G3-1/3G3-2. Not live factor scoring; not trading instruction. Use `--out-dir /tmp/...` or `runtime/...` (recommended) — do not point at checked-in config samples unless explicitly intended.
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_factor_bundle_mapping.py \
+  --bundle tests/fixtures/research/kr_factors/kr_factor_bundle.synthetic.toml \
+  --out-dir /tmp/kr_factor_bundle_outputs \
+  --force \
+  --json
+```
+
+Approved follow-up: generated universe/provider mapping → 3E2/3E3/3E4 smoke → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_bundle_workflow.py -v`.
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
 `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
@@ -1080,7 +1096,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1845 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1891 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

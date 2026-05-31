@@ -1,0 +1,28 @@
+# Synthetic fixture factor input bundle for 3G4-3 operator-local bundle workflow tests.
+version = 1
+name = "kr-factor-bundle-synthetic-v1"
+description = "Synthetic fixture-first KR factor input bundle for 3G4-3 workflow tests."
+base_market = "KR"
+
+[inputs]
+candidate_pool = "../kr_candidates/kr_sector_candidate_pool.synthetic.toml"
+factor_inputs = "kr_factor_inputs.synthetic.toml"
+corp_code_xml = "../dart/corp_code_synthetic_multi.xml"
+
+[outputs]
+factor_signals_out = "outputs/factor_signals.generated.toml"
+ranked_out = "outputs/ranked.json"
+selected_candidates_out = "outputs/selected.toml"
+universe_out = "outputs/universe.generated.toml"
+provider_mapping_out = "outputs/provider_mappings.generated.toml"
+
+[names]
+factor_output_name = "kr-factor-signals-synthetic-v1"
+factor_output_description = "Synthetic fixture-first KR factor signals."
+selection_name = "kr-factor-ranked-selected-v1"
+selection_description = "Factor-ranked KR candidates."
+universe_name = "kr-factor-ranked-universe-v1"
+provider_mapping_name = "kr-factor-ranked-provider-mappings-v1"
+
+[selection]
+top_n = 3
