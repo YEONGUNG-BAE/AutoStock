@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tomllib
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TextIO
@@ -60,6 +62,20 @@ _COMMANDS_KEYS = frozenset(
         "scout_out_dir",
     }
 )
+# review-only follow-up command plan positive allowlist (기존 repo ops 스크립트만).
+_FOLLOWUP_COMMAND_ALLOWLIST = frozenset(
+    {
+        "ops/validate_provider_mapping.py",
+        "ops/run_kr_real_price_smoke.py",
+        "ops/run_kr_real_dart_smoke.py",
+        "ops/research_source_intake.py",
+        "ops/build_kr_real_combined_context_smoke.py",
+        "ops/run_date_md_smoke.py",
+        "ops/build_scout_manual_packet.py",
+    }
+)
+_FOLLOWUP_OPS_SCRIPT_PATTERN = re.compile(r"ops/[a-z_]+\.py")
+
 _TRADING_FORBIDDEN_KEYS = frozenset(
     {
         "action",
@@ -738,6 +754,26 @@ def _build_followup_commands(manifest: KrEndToEndPreflightManifest) -> list[str]
     return commands
 
 
+def _extract_followup_command_scripts(commands: list[str]) -> list[str]:
+    """comment line 제외 후 command string에서 ops 스크립트 경로를 추출한다."""
+    scripts: list[str] = []
+    for line in commands:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _FOLLOWUP_OPS_SCRIPT_PATTERN.search(stripped)
+        if match is not None:
+            scripts.append(match.group(0))
+    return scripts
+
+
+def _validate_followup_command_allowlist(commands: list[str]) -> None:
+    """생성된 follow-up command plan이 positive allowlist에 속하는지 검증한다."""
+    for script in _extract_followup_command_scripts(commands):
+        if script not in _FOLLOWUP_COMMAND_ALLOWLIST:
+            raise KrEndToEndPreflightError("validate", f"follow-up command not allowlisted: {script}")
+
+
 def _render_plan_markdown(
     manifest: KrEndToEndPreflightManifest,
     *,
@@ -794,11 +830,28 @@ def _render_plan_markdown(
     return "\n".join(lines)
 
 
-def _write_output(path: Path, content: str, *, force: bool) -> None:
+def _write_output(path: Path, content: str, *, force: bool, field_name: str) -> None:
+    """summary/plan 출력을 same-directory temp write → atomic replace로 기록한다."""
     if path.exists() and not force:
-        raise KrEndToEndPreflightError("write", f"output already exists: {path}")
+        raise KrEndToEndPreflightError("write", f"output already exists: {field_name}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    temp_path = path.parent / f".tmp_preflight_{field_name}_{uuid.uuid4().hex}.txt"
+
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(path)
+        temp_path = path
+    except KrEndToEndPreflightError:
+        raise
+    except Exception as exc:
+        raise KrEndToEndPreflightError(
+            "write",
+            f"output write failed: {type(exc).__name__}",
+        ) from None
+    finally:
+        if temp_path.exists() and temp_path != path:
+            temp_path.unlink()
 
 
 def run_kr_end_to_end_preflight(
@@ -822,6 +875,7 @@ def run_kr_end_to_end_preflight(
     followup_commands: list[str] | None = None
     if effective_emit:
         followup_commands = _build_followup_commands(manifest)
+        _validate_followup_command_allowlist(followup_commands)
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -845,7 +899,7 @@ def run_kr_end_to_end_preflight(
 
     summary_text = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     if effective_summary_out is not None:
-        _write_output(effective_summary_out, summary_text, force=force)
+        _write_output(effective_summary_out, summary_text, force=force, field_name="summary_out")
         result["summary_out"] = str(effective_summary_out)
 
     if effective_plan_out is not None:
@@ -856,7 +910,7 @@ def run_kr_end_to_end_preflight(
             warnings=warnings,
             followup_commands=followup_commands,
         )
-        _write_output(effective_plan_out, plan_text, force=force)
+        _write_output(effective_plan_out, plan_text, force=force, field_name="plan_out")
         result["plan_out"] = str(effective_plan_out)
 
     return result

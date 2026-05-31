@@ -80,6 +80,10 @@ sys.path.insert(0, str(REPO_ROOT / "ops"))
 from preflight_kr_end_to_end_intake import (
     KrEndToEndPreflightError,
     KrEndToEndPreflightManifest,
+    _FOLLOWUP_COMMAND_ALLOWLIST,
+    _extract_followup_command_scripts,
+    _validate_followup_command_allowlist,
+    _write_output,
     load_kr_end_to_end_preflight_manifest,
     run_kr_end_to_end_preflight,
 )
@@ -543,9 +547,21 @@ def test_output_exists_without_force_write_stage(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path, _valid_manifest_body())
     summary_out = tmp_path / "summary.json"
     summary_out.write_text("{}", encoding="utf-8")
-    with pytest.raises(KrEndToEndPreflightError, match="output already exists") as exc:
+    with pytest.raises(KrEndToEndPreflightError, match="output already exists: summary_out") as exc:
         run_kr_end_to_end_preflight(path, summary_out=summary_out, emit_followup_commands=False, force=False)
     assert exc.value.stage == "write"
+    assert str(summary_out) not in exc.value.message
+
+
+def test_output_exists_without_force_reports_field_name_not_path(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    plan_out = tmp_path / "plan.md"
+    plan_out.write_text("old", encoding="utf-8")
+    with pytest.raises(KrEndToEndPreflightError, match="output already exists: plan_out") as exc:
+        run_kr_end_to_end_preflight(path, plan_out=plan_out, emit_followup_commands=False, force=False)
+    assert exc.value.stage == "write"
+    assert str(plan_out) not in exc.value.message
 
 
 def test_force_allows_summary_plan_overwrite(tmp_path: Path) -> None:
@@ -687,3 +703,361 @@ def test_synthetic_manifest_with_optional_paths_from_fixture_dir() -> None:
     assert isinstance(manifest, KrEndToEndPreflightManifest)
     assert manifest.candidate_pool is not None
     assert manifest.factor_inputs is not None
+
+
+# --- 3H2 hardening: atomic write ---
+
+
+def test_write_output_summary_succeeds_normally(tmp_path: Path) -> None:
+    out_path = tmp_path / "summary.json"
+    _write_output(out_path, '{"status":"ok"}\n', force=True, field_name="summary_out")
+    assert out_path.read_text(encoding="utf-8") == '{"status":"ok"}\n'
+
+
+def test_write_output_plan_succeeds_normally(tmp_path: Path) -> None:
+    out_path = tmp_path / "plan.md"
+    _write_output(out_path, "# plan\n", force=True, field_name="plan_out")
+    assert out_path.read_text(encoding="utf-8") == "# plan\n"
+
+
+def test_force_overwrites_summary_only_after_temp_write_succeeds(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    summary_out = tmp_path / "summary.json"
+    summary_out.write_text('{"old": true}', encoding="utf-8")
+    payload = run_kr_end_to_end_preflight(path, summary_out=summary_out, emit_followup_commands=False, force=True)
+    written = json.loads(summary_out.read_text(encoding="utf-8"))
+    assert written["status"] == "ok"
+    assert payload["status"] == "ok"
+
+
+def test_force_overwrites_plan_only_after_temp_write_succeeds(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    plan_out = tmp_path / "plan.md"
+    plan_out.write_text("old plan", encoding="utf-8")
+    run_kr_end_to_end_preflight(path, plan_out=plan_out, emit_followup_commands=True, force=True)
+    assert "Preflight Plan" in plan_out.read_text(encoding="utf-8")
+    assert "old plan" not in plan_out.read_text(encoding="utf-8")
+
+
+def test_summary_temp_write_failure_preserves_existing_summary(tmp_path: Path) -> None:
+    out_path = tmp_path / "summary.json"
+    original = '{"status":"ok","preserved":true}\n'
+    out_path.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError, match="output write failed: PermissionError") as exc:
+            _write_output(out_path, '{"broken":true}\n', force=True, field_name="summary_out")
+    assert exc.value.stage == "write"
+    assert out_path.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_plan_temp_write_failure_preserves_existing_plan(tmp_path: Path) -> None:
+    out_path = tmp_path / "plan.md"
+    original = "# preserved plan\n"
+    out_path.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError, match="output write failed: PermissionError") as exc:
+            _write_output(out_path, "# broken\n", force=True, field_name="plan_out")
+    assert exc.value.stage == "write"
+    assert out_path.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_summary_replace_failure_preserves_existing_summary(tmp_path: Path) -> None:
+    out_path = tmp_path / "summary.json"
+    original = '{"status":"ok","preserved":true}\n'
+    out_path.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+    original_replace = Path.replace
+
+    def _raise_os_error(self: Path, target: Path) -> None:
+        if self.name.startswith(".tmp_preflight_summary_out_"):
+            raise OSError(f"replace blocked for {secret}")
+        original_replace(self, target)
+
+    with patch.object(Path, "replace", _raise_os_error):
+        with pytest.raises(KrEndToEndPreflightError, match="output write failed: OSError") as exc:
+            _write_output(out_path, '{"broken":true}\n', force=True, field_name="summary_out")
+    assert exc.value.stage == "write"
+    assert out_path.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_plan_replace_failure_preserves_existing_plan(tmp_path: Path) -> None:
+    out_path = tmp_path / "plan.md"
+    original = "# preserved plan\n"
+    out_path.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+    original_replace = Path.replace
+
+    def _raise_os_error(self: Path, target: Path) -> None:
+        if self.name.startswith(".tmp_preflight_plan_out_"):
+            raise OSError(f"replace blocked for {secret}")
+        original_replace(self, target)
+
+    with patch.object(Path, "replace", _raise_os_error):
+        with pytest.raises(KrEndToEndPreflightError, match="output write failed: OSError") as exc:
+            _write_output(out_path, "# broken\n", force=True, field_name="plan_out")
+    assert exc.value.stage == "write"
+    assert out_path.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_temp_files_cleaned_up_after_write_failure(tmp_path: Path) -> None:
+    out_path = tmp_path / "nested" / "summary.json"
+    out_path.parent.mkdir(parents=True)
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        if _self.name.startswith(".tmp_preflight_summary_out_"):
+            raise PermissionError("blocked")
+        Path.write_text(_self, *_args, **_kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError):
+            _write_output(out_path, '{"broken":true}\n', force=True, field_name="summary_out")
+    leftovers = list(out_path.parent.glob(".tmp_preflight_*"))
+    assert leftovers == []
+
+
+def test_temp_files_created_under_output_parent_not_global_tmp(tmp_path: Path) -> None:
+    out_path = tmp_path / "nested" / "summary.json"
+    observed_temp_parent: list[Path] = []
+    original_write_text = Path.write_text
+
+    def _capture_temp_write(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith(".tmp_preflight_summary_out_"):
+            observed_temp_parent.append(self.parent)
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _capture_temp_write):
+        _write_output(out_path, '{"status":"ok"}\n', force=True, field_name="summary_out")
+    assert observed_temp_parent == [out_path.parent]
+    assert out_path.is_file()
+
+
+# --- 3H2 hardening: error sanitization ---
+
+
+def test_universe_loader_failure_no_traceback_in_message(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    bad_universe = tmp_path / "universe.preflight.synthetic.toml"
+    bad_universe.write_text("version = 999\n", encoding="utf-8")
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    with pytest.raises(KrEndToEndPreflightError, match="universe load failed") as exc:
+        run_kr_end_to_end_preflight(path, emit_followup_commands=False)
+    assert exc.value.stage == "validate"
+    assert "Traceback" not in exc.value.message
+
+
+def test_provider_mapping_loader_failure_no_traceback_in_message(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    bad_mapping = tmp_path / "provider_mappings.preflight.synthetic.toml"
+    bad_mapping.write_text("version = 999\n", encoding="utf-8")
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    with pytest.raises(KrEndToEndPreflightError, match="provider mapping load failed") as exc:
+        run_kr_end_to_end_preflight(path, emit_followup_commands=False)
+    assert exc.value.stage == "validate"
+    assert "Traceback" not in exc.value.message
+
+
+def test_provider_mapping_coverage_failure_may_include_symbol_context(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(
+        tmp_path,
+        _valid_manifest_body(provider_mapping="provider_mappings.preflight.incomplete.toml"),
+    )
+    with pytest.raises(KrEndToEndPreflightError, match="provider mapping coverage failed") as exc:
+        run_kr_end_to_end_preflight(path, emit_followup_commands=False)
+    assert exc.value.stage == "validate"
+    assert "Traceback" not in exc.value.message
+
+
+def test_optional_artifact_parser_failure_no_raw_traceback(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    pool_path = tmp_path / "bad_pool.toml"
+    pool_path.write_text("version = 999\n", encoding="utf-8")
+    path = _write_manifest(
+        tmp_path,
+        _valid_manifest_body(extra=f'candidate_pool = "{pool_path.name}"'),
+    )
+    with pytest.raises(KrEndToEndPreflightError, match="optional artifact parse failed: candidate_pool") as exc:
+        run_kr_end_to_end_preflight(path, emit_followup_commands=False)
+    assert exc.value.stage == "validate"
+    assert "Traceback" not in exc.value.message
+
+
+def test_output_write_failure_sanitizes_secret_from_exception(tmp_path: Path) -> None:
+    out_path = tmp_path / "summary.json"
+    secret = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError) as exc:
+            _write_output(out_path, '{"status":"ok"}\n', force=True, field_name="summary_out")
+    assert exc.value.stage == "write"
+    assert exc.value.message == "output write failed: PermissionError"
+    assert secret not in exc.value.message
+    assert exc.value.__cause__ is None
+
+
+def test_cli_known_errors_json_status_error_no_traceback(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body(universe="missing.toml"))
+    result = _run_cli("--manifest", str(path), "--no-emit-followup-commands", "--json")
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_known_errors_no_endpoint_urls(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body(universe="missing.toml"))
+    result = _run_cli("--manifest", str(path), "--no-emit-followup-commands", "--json")
+    combined = result.stdout + result.stderr
+    assert "https://" not in combined
+    assert "http://" not in combined
+
+
+def test_cli_known_errors_no_env_api_key_strings(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body(universe="missing.toml"))
+    result = _run_cli("--manifest", str(path), "--no-emit-followup-commands", "--json")
+    combined = (result.stdout + result.stderr).lower()
+    assert "fred_api_key" not in combined
+    assert "dart_api_key" not in combined
+    assert "api_key" not in combined
+
+
+# --- 3H2 hardening: command plan allowlist ---
+
+
+def test_generated_command_plan_validates_against_positive_allowlist(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    scripts = _extract_followup_command_scripts(payload["followup_commands"])
+    assert scripts
+    for script in scripts:
+        assert script in _FOLLOWUP_COMMAND_ALLOWLIST
+
+
+def test_allowlist_contains_only_existing_repo_files() -> None:
+    for script in _FOLLOWUP_COMMAND_ALLOWLIST:
+        assert (REPO_ROOT / script).is_file(), f"allowlisted script must exist: {script}"
+
+
+def test_generated_command_plan_no_invented_3h1_command(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    joined = "\n".join(payload["followup_commands"])
+    assert "preflight_kr_end_to_end_intake.py" not in joined
+
+
+def test_disallowed_followup_command_fails_validate_stage(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    bad_commands = [
+        "# Review-only",
+        "PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",
+    ]
+    with patch("preflight_kr_end_to_end_intake._build_followup_commands", return_value=bad_commands):
+        with pytest.raises(KrEndToEndPreflightError, match="follow-up command not allowlisted") as exc:
+            run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    assert exc.value.stage == "validate"
+
+
+def test_validate_followup_command_allowlist_rejects_disallowed_script() -> None:
+    with pytest.raises(KrEndToEndPreflightError, match="follow-up command not allowlisted") as exc:
+        _validate_followup_command_allowlist(
+            ["PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json"],
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_comment_lines_in_plan_not_subject_to_allowlist() -> None:
+    commands = [
+        "# cat /tmp/autostock_fred_YYYY-MM-DD.jsonl /tmp/price.jsonl > /tmp/combined.jsonl",
+        "PYTHONPATH=src uv run python ops/validate_provider_mapping.py --json",
+    ]
+    _validate_followup_command_allowlist(commands)
+    scripts = _extract_followup_command_scripts(commands)
+    assert scripts == ["ops/validate_provider_mapping.py"]
+
+
+def test_followup_plan_no_submit_order_token(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    joined = "\n".join(payload["followup_commands"]).lower()
+    sensitive = "submit_" + "order"
+    assert sensitive not in joined
+
+
+def test_no_subprocess_os_system_exec_eval_in_ops_source() -> None:
+    source = OPS_SCRIPT.read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "subprocess" not in lowered
+    assert "os.system" not in lowered
+    assert " exec(" not in lowered
+    assert " eval(" not in lowered
+
+
+def test_summary_json_schema_compatible_with_3h1(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    expected_keys = {
+        "status",
+        "stage",
+        "mode",
+        "manifest",
+        "name",
+        "artifacts",
+        "provider_mapping_validation",
+        "optional_artifact_checks",
+        "settings",
+        "warnings",
+        "followup_commands",
+    }
+    assert expected_keys <= set(payload.keys())
+
+
+def test_plan_markdown_contains_manual_followup_commands(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    plan_out = tmp_path / "plan.md"
+    run_kr_end_to_end_preflight(path, plan_out=plan_out, emit_followup_commands=True, force=True)
+    text = plan_out.read_text(encoding="utf-8")
+    assert "Follow-up commands to run manually" in text
+    assert "ops/validate_provider_mapping.py" in text
+
+
+def test_static_scan_shared_forbidden_tuple_unchanged() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert '"requests"' in text
+    assert '"httpx"' in text
+    assert '"aiohttp"' in text
+    assert '"urllib.request"' in text
+    assert '"urllib.parse"' in text
+    assert '"urllib.error"' in text
+    assert '"kis"' in text
+    assert '"paperbroker"' in text
+    assert '"paperlooprunner"' in text
+    assert '"submit_order"' in text
