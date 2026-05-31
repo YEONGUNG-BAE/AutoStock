@@ -900,6 +900,28 @@ PYTHONPATH=src uv run python ops/run_kr_factor_source_live_smoke.py \
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
 
+**3H0 operator note — end-to-end intake guardrail checkpoint (docs-only; no new command):**
+
+**3H0** documents the approved operator-local path from KR candidate discovery/ranking/factor scoring through 3E combined research context and Scout packet. It is a **guardrail checkpoint only** — there is **no** `ops/run_3h0_*.py` command and **no** 3H1 preflight helper yet.
+
+**Approved high-level order of operations** (each step uses **existing** ops scripts; detail in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md` § 3H0](REAL_RESEARCH_SOURCE_INTAKE.md#3h0--operator-end-to-end-intake-guardrail-checkpoint)):
+
+1. **Discovery side** — produce a reviewable sector-tagged candidate pool only (`ops/replay_kr_discovery_snapshot.py`, `ops/run_kr_discovery_live_smoke.py`, `ops/run_kr_discovery_source_live_smoke.py`, optional `ops/map_kr_discovery_fixture.py`). No direct universe/provider mapping mutation.
+2. **Factor side** — immutable raw factor snapshot + optional canonical factor input TOML (`ops/run_kr_factor_source_live_smoke.py`, `ops/map_kr_factor_fixture.py`). No direct ranking/universe/mapping mutation from live factor smoke.
+3. **Ranking/generation** — factor input TOML → `ops/generate_kr_factor_signals.py`; factor-ranked mapping → `ops/build_kr_factor_ranked_mapping.py`; bundle → `ops/build_kr_factor_bundle_mapping.py`. Generated universe/provider mapping TOML remains operator-reviewable; checked-in `config/universe*.toml` and `config/provider_mappings*.toml` are **not** auto-mutated.
+4. **Validation** — generated mapping must pass `load_universe_toml`, `load_provider_mapping_toml`, and `validate_provider_mappings_cover_universe(require_yfinance=True, require_dart=True)` (CLI: `ops/validate_provider_mapping.py`).
+5. **3E research intake** — operator **explicitly** runs PRICE smoke (`ops/run_kr_real_price_smoke.py`) and DART smoke (`ops/run_kr_real_dart_smoke.py`) using **reviewed** generated universe/mapping paths only when chosen; FRED macro JSONL stays separate; concatenate JSONL sources explicitly; combined context via `ops/build_kr_real_combined_context_smoke.py` with context budget cap.
+6. **Context/Scout** — 8B validate-only first; 8B normal with `--context-budget-profile kr-real-smoke`; 8C `--require-symbol-coverage` relies on PRICE; DART disclosures remain context-only (`market=None`); Scout consumes capped Date.md date_ids. No broker/PaperLoop/KIS/write path.
+
+**Operator reminders:**
+
+- Write all generated artifacts to **`/tmp`** or **`runtime/`** first — never auto-promote into checked-in `config/`.
+- Do **not** commit generated universe/provider mapping until operator review completes.
+- PRICE, DART, and combined context smokes remain **separate explicit operator commands** — no automatic chaining in 3H0.
+- Ranking/factor scores are **advisory metadata only** — not buy/sell/hold signals or allocation guidance.
+
+**Deferred next step:** **3H1** operator-local manifest/preflight helper (unimplemented; no CLI examples here).
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
 `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
