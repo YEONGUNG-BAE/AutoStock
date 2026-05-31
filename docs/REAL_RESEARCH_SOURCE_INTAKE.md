@@ -1326,6 +1326,57 @@ Factor scoring must not call:
 
 ---
 
+## 3G4-1 — fixture-first factor signal generator
+
+**Status:** implemented
+
+**Purpose:**
+Convert explicit local factor input artifacts into 3G3-1-compatible ranking signal TOML. Advisory research metadata only — not live factor scoring, not trading instruction, not universe/provider mapping mutation.
+
+**Scope:**
+
+| Component | Path | Network |
+|---|---|---|
+| **3G4-1** | `kr_factor_signal_generator.py` + `ops/generate_kr_factor_signals.py` + tests | None |
+
+**Fixture-first path:**
+
+```text
+local factor input TOML
+→ generate_kr_factor_signals.py
+→ ranking signal TOML (3G3-1 schema)
+→ rank_kr_candidates
+→ selected candidates
+→ 3F1 generator (candidate pool yfinance + corp-code snapshot)
+→ provider mapping validation
+→ operator review
+```
+
+**Rules:**
+
+- Output is ranking-signal-compatible TOML only (`liquidity_score`, `market_cap_score`, `quality_score`, `momentum_score`, `risk_penalty`, `score_version`, `as_of`, optional `notes`)
+- No `action`/`buy`/`sell`/`hold`/order/allocation fields
+- No `corp_code`, no `yfinance_provider_symbol`, no provider mapping/universe output
+- Symbol normalization via existing `normalize_stock_code` (must match candidate pool lookup keys)
+- Self-validation via existing `parse_ranking_signals_toml`
+- Live factor scoring remains **deferred** (3G4-3+)
+
+**3G4-1 ops helper (local files only; no env/API keys):**
+
+```bash
+PYTHONPATH=src uv run python ops/generate_kr_factor_signals.py \
+  --factor-inputs tests/fixtures/research/kr_factors/kr_factor_inputs.synthetic.toml \
+  --out-signals /tmp/kr_ranking_signals.generated.toml \
+  --output-name kr-factor-signals-synthetic-v1 \
+  --output-description "Synthetic fixture-first KR factor signals." \
+  --force \
+  --json
+```
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_signal_generator.py -v`.
+
+---
+
 ## 11. Recommended first source
 
 ### Choice: **FRED (`FactType.MACRO`)**

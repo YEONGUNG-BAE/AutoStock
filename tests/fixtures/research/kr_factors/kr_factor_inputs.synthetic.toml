@@ -1,0 +1,61 @@
+# Synthetic fixture factor inputs for 3G4-1 KR factor signal generator tests.
+version = 1
+name = "kr-factor-inputs-synthetic-v1"
+description = "Synthetic fixture factor inputs for KR factor signal generator tests."
+as_of = "2026-05-30T00:00:00+09:00"
+factor_score_version = "kr-factor-fixture-v1"
+
+[[factors]]
+symbol = "900001"
+market = "KR"
+liquidity_percentile = 0.95
+market_cap_percentile = 0.90
+profitability_score = 0.85
+balance_sheet_score = 0.75
+momentum_percentile = 0.70
+volatility_risk = 0.10
+notes = "Synthetic fixture only."
+
+[[factors]]
+symbol = "KR:900002"
+market = "KR"
+liquidity_percentile = 0.80
+market_cap_percentile = 0.70
+profitability_score = 0.95
+balance_sheet_score = 0.85
+momentum_percentile = 0.60
+volatility_risk = 0.05
+notes = "Synthetic fixture only; market-prefixed symbol normalization."
+
+[[factors]]
+symbol = "900003"
+market = "KR"
+liquidity_percentile = 0.70
+market_cap_percentile = 0.75
+profitability_score = 0.60
+balance_sheet_score = 0.70
+momentum_percentile = 0.85
+volatility_risk = 0.20
+notes = "Synthetic fixture only."
+
+[[factors]]
+symbol = "900004"
+market = "KR"
+liquidity_percentile = 0.55
+market_cap_percentile = 0.50
+profitability_score = 0.45
+balance_sheet_score = 0.40
+momentum_percentile = 0.35
+volatility_risk = 0.30
+notes = "Synthetic fixture only; disabled downstream in candidate pool."
+
+[[factors]]
+symbol = "900005"
+market = "KR"
+liquidity_percentile = 0.40
+market_cap_percentile = 0.45
+profitability_score = 0.35
+balance_sheet_score = 0.30
+momentum_percentile = 0.25
+volatility_risk = 0.15
+notes = "Synthetic fixture only; ineligible downstream in candidate pool."
