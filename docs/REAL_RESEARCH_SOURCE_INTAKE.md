@@ -1928,9 +1928,24 @@ Optional `--base-dir PATH` on `ops/verify_kr_end_to_end_handoff_manifest.py` enf
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H11+ (unimplemented)**
+### 3H11 — handoff manifest verifier optional verification report
 
-**3H11+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** Implemented (audit artifact only; no execution).
+
+Optional `--verification-report-out PATH` and `--force` on `ops/verify_kr_end_to_end_handoff_manifest.py` emit a compact verification report JSON **only after successful verification**. Report summarizes verification results (artifact roles, counts, flags) for operator handoff/archive/audit — excludes artifact bodies, manifest body, and command lines. Public `verify_kr_end_to_end_handoff_manifest(...)` API remains read-only; CLI uses `run_verify_kr_end_to_end_handoff_manifest(...)`.
+
+| Area | Behavior |
+|---|---|
+| **CLI** | `ops/verify_kr_end_to_end_handoff_manifest.py --manifest PATH [--base-dir PATH] [--verification-report-out PATH] [--force] [--json]` |
+| **Report mode** | `kr-end-to-end-handoff-manifest-verification-report` (distinct from CLI success mode and input manifest mode) |
+| **Write ordering** | Report existence/force checked and written only after verification succeeds; validation failures remain `parse`/`validate` |
+| **Compatibility** | Omitting `--verification-report-out` preserves 3H8/3H9/3H10 success JSON key set unchanged |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H12+ (unimplemented)**
+
+**3H12+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

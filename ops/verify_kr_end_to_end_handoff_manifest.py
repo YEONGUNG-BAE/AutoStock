@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10).
+"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10/3H11).
 
 3H7 handoff manifest JSON → schema/integrity/metadata 재검증만 수행.
 3H9: top-level·artifact entry exact-key schema lock(unknown key 거부).
 3H10: optional --base-dir path containment(해석된 canonical path만 비교).
+3H11: optional --verification-report-out compact audit report(검증 성공 후에만 기록).
 artifact/manifest mutation·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -14,14 +15,17 @@ import hashlib
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
-StageName = Literal["args", "parse", "validate", "complete"]
+StageName = Literal["args", "parse", "validate", "write", "complete"]
 
 _MODE = "kr-end-to-end-handoff-manifest-verification"
+_REPORT_MODE = "kr-end-to-end-handoff-manifest-verification-report"
 _MANIFEST_MODE = "kr-end-to-end-handoff-manifest"
 _GENERATED_BY = "ops/build_kr_end_to_end_handoff_manifest.py"
+_REPORT_GENERATED_BY = "ops/verify_kr_end_to_end_handoff_manifest.py"
 
 _STRUCTURED_PLAN_MODE = "kr-end-to-end-intake-followup-plan"
 _VALIDATION_REPORT_MODE = "kr-end-to-end-preflight-plan-validation-report"
@@ -368,12 +372,12 @@ def _validate_manifest_schema(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return validated_entries
 
 
-def verify_kr_end_to_end_handoff_manifest(
+def _verify_handoff_manifest_with_entries(
     path: Path,
     *,
     base_dir: Path | None = None,
-) -> dict[str, object]:
-    """handoff manifest JSON을 로드·검증하고 성공 summary dict를 반환한다."""
+) -> tuple[dict[str, object], list[str], Path | None]:
+    """handoff manifest를 검증하고 success summary·artifact role 목록·resolved base_dir를 반환한다."""
     manifest_path = path.resolve()
     resolved_base = _resolve_base_dir(base_dir)
     if resolved_base is not None:
@@ -385,11 +389,23 @@ def verify_kr_end_to_end_handoff_manifest(
     for entry in validated_entries:
         _verify_artifact_entry(entry, base_dir=resolved_base)
 
-    return _build_success_payload(
+    artifact_roles = [entry["role"] for entry in validated_entries]
+    summary = _build_success_payload(
         manifest_path,
         artifacts_count=len(validated_entries),
         resolved_base=resolved_base,
     )
+    return summary, artifact_roles, resolved_base
+
+
+def verify_kr_end_to_end_handoff_manifest(
+    path: Path,
+    *,
+    base_dir: Path | None = None,
+) -> dict[str, object]:
+    """handoff manifest JSON을 로드·검증하고 성공 summary dict를 반환한다(read-only)."""
+    summary, _, _ = _verify_handoff_manifest_with_entries(path, base_dir=base_dir)
+    return summary
 
 
 def _build_success_payload(
@@ -417,6 +433,81 @@ def _build_success_payload(
     return payload
 
 
+def _build_verification_report(
+    summary: dict[str, object],
+    artifact_roles: list[str],
+    *,
+    resolved_base: Path | None,
+) -> dict[str, object]:
+    """검증 성공 summary와 role 목록으로 compact audit report JSON을 구성한다."""
+    return {
+        "version": 1,
+        "mode": _REPORT_MODE,
+        "status": "ok",
+        "stage": "complete",
+        "generated_by": _REPORT_GENERATED_BY,
+        "manifest": summary["manifest"],
+        "base_dir": str(resolved_base) if resolved_base is not None else None,
+        "path_containment_verified": resolved_base is not None,
+        "artifacts_count": summary["artifacts_count"],
+        "verified_artifacts_count": summary["verified_artifacts_count"],
+        "hashes_verified": summary["hashes_verified"],
+        "metadata_verified": summary["metadata_verified"],
+        "schema_verified": True,
+        "commands_execute_in_verifier": summary["commands_execute_in_verifier"],
+        "review_only": summary["review_only"],
+        "artifact_roles": artifact_roles,
+    }
+
+
+def _write_verification_report_output(path: Path, report: dict[str, Any], *, force: bool) -> None:
+    """verification report JSON을 atomic replace로 기록한다."""
+    report_out = path.resolve()
+    if report_out.exists() and not force:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "write",
+            "output already exists: verification_report_out",
+        )
+
+    report_out.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = report_out.parent / f".tmp_handoff_verification_report_{uuid.uuid4().hex}.json"
+    try:
+        serialized = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        temp_path.write_text(serialized, encoding="utf-8")
+        temp_path.replace(report_out)
+    except OSError as exc:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "write",
+            f"output write failed: {type(exc).__name__}",
+        ) from None
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def run_verify_kr_end_to_end_handoff_manifest(
+    path: Path,
+    *,
+    base_dir: Path | None = None,
+    verification_report_out: Path | None = None,
+    force: bool = False,
+) -> dict[str, object]:
+    """handoff manifest를 검증하고, 선택적으로 verification report JSON을 기록한다."""
+    summary, artifact_roles, resolved_base = _verify_handoff_manifest_with_entries(path, base_dir=base_dir)
+
+    if verification_report_out is None:
+        return summary
+
+    report_path = verification_report_out.resolve()
+    report = _build_verification_report(summary, artifact_roles, resolved_base=resolved_base)
+    _write_verification_report_output(report_path, report, force=force)
+
+    result = dict(summary)
+    result["verification_report_out"] = str(report_path)
+    result["verification_report_written"] = True
+    return result
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="KR end-to-end handoff manifest verifier — read-only integrity/metadata audit.",
@@ -425,6 +516,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-dir",
         help="optional base directory; manifest and artifact paths must resolve within it",
+    )
+    parser.add_argument(
+        "--verification-report-out",
+        default=None,
+        help="optional compact verification report JSON path (written only after successful verification)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing verification_report_out when supplied (no-op without --verification-report-out)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON to stdout")
     return parser
@@ -469,8 +570,29 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         base_dir = Path(args.base_dir)
 
+    verification_report_out: Path | None = None
+    if args.verification_report_out is not None:
+        if not str(args.verification_report_out).strip():
+            error_payload = {
+                "status": "error",
+                "stage": "args",
+                "message": "verification report output path is required",
+                "mode": _MODE,
+            }
+            if args.json:
+                _emit_json(error_payload, stream=sys.stdout)
+            else:
+                print(error_payload["message"], file=sys.stderr)
+            return 1
+        verification_report_out = Path(args.verification_report_out)
+
     try:
-        payload = verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=base_dir)
+        payload = run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=base_dir,
+            verification_report_out=verification_report_out,
+            force=bool(args.force),
+        )
     except KrEndToEndHandoffManifestVerifyError as exc:
         error_payload = {"status": "error", "stage": exc.stage, "message": exc.message, "mode": _MODE}
         if args.json:

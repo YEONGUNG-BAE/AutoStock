@@ -103,9 +103,13 @@ from build_kr_end_to_end_handoff_manifest import (
 )
 from verify_kr_end_to_end_handoff_manifest import (
     KrEndToEndHandoffManifestVerifyError,
+    _build_verification_report,
     _validate_artifact_entry_schema,
     _validate_manifest_schema,
+    _verify_handoff_manifest_with_entries,
+    _write_verification_report_output,
     load_handoff_manifest,
+    run_verify_kr_end_to_end_handoff_manifest,
     verify_kr_end_to_end_handoff_manifest,
 )
 from validate_kr_end_to_end_preflight_plan import (
@@ -4341,3 +4345,662 @@ def test_handoff_verifier_containment_failure_messages_do_not_echo_resolved_path
     assert error["message"] == "manifest path escapes base directory"
     assert str(manifest_outside.resolve()) not in proc.stdout
     assert str(bundle_dir.resolve()) not in proc.stdout
+
+
+# --- 3H11: handoff manifest verifier optional verification report ---
+
+
+_HANDOFF_VERIFY_REPORT_EXPECTED_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status",
+        "stage",
+        "generated_by",
+        "manifest",
+        "base_dir",
+        "path_containment_verified",
+        "artifacts_count",
+        "verified_artifacts_count",
+        "hashes_verified",
+        "metadata_verified",
+        "schema_verified",
+        "commands_execute_in_verifier",
+        "review_only",
+        "artifact_roles",
+    }
+)
+
+_VERIFY_SUCCESS_KEYS_WITH_REPORT = _VERIFY_SUCCESS_KEYS | {
+    "verification_report_out",
+    "verification_report_written",
+}
+
+_VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT_AND_REPORT = _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT | {
+    "verification_report_out",
+    "verification_report_written",
+}
+
+_EXPECTED_ARTIFACT_ROLES = (
+    "preflight_summary",
+    "plan_md",
+    "structured_plan",
+    "validation_report",
+)
+
+
+def test_handoff_verifier_happy_path_without_report_out_unchanged(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert result["status"] == "ok"
+    assert "verification_report_out" not in result
+    assert "verification_report_written" not in result
+
+
+def test_handoff_verifier_base_dir_without_report_out_unchanged(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=tmp_path)
+    assert set(result.keys()) == _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT
+    assert "verification_report_out" not in result
+    assert "verification_report_written" not in result
+
+
+def test_handoff_verifier_cli_accepts_verification_report_out(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report_out.is_file()
+
+
+def test_handoff_verifier_cli_accepts_force_flag(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(report_out.read_text(encoding="utf-8"))
+    assert written["status"] == "ok"
+
+
+def test_handoff_verifier_wrapper_writes_report_after_success(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    result = run_verify_kr_end_to_end_handoff_manifest(
+        manifest_path,
+        verification_report_out=report_out,
+        force=True,
+    )
+    assert result["verification_report_written"] is True
+    assert result["verification_report_out"] == str(report_out.resolve())
+    assert report_out.is_file()
+
+
+def test_handoff_verifier_force_without_report_out_is_harmless_noop(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    proc = _run_verify_cli("--manifest", str(manifest_path), "--force", "--json")
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS
+    assert "verification_report_written" not in payload
+
+
+def test_handoff_verifier_report_out_omitted_preserves_success_keys_without_base_dir(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    proc = _run_verify_cli("--manifest", str(manifest_path), "--json")
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS
+
+
+def test_handoff_verifier_report_out_omitted_preserves_success_keys_with_base_dir(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(tmp_path),
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT
+
+
+def test_handoff_verifier_report_out_adds_success_keys(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS_WITH_REPORT
+    assert payload["verification_report_written"] is True
+    assert payload["verification_report_out"] == str(report_out.resolve())
+
+
+def test_handoff_verifier_report_out_omitted_does_not_add_written_false(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    result = run_verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert "verification_report_written" not in result
+
+
+def test_handoff_verifier_report_top_level_schema(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert set(report.keys()) == _HANDOFF_VERIFY_REPORT_EXPECTED_KEYS
+
+
+def test_handoff_verifier_report_mode_is_verification_report_mode(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+
+
+def test_handoff_verifier_cli_success_mode_unchanged_with_report_out(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["mode"] == "kr-end-to-end-handoff-manifest-verification"
+
+
+def test_handoff_verifier_report_manifest_path_and_base_dir_null(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["manifest"] == str(manifest_path.resolve())
+    assert report["base_dir"] is None
+    assert report["path_containment_verified"] is False
+
+
+def test_handoff_verifier_report_base_dir_and_containment_when_supplied(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(tmp_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["base_dir"] == str(tmp_path.resolve())
+    assert report["path_containment_verified"] is True
+
+
+def test_handoff_verifier_report_artifacts_counts(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["artifacts_count"] == 4
+    assert report["verified_artifacts_count"] == 4
+
+
+def test_handoff_verifier_report_verification_flags_true(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["hashes_verified"] is True
+    assert report["metadata_verified"] is True
+    assert report["schema_verified"] is True
+
+
+def test_handoff_verifier_report_review_only_and_no_command_execution(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["commands_execute_in_verifier"] is False
+    assert report["review_only"] is True
+
+
+def test_handoff_verifier_report_artifact_roles_only_not_full_entries(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+    assert "artifacts" not in report
+    for role in _EXPECTED_ARTIFACT_ROLES:
+        assert role in report["artifact_roles"]
+
+
+def test_handoff_verifier_report_contains_no_manifest_body(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_sha = manifest_payload["artifacts"][0]["sha256"]
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8")
+    assert artifact_sha not in dumped
+    assert "all_artifacts_present" not in dumped
+    assert "artifacts" not in json.loads(dumped)
+
+
+def test_handoff_verifier_report_contains_no_artifact_body(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    secret = "SECRET_ARTIFACT_BODY_NOT_IN_REPORT"
+    plan = _valid_plan_md_path(tmp_path)
+    plan.write_text(plan.read_text(encoding="utf-8") + f"\n{secret}\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest_with_secret.json"
+    build_kr_end_to_end_handoff_manifest(manifest_out=manifest_out, plan_md=plan, force=True)
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_out),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8")
+    assert secret not in dumped
+
+
+def test_handoff_verifier_report_contains_no_command_lines(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8")
+    assert "PYTHONPATH=src" not in dumped
+    assert "command" not in json.loads(dumped)
+
+
+def test_handoff_verifier_failure_does_not_create_report(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["mode"] = "wrong-mode"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_invalid_manifest_with_report_out_fails_at_parse_not_write(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "handoff_manifest.json"
+    path.write_text("{not-json", encoding="utf-8")
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"preexisting": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(path),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "parse"
+    assert json.loads(report_out.read_text(encoding="utf-8"))["preexisting"] is True
+
+
+def test_handoff_verifier_containment_failure_does_not_create_report(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_outside = outside_dir / "handoff_manifest.json"
+    artifacts = _all_four_artifact_paths(bundle_dir)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_outside,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_outside),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_report_exists_without_force_write_stage(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "write"
+
+
+def test_handoff_verifier_report_exists_error_uses_field_name_not_path(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    error = json.loads(proc.stdout)
+    assert error["message"] == "output already exists: verification_report_out"
+    assert str(report_out) not in error["message"]
+
+
+def test_handoff_verifier_force_overwrites_existing_report(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(report_out.read_text(encoding="utf-8"))
+    assert written["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert "old" not in written
+
+
+def test_handoff_verifier_report_write_failure_preserves_existing_report(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    original = '{"status":"ok","preserved":true}\n'
+    report_out.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+    summary, roles, resolved_base = _verify_handoff_manifest_with_entries(manifest_path)
+    report = _build_verification_report(summary, roles, resolved_base=resolved_base)
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(
+            KrEndToEndHandoffManifestVerifyError,
+            match="output write failed: PermissionError",
+        ) as exc:
+            _write_verification_report_output(report_out, report, force=True)
+    assert exc.value.stage == "write"
+    assert report_out.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_handoff_verifier_report_write_failure_sanitizes_exception_detail(tmp_path: Path) -> None:
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    secret = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc:
+            _write_verification_report_output(
+                report_out,
+                {"version": 1, "mode": "kr-end-to-end-handoff-manifest-verification-report"},
+                force=True,
+            )
+    assert exc.value.message == "output write failed: PermissionError"
+    assert secret not in exc.value.message
+    assert exc.value.__cause__ is None
+
+
+def test_handoff_verifier_report_temp_file_cleaned_after_write_failure(tmp_path: Path) -> None:
+    report_out = tmp_path / "nested" / "handoff_manifest_verification_report.json"
+    report_out.parent.mkdir(parents=True)
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        if _self.name.startswith(".tmp_handoff_verification_report_"):
+            raise PermissionError("blocked")
+        Path.write_text(_self, *_args, **_kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndHandoffManifestVerifyError):
+            _write_verification_report_output(
+                report_out,
+                {"version": 1, "mode": "kr-end-to-end-handoff-manifest-verification-report"},
+                force=True,
+            )
+    leftovers = list(report_out.parent.glob(".tmp_handoff_verification_report_*"))
+    assert leftovers == []
+
+
+def test_handoff_verifier_report_temp_file_created_under_report_parent(tmp_path: Path) -> None:
+    report_out = tmp_path / "nested" / "handoff_manifest_verification_report.json"
+    observed_temp_parent: list[Path] = []
+    original_write_text = Path.write_text
+
+    def _capture_temp_write(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith(".tmp_handoff_verification_report_"):
+            observed_temp_parent.append(self.parent)
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _capture_temp_write):
+        _write_verification_report_output(
+            report_out,
+            {"version": 1, "mode": "kr-end-to-end-handoff-manifest-verification-report", "status": "ok"},
+            force=True,
+        )
+    assert observed_temp_parent == [report_out.parent]
+    assert report_out.is_file()
+
+
+def test_handoff_verifier_cli_report_write_errors_no_traceback(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_handoff_verifier_report_json_no_endpoint_urls(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8").lower()
+    assert "http://" not in dumped
+    assert "https://" not in dumped
+
+
+def test_handoff_verifier_report_json_no_env_api_key_names(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8").lower()
+    assert "api_key" not in dumped
+    assert "fred_api_key" not in dumped
+    assert "dart_api_key" not in dumped
+
+
+def test_handoff_verifier_report_json_no_trading_action_order_allocation_fields(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    forbidden = {"action", "order", "allocation", "buy", "sell", "hold", "position", "broker"}
+    assert forbidden.isdisjoint(set(report.keys()))
+
+
+def test_handoff_verifier_blank_verification_report_out_args_stage_cli() -> None:
+    proc = _run_verify_cli(
+        "--manifest",
+        "manifest.json",
+        "--verification-report-out",
+        "   ",
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "args"
+    assert error["message"] == "verification report output path is required"
+
+
+def test_handoff_verifier_with_base_dir_and_report_adds_all_success_keys(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(tmp_path),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT_AND_REPORT
+
