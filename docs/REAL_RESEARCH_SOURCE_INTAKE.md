@@ -1913,9 +1913,24 @@ Exact-key schema lock for 3H8 handoff manifest verifier — unknown top-level ma
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H10+ (unimplemented)**
+### 3H10 — handoff manifest verifier optional path containment
 
-**3H10+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** Implemented (read-only; no execution).
+
+Optional `--base-dir PATH` on `ops/verify_kr_end_to_end_handoff_manifest.py` enforces that the manifest file and every referenced artifact path resolve within an operator-supplied base directory. Uses canonical resolved paths only (`Path.resolve()` + `Path.is_relative_to()`); writes no files; does not execute commands.
+
+| Area | Behavior |
+|---|---|
+| **CLI** | `ops/verify_kr_end_to_end_handoff_manifest.py --manifest PATH [--base-dir PATH] [--json]` |
+| **Containment** | When `--base-dir` is supplied: manifest path checked before read; each artifact path checked after entry schema validation and before stat/read |
+| **Success JSON** | Adds `base_dir` and `path_containment_verified=true` only when `--base-dir` is supplied |
+| **Compatibility** | Omitting `--base-dir` preserves 3H8/3H9 behavior unchanged |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H11+ (unimplemented)**
+
+**3H11+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

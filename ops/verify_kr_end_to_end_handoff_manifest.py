@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest verifier (3H8/3H9).
+"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10).
 
 3H7 handoff manifest JSON → schema/integrity/metadata 재검증만 수행.
 3H9: top-level·artifact entry exact-key schema lock(unknown key 거부).
+3H10: optional --base-dir path containment(해석된 canonical path만 비교).
 artifact/manifest mutation·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -81,6 +82,31 @@ def _required_nonblank_string(value: object, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise KrEndToEndHandoffManifestVerifyError("validate", f"{field_name} is required")
     return value.strip()
+
+
+def _resolve_base_dir(base_dir: Path | None) -> Path | None:
+    """base_dir가 주어지면 resolve 후 존재·디렉터리 여부를 검증한다."""
+    if base_dir is None:
+        return None
+    if not str(base_dir).strip():
+        raise KrEndToEndHandoffManifestVerifyError("args", "base directory path is required")
+    resolved = base_dir.resolve()
+    if not resolved.exists():
+        raise KrEndToEndHandoffManifestVerifyError("validate", "base directory not found")
+    if not resolved.is_dir():
+        raise KrEndToEndHandoffManifestVerifyError("validate", "base directory is not a directory")
+    return resolved
+
+
+def _assert_path_within_base(path: Path, base_dir: Path, *, field_name: str) -> None:
+    """해석된 canonical path만으로 base_dir 내부 포함 여부를 검증한다."""
+    resolved_child = path.resolve()
+    resolved_base = base_dir.resolve()
+    if not resolved_child.is_relative_to(resolved_base):
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            f"{field_name} path escapes base directory",
+        )
 
 
 def load_handoff_manifest(path: Path) -> dict[str, Any]:
@@ -239,9 +265,12 @@ def _compare_recorded_json_metadata(
         raise KrEndToEndHandoffManifestVerifyError("validate", "artifact json_stage mismatch")
 
 
-def _verify_artifact_entry(entry: dict[str, Any]) -> None:
+def _verify_artifact_entry(entry: dict[str, Any], *, base_dir: Path | None = None) -> None:
     """단일 artifact entry의 path/size/sha256 및 JSON metadata를 재검증한다."""
-    artifact_path = Path(entry["path"]).resolve()
+    artifact_path = Path(entry["path"])
+    if base_dir is not None:
+        _assert_path_within_base(artifact_path, base_dir, field_name=entry["role"])
+    artifact_path = artifact_path.resolve()
     if not artifact_path.exists():
         raise KrEndToEndHandoffManifestVerifyError("validate", f"{entry['role']} artifact not found")
     if not artifact_path.is_file():
@@ -339,21 +368,38 @@ def _validate_manifest_schema(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return validated_entries
 
 
-def verify_kr_end_to_end_handoff_manifest(path: Path) -> dict[str, Any]:
+def verify_kr_end_to_end_handoff_manifest(
+    path: Path,
+    *,
+    base_dir: Path | None = None,
+) -> dict[str, object]:
     """handoff manifest JSON을 로드·검증하고 성공 summary dict를 반환한다."""
     manifest_path = path.resolve()
+    resolved_base = _resolve_base_dir(base_dir)
+    if resolved_base is not None:
+        _assert_path_within_base(manifest_path, resolved_base, field_name="manifest")
+
     payload = load_handoff_manifest(manifest_path)
     validated_entries = _validate_manifest_schema(payload)
 
     for entry in validated_entries:
-        _verify_artifact_entry(entry)
+        _verify_artifact_entry(entry, base_dir=resolved_base)
 
-    return _build_success_payload(manifest_path, artifacts_count=len(validated_entries))
+    return _build_success_payload(
+        manifest_path,
+        artifacts_count=len(validated_entries),
+        resolved_base=resolved_base,
+    )
 
 
-def _build_success_payload(manifest_path: Path, *, artifacts_count: int) -> dict[str, Any]:
+def _build_success_payload(
+    manifest_path: Path,
+    *,
+    artifacts_count: int,
+    resolved_base: Path | None = None,
+) -> dict[str, object]:
     """CLI/API 성공 JSON payload를 구성한다."""
-    return {
+    payload: dict[str, object] = {
         "status": "ok",
         "stage": "complete",
         "mode": _MODE,
@@ -365,6 +411,10 @@ def _build_success_payload(manifest_path: Path, *, artifacts_count: int) -> dict
         "commands_execute_in_verifier": False,
         "review_only": True,
     }
+    if resolved_base is not None:
+        payload["base_dir"] = str(resolved_base)
+        payload["path_containment_verified"] = True
+    return payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -372,6 +422,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description="KR end-to-end handoff manifest verifier — read-only integrity/metadata audit.",
     )
     parser.add_argument("--manifest", required=True, help="handoff manifest JSON path")
+    parser.add_argument(
+        "--base-dir",
+        help="optional base directory; manifest and artifact paths must resolve within it",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON to stdout")
     return parser
 
@@ -399,9 +453,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     manifest_path = Path(args.manifest)
+    base_dir: Path | None = None
+    if args.base_dir is not None:
+        if not str(args.base_dir).strip():
+            error_payload = {
+                "status": "error",
+                "stage": "args",
+                "message": "base directory path is required",
+                "mode": _MODE,
+            }
+            if args.json:
+                _emit_json(error_payload, stream=sys.stdout)
+            else:
+                print(error_payload["message"], file=sys.stderr)
+            return 1
+        base_dir = Path(args.base_dir)
 
     try:
-        payload = verify_kr_end_to_end_handoff_manifest(manifest_path)
+        payload = verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=base_dir)
     except KrEndToEndHandoffManifestVerifyError as exc:
         error_payload = {"status": "error", "stage": exc.stage, "message": exc.message, "mode": _MODE}
         if args.json:
