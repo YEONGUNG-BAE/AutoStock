@@ -1322,6 +1322,7 @@ Factor scoring must not call:
 - **3G4-3:** operator-local real factor input bundle — **implemented** (see [3G4-3](#3g4-3--operator-local-factor-input-bundle-workflow))
 - **3G4-4:** source-specific factor adapter — **implemented** (see [3G4-4](#3g4-4--fixture-first-source-specific-factor-adapter))
 - **3G4-5:** first operator-triggered live factor smoke — **implemented** (see [3G4-5](#3g4-5--operator-triggered-live-factor-source-smoke))
+- ~~**3G4-H1:** factor intake hardening cleanup~~ — **implemented** (see [3G4-H1](#3g4-h1--factor-intake-hardening-cleanup))
 - **3G4+ hardening:** calibration, provenance, drift checks, explainability — deferred
 
 ---
@@ -1587,6 +1588,23 @@ PYTHONPATH=src uv run python ops/run_kr_factor_source_live_smoke.py \
 ```
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
+
+---
+
+## 3G4-H1 — factor intake hardening cleanup
+
+**Status:** implemented
+
+**Purpose:**
+Tighten error/snapshot contracts in 3G4-4/3G4-5 factor intake code without changing workflow semantics.
+
+**Changes (no new business functionality):**
+
+- **3G4-4 writer:** `write_kr_factor_inputs_toml()` now temp-write → 3G4-1 self-validate → atomic commit; invalid output never replaces an existing valid file.
+- **3G4-5 snapshot:** unexpected write/rename failures sanitize to type-only messages (`factor source snapshot write failed: PermissionError`); explicit validation failures remain useful.
+- **Programmatic args:** naive `fetched_at` in snapshot/live-smoke programmatic APIs normalize to stage-aware errors (`snapshot` / `args`), not bare `ValueError`.
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_source_adapter.py tests/test_kr_factor_source_live_smoke.py -v`.
 
 ---
 

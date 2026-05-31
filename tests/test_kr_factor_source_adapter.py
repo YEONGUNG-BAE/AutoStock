@@ -517,6 +517,110 @@ def test_self_validation_failure_maps_to_adapter_validate_stage_not_lower_level_
             write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
     assert exc_info.value.stage == "validate"
     assert exc_info.value.message == "forced self-validation failure"
+    assert not out_path.exists()
+
+
+def test_self_validation_failure_does_not_create_final_output(tmp_path: Path) -> None:
+    payload = load_kr_factor_source_payload(SOURCE_FIXTURE)
+    factor_inputs = map_kr_factor_source_payload_to_factor_inputs(
+        payload,
+        output_name="kr-factor-inputs-from-source-v1",
+        output_description="Synthetic source-mapped KR factor inputs.",
+        factor_score_version="kr-factor-fixture-v1",
+    )
+    out_path = tmp_path / "nested" / "factor_inputs.generated.toml"
+    with patch(
+        "data.kr_factor_source_adapter.load_kr_factor_inputs_toml",
+        side_effect=KrFactorSignalGeneratorError("generate", "broken output"),
+    ):
+        with pytest.raises(KrFactorSourceAdapterError) as exc_info:
+            write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
+    assert exc_info.value.stage == "validate"
+    assert not out_path.exists()
+
+
+def test_self_validation_failure_cleans_up_temp_file(tmp_path: Path) -> None:
+    payload = load_kr_factor_source_payload(SOURCE_FIXTURE)
+    factor_inputs = map_kr_factor_source_payload_to_factor_inputs(
+        payload,
+        output_name="kr-factor-inputs-from-source-v1",
+        output_description="Synthetic source-mapped KR factor inputs.",
+        factor_score_version="kr-factor-fixture-v1",
+    )
+    out_path = tmp_path / "factor_inputs.generated.toml"
+    with patch(
+        "data.kr_factor_source_adapter.load_kr_factor_inputs_toml",
+        side_effect=KrFactorSignalGeneratorError("parse", "broken output"),
+    ):
+        with pytest.raises(KrFactorSourceAdapterError):
+            write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
+    assert list(tmp_path.glob(".tmp_factor_inputs_*.toml")) == []
+
+
+def test_force_true_replaces_final_only_after_temp_validation_succeeds(tmp_path: Path) -> None:
+    out_path = _replay_to_factor_inputs(tmp_path)
+    original_text = out_path.read_text(encoding="utf-8")
+    payload = load_kr_factor_source_payload(SOURCE_FIXTURE)
+    factor_inputs = map_kr_factor_source_payload_to_factor_inputs(
+        payload,
+        output_name="kr-factor-inputs-replaced-v1",
+        output_description="Replacement factor inputs.",
+        factor_score_version="kr-factor-fixture-v1",
+    )
+    write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
+    assert out_path.read_text(encoding="utf-8") != original_text
+    assert "kr-factor-inputs-replaced-v1" in out_path.read_text(encoding="utf-8")
+
+
+def test_force_true_validation_failure_preserves_existing_final(tmp_path: Path) -> None:
+    out_path = _replay_to_factor_inputs(tmp_path)
+    original_text = out_path.read_text(encoding="utf-8")
+    payload = load_kr_factor_source_payload(SOURCE_FIXTURE)
+    factor_inputs = map_kr_factor_source_payload_to_factor_inputs(
+        payload,
+        output_name="kr-factor-inputs-from-source-v1",
+        output_description="Synthetic source-mapped KR factor inputs.",
+        factor_score_version="kr-factor-fixture-v1",
+    )
+    with patch(
+        "data.kr_factor_source_adapter.load_kr_factor_inputs_toml",
+        side_effect=KrFactorSignalGeneratorError("validate", "replacement blocked"),
+    ):
+        with pytest.raises(KrFactorSourceAdapterError) as exc_info:
+            write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
+    assert exc_info.value.stage == "validate"
+    assert out_path.read_text(encoding="utf-8") == original_text
+
+
+def test_temp_file_created_under_out_path_parent_not_global_tmp(tmp_path: Path) -> None:
+    payload = load_kr_factor_source_payload(SOURCE_FIXTURE)
+    factor_inputs = map_kr_factor_source_payload_to_factor_inputs(
+        payload,
+        output_name="kr-factor-inputs-from-source-v1",
+        output_description="Synthetic source-mapped KR factor inputs.",
+        factor_score_version="kr-factor-fixture-v1",
+    )
+    out_path = tmp_path / "nested" / "factor_inputs.generated.toml"
+    observed_temp_parent: list[Path] = []
+
+    original_write_text = Path.write_text
+
+    def _capture_temp_write(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith(".tmp_factor_inputs_"):
+            observed_temp_parent.append(self.parent)
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _capture_temp_write):
+        write_kr_factor_inputs_toml(factor_inputs, out_path, force=True)
+    assert observed_temp_parent == [out_path.parent]
+    assert out_path.is_file()
+
+
+def test_write_kr_factor_inputs_toml_writes_valid_toml_normally(tmp_path: Path) -> None:
+    out_path = _replay_to_factor_inputs(tmp_path)
+    document = load_kr_factor_inputs_toml(out_path)
+    assert document.name == "kr-factor-inputs-from-source-v1"
+    assert len(document.factors) == 5
 
 
 def test_generated_canonical_factor_input_feeds_3g4_1_signal_generator(tmp_path: Path) -> None:

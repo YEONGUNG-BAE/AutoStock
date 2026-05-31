@@ -596,7 +596,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1 + 3G3-2 + 3G3-3 + 3G3-4A + 3G3-4B + 3G3-5 + 3G3-6 + 3G4-0 + 3G4-1 + 3G4-2 + 3G4-3 + 3G4-4 + 3G4-5** (operator-triggered factor source live smoke); **3G4+** factor hardening deferred; **3G3-6+** source-specific live adapter hardening deferred |
+| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1 + 3G3-2 + 3G3-3 + 3G3-4A + 3G3-4B + 3G3-5 + 3G3-6 + 3G4-0 + 3G4-1 + 3G4-2 + 3G4-3 + 3G4-4 + 3G4-5 + 3G4-H1** (factor intake hardening); **3G4+** factor hardening deferred; **3G3-6+** source-specific live adapter hardening deferred |
 
 - **3G4-4 source-specific factor fixture adapter** maps provider-shaped local factor payload → canonical 3G4-1 factor input TOML (local parser/mapper only; no trading/action/allocation output).
 - **3G4-5 operator-triggered factor source live smoke** fetches operator-supplied endpoint → immutable raw snapshot → optional 3G4-4 replay to canonical factor input TOML only (not scheduled; no env/API keys).

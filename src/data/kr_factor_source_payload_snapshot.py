@@ -25,6 +25,14 @@ class KrFactorSourceSnapshotError(ValueError):
         self.message = message
 
 
+def _require_snapshot_fetched_at(fetched_at: datetime) -> datetime:
+    """fetched_at timezone-aware 검증; bare ValueError는 snapshot stage로 정규화."""
+    try:
+        return require_timezone_aware_datetime(fetched_at, field_name="fetched_at")
+    except ValueError as exc:
+        raise KrFactorSourceSnapshotError("snapshot", str(exc)) from None
+
+
 def _deterministic_factor_source_json_dumps(payload: Mapping[str, Any]) -> str:
     """factor source payload deterministic JSON (float percentile 필드 포함)."""
     return json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -38,7 +46,7 @@ def snapshot_filename_for_factor_source_payload(
     """immutable factor source payload snapshot 파일명 (raw_factor_source_ prefix)."""
     body = _deterministic_factor_source_json_dumps(payload)
     sha8 = hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
-    aware_fetched_at = require_timezone_aware_datetime(fetched_at, field_name="fetched_at")
+    aware_fetched_at = _require_snapshot_fetched_at(fetched_at)
     compact = aware_fetched_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"raw_factor_source_{compact}_{sha8}.json"
 
@@ -53,7 +61,7 @@ def write_immutable_factor_source_snapshot(
     if not isinstance(payload, Mapping):
         raise KrFactorSourceSnapshotError("snapshot", "payload must be a JSON object")
 
-    require_timezone_aware_datetime(fetched_at, field_name="fetched_at")
+    _require_snapshot_fetched_at(fetched_at)
     nested_payload = dict(payload)
 
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -80,7 +88,10 @@ def write_immutable_factor_source_snapshot(
     except FileExistsError:
         raise
     except Exception as exc:
-        raise KrFactorSourceSnapshotError("snapshot", str(exc)) from exc
+        raise KrFactorSourceSnapshotError(
+            "snapshot",
+            f"factor source snapshot write failed: {type(exc).__name__}",
+        ) from None
     finally:
         if temp_path.exists() and temp_path != final_path:
             temp_path.unlink()

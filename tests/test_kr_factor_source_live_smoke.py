@@ -95,6 +95,7 @@ from data.kr_factor_source_http_client import (
     sanitize_factor_source_http_failure,
 )
 from data.kr_factor_source_payload_snapshot import (
+    KrFactorSourceSnapshotError,
     snapshot_filename_for_factor_source_payload,
     write_immutable_factor_source_snapshot,
 )
@@ -719,3 +720,88 @@ def test_known_error_cli_has_no_traceback(tmp_path: Path, capsys: pytest.Capture
     captured = capsys.readouterr()
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
+
+
+# --- 3G4-H1 hardening (50+) ---
+
+
+def test_snapshot_naive_fetched_at_raises_snapshot_stage_not_bare_value_error(tmp_path: Path) -> None:
+    with pytest.raises(KrFactorSourceSnapshotError) as exc_info:
+        write_immutable_factor_source_snapshot(
+            _source_payload(),
+            tmp_path / "snapshots",
+            fetched_at=datetime(2026, 5, 30, 12, 0, 0),
+        )
+    assert exc_info.value.stage == "snapshot"
+    assert "fetched_at must be a timezone-aware datetime" in exc_info.value.message
+
+
+def test_snapshot_unexpected_write_failure_sanitizes_message(tmp_path: Path) -> None:
+    snapshot_dir = tmp_path / "snapshots"
+    secret_path = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret_path)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrFactorSourceSnapshotError) as exc_info:
+            write_immutable_factor_source_snapshot(
+                _source_payload(),
+                snapshot_dir,
+                fetched_at=FETCHED_AT,
+            )
+    assert exc_info.value.stage == "snapshot"
+    assert exc_info.value.message == "factor source snapshot write failed: PermissionError"
+    assert secret_path not in exc_info.value.message
+    assert "SECRET_VALUE_TEST" not in exc_info.value.message
+    assert exc_info.value.__cause__ is None
+
+
+def test_snapshot_unexpected_rename_failure_sanitizes_message(tmp_path: Path) -> None:
+    snapshot_dir = tmp_path / "snapshots"
+    secret = "SECRET_VALUE_TEST"
+
+    original_rename = Path.rename
+
+    def _raise_os_error(self: Path, target: Path) -> None:
+        if self.name.startswith(".tmp_factor_source_"):
+            raise OSError(f"rename blocked for {secret}")
+        original_rename(self, target)
+
+    with patch.object(Path, "rename", _raise_os_error):
+        with pytest.raises(KrFactorSourceSnapshotError) as exc_info:
+            write_immutable_factor_source_snapshot(
+                _source_payload(),
+                snapshot_dir,
+                fetched_at=FETCHED_AT,
+            )
+    assert exc_info.value.stage == "snapshot"
+    assert exc_info.value.message == "factor source snapshot write failed: OSError"
+    assert secret not in exc_info.value.message
+    assert exc_info.value.__cause__ is None
+
+
+def test_snapshot_explicit_validation_failure_remains_useful(tmp_path: Path) -> None:
+    bad = _source_payload()
+    bad["source_format"] = "wrong_format"
+    with pytest.raises(KrFactorSourceSnapshotError) as exc_info:
+        write_immutable_factor_source_snapshot(bad, tmp_path / "snapshots", fetched_at=FETCHED_AT)
+    assert exc_info.value.stage == "snapshot"
+    assert "source_format must be" in exc_info.value.message
+
+
+def test_snapshot_collision_behavior_unchanged(tmp_path: Path) -> None:
+    payload = _source_payload()
+    snapshot_dir = tmp_path / "snapshots"
+    write_immutable_factor_source_snapshot(payload, snapshot_dir, fetched_at=FETCHED_AT)
+    with pytest.raises(FileExistsError) as exc_info:
+        write_immutable_factor_source_snapshot(payload, snapshot_dir, fetched_at=FETCHED_AT)
+    assert "already exists" in str(exc_info.value)
+
+
+def test_snapshot_raw_no_wrap_behavior_unchanged(tmp_path: Path) -> None:
+    source = _source_payload()
+    path = write_immutable_factor_source_snapshot(source, tmp_path / "snapshots", fetched_at=FETCHED_AT)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk == source
+    assert "payload" not in on_disk

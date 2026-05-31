@@ -81,6 +81,7 @@
 - ~~Real Intake **3G4-3** — operator-local real factor input bundle~~ Done: `ops/build_kr_factor_bundle_mapping.py` + synthetic bundle fixture + tests; operator-local bundle manifest wrapper over 3G4-2; reviewable artifacts only; no live factor scoring; no network/env.
 - ~~Real Intake **3G4-4** — source-specific factor adapter~~ Done: `kr_factor_source_adapter.py`, `ops/map_kr_factor_fixture.py`, synthetic source payload fixture + tests; source-specific fixture → canonical factor input TOML → 3G4-1/3G4-2 downstream proof; no live factor transport; no network/env.
 - ~~Real Intake **3G4-5** — operator-triggered live factor source smoke~~ Done: `kr_factor_source_http_client.py`, `kr_factor_source_payload_snapshot.py`, `ops/run_kr_factor_source_live_smoke.py` + tests; HTTP → immutable raw snapshot → optional 3G4-4 replay; no env/API keys; no scheduled fetch.
+- ~~Real Intake **3G4-H1** — factor intake hardening cleanup~~ Done: validate-before-commit factor input TOML writer; snapshot unexpected-error sanitization; programmatic ValueError stage normalization; no workflow semantics change.
 - Real Intake **3G4+** — calibration / provenance / drift checks / explainability hardening — Deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

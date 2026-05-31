@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -274,7 +275,7 @@ def write_kr_factor_inputs_toml(
     *,
     force: bool = False,
 ) -> Path:
-    """canonical factor input TOML을 기록하고 3G4-1 parser로 self-validate한다."""
+    """canonical factor input TOML을 temp write → 3G4-1 self-validate → atomic commit."""
     if out_path.exists() and not force:
         raise KrFactorSourceAdapterError(
             "write",
@@ -283,14 +284,21 @@ def write_kr_factor_inputs_toml(
 
     rendered = render_kr_factor_inputs_toml(factor_inputs)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(rendered, encoding="utf-8")
+    temp_path = out_path.parent / f".tmp_factor_inputs_{uuid.uuid4().hex}.toml"
 
     try:
-        load_kr_factor_inputs_toml(out_path)
-    except KrFactorSignalGeneratorError as exc:
-        raise KrFactorSourceAdapterError("validate", exc.message) from exc
+        temp_path.write_text(rendered, encoding="utf-8")
+        try:
+            load_kr_factor_inputs_toml(temp_path)
+        except KrFactorSignalGeneratorError as exc:
+            raise KrFactorSourceAdapterError("validate", exc.message) from exc
 
-    return out_path
+        temp_path.replace(out_path)
+        temp_path = out_path
+        return out_path
+    finally:
+        if temp_path.exists() and temp_path != out_path:
+            temp_path.unlink()
 
 
 def replay_kr_factor_source_payload(
