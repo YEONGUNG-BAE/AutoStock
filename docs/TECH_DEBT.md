@@ -71,7 +71,8 @@
 - ~~Real Intake **3G3-2** — operator-local real ranking input workflow~~ Done: `ops/build_kr_real_ranked_mapping.py` chains 3G3-1 rank → 3F1 generate → provider mapping validation; operator supplies real sector pool + local ranking signals + corp-code snapshot; no live API.
 - ~~Real Intake **3G3-3** — discovery snapshot replay adapter~~ Done: `kr_discovery_source_adapter.py`, `ops/replay_kr_discovery_snapshot.py`, synthetic discovery snapshot fixture + tests; snapshot → 3G1 candidate pool only; live transport deferred to 3G3-4.
 - ~~Real Intake **3G3-4A** — live-shaped fake-transport discovery snapshot fetcher~~ Done: `kr_discovery_live_client.py` + tests; injected transport → immutable raw discovery snapshot; validate-before-commit; real live transport deferred to 3G3-4B.
-- Real Intake **3G3-4B+** — real live discovery source transport, operator live command, factor hardening — deferred.
+- ~~Real Intake **3G3-4B** — operator-triggered HTTP discovery live smoke~~ Done: `kr_discovery_http_client.py`, `ops/run_kr_discovery_live_smoke.py` + tests; operator-supplied endpoint URL; sanitized HTTP errors; optional 3G3-3 candidate pool replay; no env/API keys.
+- Real Intake **3G3-5+** — source-specific discovery adapter, endpoint schema mapping, live factor hardening — deferred.
 - Real Intake **3G4+** — factor scoring / ranking hardening (scoring versioning, explainability, regression fixtures, operator approval path) — deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

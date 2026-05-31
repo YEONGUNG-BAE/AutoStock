@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1621 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1658 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1621 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1658 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -689,13 +689,39 @@ Approved path: discovery snapshot → candidate pool → 3G1 selector → 3G3-1 
 
 Synthetic proof: `uv run pytest tests/test_kr_discovery_source_adapter.py -v`.
 
+**3G3-4B operator-triggered HTTP discovery live smoke:**
+
+Operator supplies `--endpoint-url` (no hardcoded KRX endpoint). This command reads **no env vars and no API keys**. Avoid putting secrets in endpoint URLs; error paths redact query strings wholesale, but operators should prefer secret-free URLs.
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/run_kr_discovery_live_smoke.py \
+  --endpoint-url "https://operator-supplied.example/discovery.json" \
+  --snapshot-dir "runtime/research/${DAY}/sources/kr_discovery" \
+  --candidate-pool-out "/tmp/kr_discovery_candidate_pool.toml" \
+  --pool-name "kr-discovery-live-candidate-pool-v1" \
+  --pool-description "Operator-triggered KR discovery live smoke replay." \
+  --fetched-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --market KR \
+  --universe-hint operator-supplied-discovery \
+  --external-service operator-http-discovery \
+  --timeout-seconds 15 \
+  --force \
+  --json
+```
+
+Approved follow-up: raw snapshot / candidate pool → 3G3-2 ranked mapping workflow → 3E2/3E3/3E4 → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_discovery_http_client.py tests/test_kr_discovery_live_smoke_cli.py -v`.
+
+Live factor scoring remains **deferred** (3G3-5+).
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
-No operator live discovery command exists yet. `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
+`kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
 
 Synthetic proof: `uv run pytest tests/test_kr_discovery_live_client.py -v`.
-
-Live discovery transport and live factor scoring remain **deferred** (3G3-4B+).
 
 ```bash
 DAY=2026-05-30
@@ -930,7 +956,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1621 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1658 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
