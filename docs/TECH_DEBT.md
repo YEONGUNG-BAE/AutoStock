@@ -69,7 +69,8 @@
 - ~~Real Intake **3G3-0** — live discovery/ranking guardrails~~ Done (docs-only): G1–G6 boundary checkpoint in `docs/REAL_RESEARCH_SOURCE_INTAKE.md`; approved expansion path and phase split documented; no code/tests.
 - ~~Real Intake **3G3-1** — fixture-first KR candidate ranking model~~ Done: `kr_candidate_ranker.py`, `ops/rank_kr_candidates.py`, synthetic ranking signal fixture + tests; deterministic weighted score with explainable components; ranked JSON is reviewable metadata only.
 - ~~Real Intake **3G3-2** — operator-local real ranking input workflow~~ Done: `ops/build_kr_real_ranked_mapping.py` chains 3G3-1 rank → 3F1 generate → provider mapping validation; operator supplies real sector pool + local ranking signals + corp-code snapshot; no live API.
-- Real Intake **3G3-3+** — live discovery source adapter, first live discovery smoke — deferred.
+- ~~Real Intake **3G3-3** — discovery snapshot replay adapter~~ Done: `kr_discovery_source_adapter.py`, `ops/replay_kr_discovery_snapshot.py`, synthetic discovery snapshot fixture + tests; snapshot → 3G1 candidate pool only; live transport deferred to 3G3-4.
+- Real Intake **3G3-4+** — live discovery transport, first live discovery smoke — deferred.
 - Real Intake **3G4+** — factor scoring / ranking hardening (scoring versioning, explainability, regression fixtures, operator approval path) — deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

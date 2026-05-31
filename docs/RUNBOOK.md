@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1560 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1592 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1560 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1592 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -639,7 +639,7 @@ PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
   --json
 ```
 
-Live discovery and live factor scoring remain **deferred** (3G3-3+). Synthetic proof: `uv run pytest tests/test_kr_candidate_ranker.py -v`.
+Live discovery transport and live factor scoring remain **deferred** (3G3-4+). Synthetic proof: `uv run pytest tests/test_kr_candidate_ranker.py -v`.
 
 **3G3-2 operator-local ranked mapping (local files only; not trading instruction):**
 
@@ -670,6 +670,26 @@ PYTHONPATH=src uv run python ops/build_kr_real_ranked_mapping.py \
 Approved path: real sector pool + ranking signals + corp-code snapshot → ranked JSON → selected candidate TOML → generated universe/provider mapping → validation → 3E2/3E3/3E4 → operator review.
 
 Synthetic proof: `uv run pytest tests/test_kr_real_ranked_mapping_workflow.py -v`.
+
+**3G3-3 discovery snapshot replay (local files only; candidate pool output only):**
+
+Discovery replay produces a sector-tagged candidate pool TOML — **not** a generated universe. Live discovery commands **do not exist yet**.
+
+```bash
+PYTHONPATH=src uv run python ops/replay_kr_discovery_snapshot.py \
+  --snapshot tests/fixtures/research/kr_discovery/raw_kr_discovery_synthetic_success.json \
+  --candidate-pool-out /tmp/kr_discovery_candidate_pool.toml \
+  --pool-name kr-discovery-synthetic-pool-v1 \
+  --pool-description "Synthetic replayed KR discovery candidate pool." \
+  --force \
+  --json
+```
+
+Approved path: discovery snapshot → candidate pool → 3G1 selector → 3G3-1 ranker (local signals) → 3F1 generator (local corp-code) → validation → 3E2/3E3/3E4 → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_discovery_source_adapter.py -v`.
+
+Live discovery transport and live factor scoring remain **deferred** (3G3-4+).
 
 ```bash
 DAY=2026-05-30
@@ -904,7 +924,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1560 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1592 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
