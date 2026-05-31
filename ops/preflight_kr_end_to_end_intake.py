@@ -43,7 +43,7 @@ _ARTIFACTS_KEYS = frozenset(
         "scout_packet_summary",
     }
 )
-_OUTPUTS_KEYS = frozenset({"plan_out", "summary_out"})
+_OUTPUTS_KEYS = frozenset({"plan_out", "summary_out", "structured_plan_out"})
 _SETTINGS_KEYS = frozenset(
     {
         "require_yfinance",
@@ -147,6 +147,7 @@ class KrEndToEndPreflightManifest:
     scout_packet_summary: Path | None
     plan_out: Path | None
     summary_out: Path | None
+    structured_plan_out: Path | None
     require_yfinance: bool
     require_dart: bool
     require_symbol_coverage: bool
@@ -274,6 +275,7 @@ def load_kr_end_to_end_preflight_manifest(path: Path) -> KrEndToEndPreflightMani
     outputs_raw = raw.get("outputs")
     plan_out: Path | None = None
     summary_out: Path | None = None
+    structured_plan_out: Path | None = None
     if outputs_raw is not None:
         if not isinstance(outputs_raw, dict):
             raise KrEndToEndPreflightError("parse", "outputs must be a table")
@@ -284,6 +286,11 @@ def load_kr_end_to_end_preflight_manifest(path: Path) -> KrEndToEndPreflightMani
         summary_out = _optional_artifact_path(
             outputs_raw.get("summary_out"),
             field_name="outputs.summary_out",
+            manifest_dir=manifest_dir,
+        )
+        structured_plan_out = _optional_artifact_path(
+            outputs_raw.get("structured_plan_out"),
+            field_name="outputs.structured_plan_out",
             manifest_dir=manifest_dir,
         )
 
@@ -435,6 +442,7 @@ def load_kr_end_to_end_preflight_manifest(path: Path) -> KrEndToEndPreflightMani
         ),
         plan_out=plan_out,
         summary_out=summary_out,
+        structured_plan_out=structured_plan_out,
         require_yfinance=require_yfinance,
         require_dart=require_dart,
         require_symbol_coverage=require_symbol_coverage,
@@ -634,124 +642,262 @@ def _validate_optional_artifacts(manifest: KrEndToEndPreflightManifest) -> tuple
     return checks, warnings
 
 
-def _plan_forbidden_shortcuts_section() -> str:
-    exec_path = "".join(("broker", "/", "PaperLoop", "/", "K", "IS"))
-    return "\n".join(
-        [
-            "## Forbidden shortcuts reminder",
-            "",
-            "- Do not auto-promote generated universe/provider mapping into checked-in config.",
-            "- Do not treat ranking/factor scores as trading or allocation guidance.",
-            f"- Do not forward Scout output to {exec_path} or any write/execution path.",
-            "- Do not run live fetches from this preflight helper.",
-            "",
-        ]
-    )
+@dataclass(frozen=True)
+class FollowupStep:
+    """review-only follow-up step — Markdown/structured plan 공통 내부 표현."""
+
+    id: str
+    label: str
+    command_lines: tuple[str, ...]
+    script: str | None
+    notes: tuple[str, ...] = ()
 
 
-def _build_followup_commands(manifest: KrEndToEndPreflightManifest) -> list[str]:
-    """review-only follow-up command strings (실행하지 않음)."""
-    universe = str(manifest.universe)
-    mapping = str(manifest.provider_mapping)
+def _resolve_followup_paths(manifest: KrEndToEndPreflightManifest) -> dict[str, str]:
+    """follow-up step/command 생성에 쓰는 manifest 경로·기본값을 한곳에서 해석한다."""
     day = manifest.day or "YYYY-MM-DD"
     combined_dir = manifest.combined_out_dir or f"runtime/research/{day}"
-    price_snap = manifest.price_snapshot_dir or f"{combined_dir}/sources/price"
-    dart_snap = manifest.dart_snapshot_dir or f"{combined_dir}/sources/dart"
-    scout_dir = manifest.scout_out_dir or f"{combined_dir}/scout"
-    store = str(manifest.store) if manifest.store else f"{combined_dir}/date_id_sources.sqlite3"
-    date_md = str(manifest.date_md) if manifest.date_md else f"{combined_dir}/Date.md"
-    combined_jsonl = str(manifest.combined_jsonl) if manifest.combined_jsonl else f"/tmp/autostock_kr_combined_{day}.jsonl"
-    price_jsonl = str(manifest.price_jsonl) if manifest.price_jsonl else f"/tmp/autostock_kr_price_{day}.jsonl"
-    dart_jsonl = str(manifest.dart_jsonl) if manifest.dart_jsonl else f"/tmp/autostock_kr_dart_{day}.jsonl"
+    return {
+        "universe": str(manifest.universe),
+        "mapping": str(manifest.provider_mapping),
+        "day": day,
+        "combined_dir": combined_dir,
+        "price_snap": manifest.price_snapshot_dir or f"{combined_dir}/sources/price",
+        "dart_snap": manifest.dart_snapshot_dir or f"{combined_dir}/sources/dart",
+        "scout_dir": manifest.scout_out_dir or f"{combined_dir}/scout",
+        "store": str(manifest.store) if manifest.store else f"{combined_dir}/date_id_sources.sqlite3",
+        "date_md": str(manifest.date_md) if manifest.date_md else f"{combined_dir}/Date.md",
+        "combined_jsonl": (
+            str(manifest.combined_jsonl) if manifest.combined_jsonl else f"/tmp/autostock_kr_combined_{day}.jsonl"
+        ),
+        "price_jsonl": str(manifest.price_jsonl) if manifest.price_jsonl else f"/tmp/autostock_kr_price_{day}.jsonl",
+        "dart_jsonl": str(manifest.dart_jsonl) if manifest.dart_jsonl else f"/tmp/autostock_kr_dart_{day}.jsonl",
+        "coverage_flag": (
+            " \\\n  --require-symbol-coverage"
+            if manifest.require_symbol_coverage
+            else ""
+        ),
+    }
 
-    coverage_flag = (
-        " \\\n  --require-symbol-coverage"
-        if manifest.require_symbol_coverage
-        else ""
-    )
 
-    commands: list[str] = [
-        "# Review-only — operator must run manually; preflight does not execute these.",
-        "PYTHONPATH=src uv run python ops/validate_provider_mapping.py \\",
-        f"  --universe {universe} \\",
-        f"  --provider-mapping {mapping} \\",
-        "  --json",
+def _build_followup_steps(manifest: KrEndToEndPreflightManifest) -> list[FollowupStep]:
+    """review-only follow-up step 목록 (실행하지 않음)."""
+    paths = _resolve_followup_paths(manifest)
+    universe = paths["universe"]
+    mapping = paths["mapping"]
+    day = paths["day"]
+    combined_jsonl = paths["combined_jsonl"]
+    price_jsonl = paths["price_jsonl"]
+    dart_jsonl = paths["dart_jsonl"]
+    coverage_flag = paths["coverage_flag"]
+
+    steps: list[FollowupStep] = [
+        FollowupStep(
+            id="validate-provider-mapping",
+            label="Validate provider mapping coverage",
+            command_lines=(
+                "PYTHONPATH=src uv run python ops/validate_provider_mapping.py \\",
+                f"  --universe {universe} \\",
+                f"  --provider-mapping {mapping} \\",
+                "  --json",
+            ),
+            script="ops/validate_provider_mapping.py",
+        ),
     ]
 
     if manifest.price_jsonl is None:
-        commands.extend(
-            [
-                "PYTHONPATH=src uv run python ops/run_kr_real_price_smoke.py \\",
-                f"  --universe {universe} \\",
-                f"  --provider-mapping {mapping} \\",
-                f"  --store {store} \\",
-                f"  --snapshot-dir {price_snap} \\",
-                f"  --out-jsonl {price_jsonl} \\",
-                "  --force \\",
-                "  --json",
-            ]
+        steps.append(
+            FollowupStep(
+                id="price-smoke",
+                label="Run KR real PRICE smoke",
+                command_lines=(
+                    "PYTHONPATH=src uv run python ops/run_kr_real_price_smoke.py \\",
+                    f"  --universe {universe} \\",
+                    f"  --provider-mapping {mapping} \\",
+                    f"  --store {paths['store']} \\",
+                    f"  --snapshot-dir {paths['price_snap']} \\",
+                    f"  --out-jsonl {price_jsonl} \\",
+                    "  --force \\",
+                    "  --json",
+                ),
+                script="ops/run_kr_real_price_smoke.py",
+            )
         )
 
     if manifest.dart_jsonl is None:
-        commands.extend(
-            [
-                "PYTHONPATH=src uv run python ops/run_kr_real_dart_smoke.py \\",
-                f"  --universe {universe} \\",
-                f"  --provider-mapping {mapping} \\",
-                f"  --store {store} \\",
-                f"  --snapshot-dir {dart_snap} \\",
-                f"  --out-jsonl {dart_jsonl} \\",
-                "  --force \\",
-                "  --json",
-            ]
+        steps.append(
+            FollowupStep(
+                id="dart-smoke",
+                label="Run KR real DART smoke",
+                command_lines=(
+                    "PYTHONPATH=src uv run python ops/run_kr_real_dart_smoke.py \\",
+                    f"  --universe {universe} \\",
+                    f"  --provider-mapping {mapping} \\",
+                    f"  --store {paths['store']} \\",
+                    f"  --snapshot-dir {paths['dart_snap']} \\",
+                    f"  --out-jsonl {dart_jsonl} \\",
+                    "  --force \\",
+                    "  --json",
+                ),
+                script="ops/run_kr_real_dart_smoke.py",
+            )
         )
 
     if manifest.combined_jsonl is None:
-        commands.extend(
-            [
-                "# Concatenate FRED + PRICE + DART JSONL explicitly (operator-run):",
-                f"# cat /tmp/autostock_fred_{day}.jsonl {price_jsonl} {dart_jsonl} > {combined_jsonl}",
-            ]
+        steps.append(
+            FollowupStep(
+                id="concatenate-jsonl",
+                label="Concatenate FRED + PRICE + DART JSONL manually",
+                command_lines=(
+                    "# Concatenate FRED + PRICE + DART JSONL explicitly (operator-run):",
+                    f"# cat /tmp/autostock_fred_{day}.jsonl {price_jsonl} {dart_jsonl} > {combined_jsonl}",
+                ),
+                script=None,
+                notes=("Operator-run shell concatenation only; preflight does not execute.",),
+            )
         )
 
-    commands.extend(
+    steps.extend(
         [
-            "PYTHONPATH=src uv run python ops/research_source_intake.py \\",
-            f"  --source-jsonl {combined_jsonl} \\",
-            "  --validate-only \\",
-            "  --json",
-            "PYTHONPATH=src uv run python ops/build_kr_real_combined_context_smoke.py \\",
-            f"  --universe {universe} \\",
-            f"  --source-jsonl {combined_jsonl} \\",
-            f"  --store {store} \\",
-            f"  --date-md-out {date_md} \\",
-            f"  --scout-out-dir {scout_dir} \\",
-            f"  --context-budget-profile {manifest.context_budget_profile} \\",
-            "  --force-date-md \\",
-            "  --force-scout \\",
-            "  --json",
-            "PYTHONPATH=src uv run python ops/run_date_md_smoke.py \\",
-            f"  --universe {universe} \\",
-            f"  --date-md {date_md} \\",
-            f"  --store {store}{coverage_flag} \\",
-            "  --json",
+            FollowupStep(
+                id="research-source-intake-validate-only",
+                label="Validate combined research source JSONL",
+                command_lines=(
+                    "PYTHONPATH=src uv run python ops/research_source_intake.py \\",
+                    f"  --source-jsonl {combined_jsonl} \\",
+                    "  --validate-only \\",
+                    "  --json",
+                ),
+                script="ops/research_source_intake.py",
+            ),
+            FollowupStep(
+                id="combined-context-smoke",
+                label="Build KR real combined context smoke",
+                command_lines=(
+                    "PYTHONPATH=src uv run python ops/build_kr_real_combined_context_smoke.py \\",
+                    f"  --universe {universe} \\",
+                    f"  --source-jsonl {combined_jsonl} \\",
+                    f"  --store {paths['store']} \\",
+                    f"  --date-md-out {paths['date_md']} \\",
+                    f"  --scout-out-dir {paths['scout_dir']} \\",
+                    f"  --context-budget-profile {manifest.context_budget_profile} \\",
+                    "  --force-date-md \\",
+                    "  --force-scout \\",
+                    "  --json",
+                ),
+                script="ops/build_kr_real_combined_context_smoke.py",
+            ),
+            FollowupStep(
+                id="date-md-smoke",
+                label="Run Date.md smoke",
+                command_lines=(
+                    "PYTHONPATH=src uv run python ops/run_date_md_smoke.py \\",
+                    f"  --universe {universe} \\",
+                    f"  --date-md {paths['date_md']} \\",
+                    f"  --store {paths['store']}{coverage_flag} \\",
+                    "  --json",
+                ),
+                script="ops/run_date_md_smoke.py",
+            ),
         ]
     )
 
-    scout_cmd = [
+    scout_cmd: list[str] = [
         "PYTHONPATH=src uv run python ops/build_scout_manual_packet.py \\",
         f"  --universe {universe} \\",
-        f"  --date-md {date_md} \\",
-        f"  --store {store} \\",
-        f"  --out-dir {scout_dir} \\",
+        f"  --date-md {paths['date_md']} \\",
+        f"  --store {paths['store']} \\",
+        f"  --out-dir {paths['scout_dir']} \\",
         "  --market-scope KR \\",
     ]
     if manifest.require_symbol_coverage:
         scout_cmd.append("  --require-symbol-coverage \\")
     scout_cmd.extend(["  --force \\", "  --json"])
-    commands.extend(scout_cmd)
+    steps.append(
+        FollowupStep(
+            id="scout-manual-packet",
+            label="Build Scout manual packet",
+            command_lines=tuple(scout_cmd),
+            script="ops/build_scout_manual_packet.py",
+        )
+    )
 
-    return commands
+    return steps
+
+
+def _followup_steps_to_command_lines(steps: list[FollowupStep]) -> list[str]:
+    """내부 step 표현 → Markdown/bash follow-up command line 목록."""
+    lines = ["# Review-only — operator must run manually; preflight does not execute these."]
+    for step in steps:
+        lines.extend(step.command_lines)
+    return lines
+
+
+def _build_followup_commands(manifest: KrEndToEndPreflightManifest) -> list[str]:
+    """review-only follow-up command strings (실행하지 않음)."""
+    return _followup_steps_to_command_lines(_build_followup_steps(manifest))
+
+
+def _plan_forbidden_shortcuts_list() -> list[str]:
+    """Markdown/structured plan 공통 forbidden shortcut reminder (런타임 fragment 조합)."""
+    exec_path = "".join(("broker", "/", "PaperLoop", "/", "K", "IS"))
+    return [
+        "Do not auto-promote generated universe/provider mapping into checked-in config.",
+        "Do not treat ranking/factor scores as trading or allocation guidance.",
+        f"Do not forward Scout output to {exec_path} or any write/execution path.",
+        "Do not run live fetches from this preflight helper.",
+    ]
+
+
+def _plan_forbidden_shortcuts_section() -> str:
+    lines = ["## Forbidden shortcuts reminder", ""]
+    for item in _plan_forbidden_shortcuts_list():
+        lines.append(f"- {item}")
+    lines.extend(["", ""])
+    return "\n".join(lines)
+
+
+def _step_to_structured_dict(step: FollowupStep) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": step.id,
+        "label": step.label,
+        "command": list(step.command_lines),
+        "script": step.script,
+        "allowed": True,
+        "requires_operator_review": True,
+        "executes_in_preflight": False,
+    }
+    if step.notes:
+        payload["notes"] = list(step.notes)
+    return payload
+
+
+def _render_structured_plan_json(
+    manifest: KrEndToEndPreflightManifest,
+    *,
+    steps: list[FollowupStep],
+    warnings: list[str],
+) -> str:
+    """review-only structured follow-up plan JSON (실행하지 않음)."""
+    payload = {
+        "version": 1,
+        "mode": "kr-end-to-end-intake-followup-plan",
+        "manifest": str(manifest.manifest_path),
+        "name": manifest.name,
+        "generated_by": "ops/preflight_kr_end_to_end_intake.py",
+        "review_only": True,
+        "steps": [_step_to_structured_dict(step) for step in steps],
+        "forbidden_shortcuts": _plan_forbidden_shortcuts_list(),
+        "warnings": list(warnings),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def _validate_structured_plan_steps(steps: list[FollowupStep]) -> None:
+    """structured plan executable step script가 positive allowlist에 속하는지 검증한다."""
+    for step in steps:
+        if step.script is not None and step.script not in _FOLLOWUP_COMMAND_ALLOWLIST:
+            raise KrEndToEndPreflightError("validate", f"structured plan step not allowlisted: {step.script}")
 
 
 def _extract_followup_command_scripts(commands: list[str]) -> list[str]:
@@ -859,6 +1005,7 @@ def run_kr_end_to_end_preflight(
     *,
     summary_out: Path | None = None,
     plan_out: Path | None = None,
+    structured_plan_out: Path | None = None,
     emit_followup_commands: bool | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -867,15 +1014,21 @@ def run_kr_end_to_end_preflight(
 
     effective_summary_out = summary_out if summary_out is not None else manifest.summary_out
     effective_plan_out = plan_out if plan_out is not None else manifest.plan_out
+    effective_structured_plan_out = (
+        structured_plan_out if structured_plan_out is not None else manifest.structured_plan_out
+    )
     effective_emit = manifest.emit_followup_commands if emit_followup_commands is None else emit_followup_commands
 
     provider_validation = _validate_provider_mapping_pair(manifest)
     optional_checks, warnings = _validate_optional_artifacts(manifest)
 
+    followup_steps: list[FollowupStep] | None = None
     followup_commands: list[str] | None = None
     if effective_emit:
-        followup_commands = _build_followup_commands(manifest)
+        followup_steps = _build_followup_steps(manifest)
+        followup_commands = _followup_steps_to_command_lines(followup_steps)
         _validate_followup_command_allowlist(followup_commands)
+        _validate_structured_plan_steps(followup_steps)
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -896,6 +1049,22 @@ def run_kr_end_to_end_preflight(
     }
     if followup_commands is not None:
         result["followup_commands"] = followup_commands
+
+    if effective_structured_plan_out is not None and followup_steps is not None:
+        structured_plan_text = _render_structured_plan_json(
+            manifest,
+            steps=followup_steps,
+            warnings=warnings,
+        )
+        _write_output(
+            effective_structured_plan_out,
+            structured_plan_text,
+            force=force,
+            field_name="structured_plan_out",
+        )
+        result["structured_plan_out"] = str(effective_structured_plan_out)
+        result["structured_plan_steps_count"] = len(followup_steps)
+        result["structured_plan_generated"] = True
 
     summary_text = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     if effective_summary_out is not None:
@@ -924,6 +1093,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-out", default=None, help="override manifest [outputs].summary_out")
     parser.add_argument("--plan-out", default=None, help="override manifest [outputs].plan_out")
     parser.add_argument(
+        "--structured-plan-out",
+        default=None,
+        help="override manifest [outputs].structured_plan_out",
+    )
+    parser.add_argument(
         "--emit-followup-commands",
         action="store_true",
         default=None,
@@ -934,7 +1108,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="omit follow-up command plan",
     )
-    parser.add_argument("--force", action="store_true", help="overwrite summary_out/plan_out only")
+    parser.add_argument("--force", action="store_true", help="overwrite summary_out/plan_out/structured_plan_out only")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON to stdout")
     return parser
 
@@ -965,6 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.manifest),
             summary_out=Path(args.summary_out) if args.summary_out else None,
             plan_out=Path(args.plan_out) if args.plan_out else None,
+            structured_plan_out=Path(args.structured_plan_out) if args.structured_plan_out else None,
             emit_followup_commands=emit_override,
             force=args.force,
         )

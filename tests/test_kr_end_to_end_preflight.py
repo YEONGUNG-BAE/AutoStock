@@ -78,11 +78,16 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ops"))
 
 from preflight_kr_end_to_end_intake import (
+    FollowupStep,
     KrEndToEndPreflightError,
     KrEndToEndPreflightManifest,
     _FOLLOWUP_COMMAND_ALLOWLIST,
+    _build_followup_steps,
     _extract_followup_command_scripts,
+    _followup_steps_to_command_lines,
+    _plan_forbidden_shortcuts_list,
     _validate_followup_command_allowlist,
+    _validate_structured_plan_steps,
     _write_output,
     load_kr_end_to_end_preflight_manifest,
     run_kr_end_to_end_preflight,
@@ -973,11 +978,18 @@ def test_generated_command_plan_no_invented_3h1_command(tmp_path: Path) -> None:
 def test_disallowed_followup_command_fails_validate_stage(tmp_path: Path) -> None:
     _copy_preflight_fixtures(tmp_path)
     path = _write_manifest(tmp_path, _valid_manifest_body())
-    bad_commands = [
-        "# Review-only",
-        "PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",
+    bad_steps = [
+        FollowupStep(
+            id="bad-step",
+            label="Bad step",
+            command_lines=(
+                "# Review-only",
+                "PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",
+            ),
+            script="ops/not_allowlisted_script.py",
+        ),
     ]
-    with patch("preflight_kr_end_to_end_intake._build_followup_commands", return_value=bad_commands):
+    with patch("preflight_kr_end_to_end_intake._build_followup_steps", return_value=bad_steps):
         with pytest.raises(KrEndToEndPreflightError, match="follow-up command not allowlisted") as exc:
             run_kr_end_to_end_preflight(path, emit_followup_commands=True)
     assert exc.value.stage == "validate"
@@ -1061,3 +1073,418 @@ def test_static_scan_shared_forbidden_tuple_unchanged() -> None:
     assert '"paperbroker"' in text
     assert '"paperlooprunner"' in text
     assert '"submit_order"' in text
+
+
+# --- 3H3: structured follow-up plan JSON ---
+
+
+def test_manifest_accepts_structured_plan_out(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(
+        tmp_path,
+        _valid_manifest_body(extra="")
+        + '\n[outputs]\nstructured_plan_out = "structured_plan.json"\n',
+    )
+    manifest = load_kr_end_to_end_preflight_manifest(path)
+    assert manifest.structured_plan_out == (tmp_path / "structured_plan.json").resolve()
+
+
+def test_unknown_outputs_field_still_rejected(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(
+        tmp_path,
+        _valid_manifest_body()
+        + '\n[outputs]\nsummary_out = "summary.json"\nunknown_outputs = true\n',
+    )
+    with pytest.raises(KrEndToEndPreflightError, match="unknown outputs fields") as exc:
+        load_kr_end_to_end_preflight_manifest(path)
+    assert exc.value.stage == "parse"
+
+
+def test_cli_structured_plan_out_overrides_manifest(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    manifest_path = _write_manifest(
+        tmp_path,
+        _valid_manifest_body()
+        + '\n[outputs]\nstructured_plan_out = "manifest_structured.json"\n',
+    )
+    cli_out = tmp_path / "cli_structured.json"
+    payload = run_kr_end_to_end_preflight(
+        manifest_path,
+        structured_plan_out=cli_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    assert payload["structured_plan_out"] == str(cli_out)
+    assert cli_out.is_file()
+    assert not (tmp_path / "manifest_structured.json").exists()
+
+
+def test_structured_plan_writes_json_normally(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    structured_out = tmp_path / "structured_plan.json"
+    run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=structured_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    payload = json.loads(structured_out.read_text(encoding="utf-8"))
+    assert payload["review_only"] is True
+    assert payload["steps"]
+
+
+def test_structured_plan_exists_without_force_write_stage(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    structured_out = tmp_path / "structured_plan.json"
+    structured_out.write_text("{}", encoding="utf-8")
+    with pytest.raises(KrEndToEndPreflightError, match="output already exists: structured_plan_out") as exc:
+        run_kr_end_to_end_preflight(
+            path,
+            structured_plan_out=structured_out,
+            emit_followup_commands=True,
+            force=False,
+        )
+    assert exc.value.stage == "write"
+    assert str(structured_out) not in exc.value.message
+
+
+def test_force_allows_structured_plan_overwrite(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    structured_out = tmp_path / "structured_plan.json"
+    structured_out.write_text('{"old": true}', encoding="utf-8")
+    payload = run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=structured_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    written = json.loads(structured_out.read_text(encoding="utf-8"))
+    assert written["review_only"] is True
+    assert payload["structured_plan_generated"] is True
+
+
+def test_structured_plan_write_uses_atomic_helper(tmp_path: Path) -> None:
+    out_path = tmp_path / "structured_plan.json"
+    _write_output(out_path, '{"version":1}\n', force=True, field_name="structured_plan_out")
+    assert out_path.read_text(encoding="utf-8") == '{"version":1}\n'
+
+
+def test_structured_plan_write_failure_preserves_existing_file(tmp_path: Path) -> None:
+    out_path = tmp_path / "structured_plan.json"
+    original = '{"version":1,"preserved":true}\n'
+    out_path.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError, match="output write failed: PermissionError") as exc:
+            _write_output(out_path, '{"broken":true}\n', force=True, field_name="structured_plan_out")
+    assert exc.value.stage == "write"
+    assert out_path.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_structured_plan_write_failure_sanitizes_exception_detail(tmp_path: Path) -> None:
+    out_path = tmp_path / "structured_plan.json"
+    secret = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPreflightError) as exc:
+            _write_output(out_path, '{"status":"ok"}\n', force=True, field_name="structured_plan_out")
+    assert exc.value.message == "output write failed: PermissionError"
+    assert secret not in exc.value.message
+
+
+def _structured_plan_payload(tmp_path: Path) -> dict[str, object]:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    structured_out = tmp_path / "structured_plan.json"
+    run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=structured_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    return json.loads(structured_out.read_text(encoding="utf-8"))
+
+
+def test_structured_plan_top_level_shape(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    assert set(payload.keys()) >= {
+        "version",
+        "mode",
+        "manifest",
+        "name",
+        "generated_by",
+        "review_only",
+        "steps",
+        "forbidden_shortcuts",
+        "warnings",
+    }
+
+
+def test_structured_plan_version_is_one(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    assert payload["version"] == 1
+
+
+def test_structured_plan_mode_value(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    assert payload["mode"] == "kr-end-to-end-intake-followup-plan"
+
+
+def test_structured_plan_executable_steps_in_allowlist(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    for step in payload["steps"]:
+        script = step.get("script")
+        if script is not None:
+            assert script in _FOLLOWUP_COMMAND_ALLOWLIST
+
+
+def test_structured_plan_comment_step_has_null_script(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    concat = next(step for step in payload["steps"] if step["id"] == "concatenate-jsonl")
+    assert concat["script"] is None
+    assert concat["executes_in_preflight"] is False
+
+
+def test_structured_plan_every_step_requires_operator_review(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    for step in payload["steps"]:
+        assert step["requires_operator_review"] is True
+
+
+def test_structured_plan_every_step_not_executed_in_preflight(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    for step in payload["steps"]:
+        assert step["executes_in_preflight"] is False
+
+
+def test_structured_plan_step_ids_deterministic(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    first = _build_followup_steps(load_kr_end_to_end_preflight_manifest(path))
+    second = _build_followup_steps(load_kr_end_to_end_preflight_manifest(path))
+    assert [step.id for step in first] == [step.id for step in second]
+    assert [step.id for step in first] == [
+        "validate-provider-mapping",
+        "price-smoke",
+        "dart-smoke",
+        "concatenate-jsonl",
+        "research-source-intake-validate-only",
+        "combined-context-smoke",
+        "date-md-smoke",
+        "scout-manual-packet",
+    ]
+
+
+def test_markdown_and_structured_plan_share_internal_steps(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    manifest = load_kr_end_to_end_preflight_manifest(path)
+    steps = _build_followup_steps(manifest)
+    payload = run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=tmp_path / "structured_plan.json",
+        plan_out=tmp_path / "plan.md",
+        emit_followup_commands=True,
+        force=True,
+    )
+    structured = json.loads((tmp_path / "structured_plan.json").read_text(encoding="utf-8"))
+    markdown = (tmp_path / "plan.md").read_text(encoding="utf-8")
+    for step in structured["steps"]:
+        for line in step["command"]:
+            assert line in markdown
+    assert payload["followup_commands"] == _followup_steps_to_command_lines(steps)
+
+
+def test_markdown_plan_semantically_compatible_with_3h2(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    plan_out = tmp_path / "plan.md"
+    run_kr_end_to_end_preflight(path, plan_out=plan_out, emit_followup_commands=True, force=True)
+    text = plan_out.read_text(encoding="utf-8")
+    joined = "\n".join(payload["followup_commands"])
+    assert joined in text
+    assert "Follow-up commands to run manually" in text
+    assert "Forbidden shortcuts reminder" in text
+
+
+def test_structured_plan_no_invented_3h0_command(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload)
+    assert "ops/run_3h0" not in dumped
+
+
+def test_structured_plan_no_invented_3h1_command(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    for step in payload["steps"]:
+        joined = "\n".join(step["command"])
+        assert "preflight_kr_end_to_end_intake.py" not in joined
+
+
+def test_structured_plan_no_config_promotion_command(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload).lower()
+    assert "cp " not in dumped
+    assert "config/universe" not in dumped
+
+
+def test_structured_plan_no_broker_kis_paperloop_commands(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload).lower()
+    broker_token = "run_" + "kis"
+    assert broker_token not in dumped
+    assert "paperbroker" not in dumped
+    assert "paperlooprunner" not in dumped
+
+
+def test_structured_plan_no_submit_order_token(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload).lower()
+    sensitive = "submit_" + "order"
+    assert sensitive not in dumped
+
+
+def test_structured_plan_no_endpoint_urls(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload)
+    assert "https://" not in dumped
+    assert "http://" not in dumped
+
+
+def test_structured_plan_no_env_api_key_names(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    dumped = json.dumps(payload).lower()
+    assert "fred_api_key" not in dumped
+    assert "dart_api_key" not in dumped
+    assert "api_key" not in dumped
+
+
+def test_structured_plan_no_trading_action_order_allocation_fields(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    _walk_forbidden_fields(payload)
+
+
+def test_structured_forbidden_shortcuts_use_runtime_fragment_source(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    assert payload["forbidden_shortcuts"] == _plan_forbidden_shortcuts_list()
+    exec_path = "".join(("broker", "/", "PaperLoop", "/", "K", "IS"))
+    assert any(exec_path in item for item in payload["forbidden_shortcuts"])
+
+
+def test_disallowed_structured_step_script_fails_validate_stage(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    bad_steps = [
+        FollowupStep(
+            id="bad-step",
+            label="Bad step",
+            command_lines=("PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",),
+            script="ops/not_allowlisted_script.py",
+        ),
+    ]
+    with patch("preflight_kr_end_to_end_intake._build_followup_steps", return_value=bad_steps):
+        with pytest.raises(KrEndToEndPreflightError, match="(structured plan step not allowlisted|follow-up command not allowlisted)") as exc:
+            run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    assert exc.value.stage == "validate"
+
+
+def test_validate_structured_plan_steps_rejects_disallowed_script() -> None:
+    with pytest.raises(KrEndToEndPreflightError, match="structured plan step not allowlisted") as exc:
+        _validate_structured_plan_steps(
+            [
+                FollowupStep(
+                    id="bad-step",
+                    label="Bad step",
+                    command_lines=("PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",),
+                    script="ops/not_allowlisted_script.py",
+                ),
+            ],
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_markdown_plan_still_validates_against_allowlist(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    scripts = _extract_followup_command_scripts(payload["followup_commands"])
+    for script in scripts:
+        assert script in _FOLLOWUP_COMMAND_ALLOWLIST
+
+
+def test_summary_json_still_contains_existing_3h2_keys(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    expected_keys = {
+        "status",
+        "stage",
+        "mode",
+        "manifest",
+        "name",
+        "artifacts",
+        "provider_mapping_validation",
+        "optional_artifact_checks",
+        "settings",
+        "warnings",
+        "followup_commands",
+    }
+    assert expected_keys <= set(payload.keys())
+
+
+def test_summary_json_reports_structured_plan_metadata_when_written(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    structured_out = tmp_path / "structured_plan.json"
+    summary_out = tmp_path / "summary.json"
+    payload = run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=structured_out,
+        summary_out=summary_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    assert payload["structured_plan_generated"] is True
+    assert payload["structured_plan_steps_count"] == 8
+    assert payload["structured_plan_out"] == str(structured_out)
+    written = json.loads(summary_out.read_text(encoding="utf-8"))
+    assert written["structured_plan_generated"] is True
+    assert written["structured_plan_steps_count"] == 8
+    assert written["structured_plan_out"] == str(structured_out)
+
+
+def test_summary_json_does_not_inline_structured_steps(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    summary_out = tmp_path / "summary.json"
+    run_kr_end_to_end_preflight(
+        path,
+        structured_plan_out=tmp_path / "structured_plan.json",
+        summary_out=summary_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    written = json.loads(summary_out.read_text(encoding="utf-8"))
+    assert "steps" not in written
+    assert "structured_plan_steps_count" in written
+
+
+def test_summary_without_structured_plan_omits_structured_metadata(tmp_path: Path) -> None:
+    _copy_preflight_fixtures(tmp_path)
+    path = _write_manifest(tmp_path, _valid_manifest_body())
+    payload = run_kr_end_to_end_preflight(path, emit_followup_commands=True)
+    assert "structured_plan_generated" not in payload
+    assert "structured_plan_steps_count" not in payload
+    assert "structured_plan_out" not in payload

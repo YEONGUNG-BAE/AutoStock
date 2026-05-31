@@ -1778,9 +1778,35 @@ Harden the [3H1](#3h1--operator-local-end-to-end-manifestpreflight-helper) prefl
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H3+ (unimplemented)**
+### 3H3 — structured follow-up plan JSON artifact
 
-**3H3+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Add optional structured follow-up plan JSON parallel to the existing Markdown plan so operators and future tooling can inspect follow-up steps without parsing Markdown.
+
+**Behavior (review-only; no execution):**
+
+| Area | Change |
+|---|---|
+| **Manifest** | Optional `[outputs].structured_plan_out` |
+| **CLI** | `--structured-plan-out PATH` overrides manifest output path |
+| **Internal steps** | Single `FollowupStep` representation drives Markdown command lines and structured JSON |
+| **Structured JSON** | `version=1`, `mode=kr-end-to-end-intake-followup-plan`, `steps[]`, `forbidden_shortcuts`, `warnings` |
+| **Summary JSON** | When written: `structured_plan_out`, `structured_plan_steps_count`, `structured_plan_generated` only (no inlined steps) |
+| **Atomic writes** | Reuses existing `_write_output()` with `field_name=structured_plan_out`; `--force` applies |
+
+**Rules preserved from 3H1/3H2:**
+
+- No live fetch, smoke execution, config mutation, env/API key read, or trading
+- Generated commands/steps are not executed by preflight
+- Positive allowlist validation for executable step scripts; comment/manual steps have `script=null`
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H4+ (unimplemented)**
+
+**3H4+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 
