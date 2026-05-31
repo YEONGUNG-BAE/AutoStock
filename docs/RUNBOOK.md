@@ -766,6 +766,34 @@ Approved follow-up: candidate pool → 3G3-2 ranked mapping workflow → 3E2/3E3
 
 Synthetic proof: `uv run pytest tests/test_kr_discovery_source_live_smoke.py -v`.
 
+**3G4 factor scoring guardrails:**
+
+3G4 factor scoring is not trading logic.
+
+It may generate reviewable ranking-signal inputs, but it must not emit orders, action labels, target allocations, or broker/PaperLoop/KIS write inputs.
+
+Approved high-level path:
+
+```text
+local fixture / operator-local factor bundle
+→ factor signal generator
+→ 3G3-1 ranking signal TOML
+→ rank_kr_candidates
+→ selected candidates
+→ 3F1 generator
+→ provider mapping validation
+→ 3E2/3E3/3E4 smoke
+→ operator review
+```
+
+Direct shortcuts are forbidden:
+
+- factor scorer → checked-in config mutation
+- factor scorer → broker/PaperLoop/KIS
+- factor scorer → buy/sell/hold/order/allocation output
+
+See [3G4-0 guardrails](REAL_RESEARCH_SOURCE_INTAKE.md#3g4-0--factor-scoring-guardrail-checkpoint) in Real Research Source Intake design doc.
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
 `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.

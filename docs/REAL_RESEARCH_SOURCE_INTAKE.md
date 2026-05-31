@@ -1235,6 +1235,97 @@ Synthetic proof: `uv run pytest tests/test_kr_discovery_source_live_smoke.py -v`
 
 ---
 
+## 3G4-0 — factor scoring guardrail checkpoint
+
+**Status:** implemented (docs-only)
+
+**Purpose:**
+Define the safe boundary for factor scoring before 3G4-1 implementation.
+
+Factor scoring is advisory research metadata only. It may produce normalized factor components and ranking-signal inputs, but it must not produce executable trading decisions.
+
+**Allowed output:**
+
+- `liquidity_score`
+- `market_cap_score`
+- `quality_score`
+- `momentum_score`
+- `risk_penalty`
+- `score_version`
+- `as_of`
+- explanations / provenance
+- reviewable JSON/TOML artifacts
+
+**Forbidden output:**
+
+- `action`
+- `side`
+- `buy`
+- `sell`
+- `hold`
+- `target_weight`
+- `target_allocation`
+- `quantity`
+- `order`
+- `order_type`
+- `price_target`
+- `stop_loss`
+- `take_profit`
+- executable decision labels
+- broker/PaperLoop/KIS command inputs
+
+**Guardrails:**
+
+**G4-1. Fixture-first only:**
+The first factor scorer must use local fixtures only.
+No live market/news/disclosure calls.
+No env/API key reads.
+
+**G4-2. Deterministic/versioned:**
+All factor formulas must declare `factor_score_version`.
+All component transforms must be deterministic.
+Rounding precision must be fixed and tested.
+
+**G4-3. Input provenance:**
+Factor scorer inputs must come from explicit local artifacts:
+
+- candidate pool fixture
+- ranking-signal fixture
+- source snapshots
+- Date.md/store exports
+- manually supplied local JSON/TOML
+
+No hidden data fetches.
+
+**G4-4. Output boundary:**
+The scorer may produce ranking-signal-compatible artifacts.
+It must not mutate checked-in universe/provider mapping config.
+It must not directly call 3F/3G mapping generation unless explicitly in an orchestration test.
+
+**G4-5. Operator review:**
+Factor outputs are reviewable artifacts.
+Operator approval remains required before any universe/provider mapping update.
+
+**G4-6. No trading:**
+Factor scoring must not call:
+
+- broker
+- KIS write paths
+- PaperLoopRunner
+- `submit_order`
+- allocation/execution logic
+
+**Phase split:**
+
+- **3G4-1:** fixture-first factor signal generator
+- **3G4-2:** factor scorer → 3G3-1 ranking signal TOML integration
+- **3G4-3:** operator-local real factor input bundle
+- **3G4-4:** source-specific factor adapter design
+- **3G4-5:** first operator-triggered live factor smoke
+- **3G4+ hardening:** calibration, provenance, drift checks, explainability
+
+---
+
 ## 11. Recommended first source
 
 ### Choice: **FRED (`FactType.MACRO`)**
