@@ -1377,6 +1377,64 @@ Synthetic proof: `uv run pytest tests/test_kr_factor_signal_generator.py -v`.
 
 ---
 
+## 3G4-2 — factor signal → ranked mapping workflow integration
+
+**Status:** implemented
+
+**Purpose:**
+Thin local orchestration helper connecting 3G4-1 factor signal generation with the existing 3G3-2 ranked mapping workflow. No new scoring/ranking/provider-mapping logic — reviewable artifacts only.
+
+**Scope:**
+
+| Component | Path | Network |
+|---|---|---|
+| **3G4-2** | `ops/build_kr_factor_ranked_mapping.py` + tests | None |
+
+**Orchestration path:**
+
+```text
+factor input TOML
+→ generate_kr_factor_signals_file()   # 3G4-1
+→ run_build_kr_real_ranked_mapping()  # 3G3-2 (3G3-1 rank + 3F1 generate + validate)
+→ factor signals TOML + ranked JSON + selected candidates + universe/mapping TOML
+→ operator review
+```
+
+**Rules:**
+
+- Scoring formula remains in **3G4-1**; ranking remains in **3G3-1/3G3-2**
+- Output is reviewable artifacts only — no trading/action/allocation fields
+- `--force` propagates to all five output paths
+- Lower-level error stages preserved (`parse`, `generate`, `rank`, `resolve`, `write`, `validate`)
+- Live factor scoring remains **deferred** (3G4-3+)
+
+**3G4-2 ops helper (local files only; no env/API keys):**
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_factor_ranked_mapping.py \
+  --candidate-pool tests/fixtures/research/kr_candidates/kr_sector_candidate_pool.synthetic.toml \
+  --factor-inputs tests/fixtures/research/kr_factors/kr_factor_inputs.synthetic.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_synthetic_multi.xml \
+  --factor-signals-out /tmp/kr_factor_signals.generated.toml \
+  --ranked-out /tmp/kr_candidates.factor_ranked.json \
+  --selected-candidates-out /tmp/kr_candidates.factor_ranked.selected.toml \
+  --universe-out /tmp/universe.kr-factor-ranked.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-factor-ranked.toml \
+  --factor-output-name kr-factor-signals-synthetic-v1 \
+  --factor-output-description "Synthetic fixture-first KR factor signals." \
+  --selection-name kr-factor-ranked-selected-v1 \
+  --selection-description "Factor-ranked KR candidates." \
+  --universe-name kr-factor-ranked-universe-v1 \
+  --provider-mapping-name kr-factor-ranked-provider-mappings-v1 \
+  --top-n 3 \
+  --force \
+  --json
+```
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_ranked_mapping_workflow.py -v`.
+
+---
+
 ## 11. Recommended first source
 
 ### Choice: **FRED (`FactType.MACRO`)**

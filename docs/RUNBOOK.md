@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1803 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1845 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1803 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1845 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -812,6 +812,35 @@ Approved follow-up: generated factor signals → 3G3-1 ranker → 3G3-2 ranked m
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_signal_generator.py -v`.
 
+**3G4-2 factor-ranked mapping workflow (local orchestration only; reviewable artifacts only):**
+
+Thin orchestration helper chaining 3G4-1 factor signal generation + 3G3-2 ranked mapping. Scoring formula remains in 3G4-1; ranking remains in 3G3-1/3G3-2. Not live factor scoring; not trading instruction. Use `/tmp` or `runtime/` output paths first — do not point at checked-in config samples unless explicitly intended.
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_factor_ranked_mapping.py \
+  --candidate-pool tests/fixtures/research/kr_candidates/kr_sector_candidate_pool.synthetic.toml \
+  --factor-inputs tests/fixtures/research/kr_factors/kr_factor_inputs.synthetic.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_synthetic_multi.xml \
+  --factor-signals-out /tmp/kr_factor_signals.generated.toml \
+  --ranked-out /tmp/kr_candidates.factor_ranked.json \
+  --selected-candidates-out /tmp/kr_candidates.factor_ranked.selected.toml \
+  --universe-out /tmp/universe.kr-factor-ranked.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-factor-ranked.toml \
+  --factor-output-name kr-factor-signals-synthetic-v1 \
+  --factor-output-description "Synthetic fixture-first KR factor signals." \
+  --selection-name kr-factor-ranked-selected-v1 \
+  --selection-description "Factor-ranked KR candidates." \
+  --universe-name kr-factor-ranked-universe-v1 \
+  --provider-mapping-name kr-factor-ranked-provider-mappings-v1 \
+  --top-n 3 \
+  --force \
+  --json
+```
+
+Approved follow-up: generated universe/provider mapping → 3E2/3E3/3E4 smoke → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_ranked_mapping_workflow.py -v`.
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
 `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
@@ -1051,7 +1080,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1803 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1845 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

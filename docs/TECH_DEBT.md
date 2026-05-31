@@ -77,7 +77,7 @@
 - Real Intake **3G3-6+** — source-specific live adapter hardening — deferred.
 - ~~Real Intake **3G4-0** — factor scoring guardrail checkpoint~~ — Done.
 - ~~Real Intake **3G4-1** — fixture-first factor signal generator~~ Done: `kr_factor_signal_generator.py`, `ops/generate_kr_factor_signals.py`, synthetic factor input fixture + tests; local factor input → 3G3-1 ranking signal TOML; self-validates via existing ranker parser; no network/env.
-- Real Intake **3G4-2** — factor scorer → ranking-signal integration — Deferred.
+- ~~Real Intake **3G4-2** — factor scorer → ranked mapping workflow integration~~ Done: `ops/build_kr_factor_ranked_mapping.py` + tests; thin orchestration over 3G4-1 + 3G3-2; reviewable artifacts only; no duplicated scoring/ranking/mapping logic; no network/env.
 - Real Intake **3G4-3** — operator-local real factor input bundle — Deferred.
 - Real Intake **3G4-4** — source-specific factor adapter design — Deferred.
 - Real Intake **3G4-5+** — live factor smoke / calibration / provenance / drift checks / explainability hardening — Deferred.
