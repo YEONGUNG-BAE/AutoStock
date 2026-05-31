@@ -318,6 +318,7 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "src" / "data" / "kr_candidate_pool.py",
         REPO_ROOT / "ops" / "select_kr_candidates.py",
         REPO_ROOT / "ops" / "build_kr_real_sector_pool_mapping.py",
+        REPO_ROOT / "ops" / "build_kr_real_ranked_mapping.py",
         REPO_ROOT / "src" / "data" / "kr_candidate_ranker.py",
         REPO_ROOT / "ops" / "rank_kr_candidates.py",
     ]

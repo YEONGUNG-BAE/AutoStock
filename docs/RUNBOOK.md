@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1530 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1560 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1530 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1560 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -639,7 +639,37 @@ PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
   --json
 ```
 
-Live discovery and live factor scoring remain **deferred** (3G3-2+). Synthetic proof: `uv run pytest tests/test_kr_candidate_ranker.py -v`.
+Live discovery and live factor scoring remain **deferred** (3G3-3+). Synthetic proof: `uv run pytest tests/test_kr_candidate_ranker.py -v`.
+
+**3G3-2 operator-local ranked mapping (local files only; not trading instruction):**
+
+Operator prepares real sector pool TOML, local ranking signal TOML, and local corp-code snapshot. Ranked JSON is reviewable metadata only — do **not** treat scores as buy/sell/hold signals or allocation guidance.
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_real_ranked_mapping.py \
+  --candidate-pool /path/to/operator/kr_sector_pool.local.toml \
+  --ranking-signals /path/to/operator/kr_ranking_signals.local.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_synthetic_multi.xml \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 5 \
+  --max-per-sector 2 \
+  --top-n 3 \
+  --ranked-out /tmp/kr_candidates.ranked.json \
+  --selected-candidates-out /tmp/kr_candidates.ranked.selected.toml \
+  --universe-out /tmp/universe.kr-real.ranked.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.ranked.toml \
+  --selection-name kr-ranked-selected-v1 \
+  --selection-description "Operator-ranked KR candidates." \
+  --universe-name kr-real-ranked-v1 \
+  --provider-mapping-name kr-real-ranked-provider-mappings-v1 \
+  --force \
+  --json
+```
+
+Approved path: real sector pool + ranking signals + corp-code snapshot → ranked JSON → selected candidate TOML → generated universe/provider mapping → validation → 3E2/3E3/3E4 → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_real_ranked_mapping_workflow.py -v`.
 
 ```bash
 DAY=2026-05-30
@@ -874,7 +904,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1530 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1560 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

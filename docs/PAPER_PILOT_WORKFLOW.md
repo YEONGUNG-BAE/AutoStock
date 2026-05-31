@@ -596,9 +596,9 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1** (fixture ranking; advisory metadata only); **3G3-2+** live discovery/ranking deferred |
+| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2 + 3G3-0 + 3G3-1 + 3G3-2** (operator-local ranked mapping; advisory metadata only); **3G3-3+** live discovery/ranking deferred |
 
-- **Real sector pool → mapping chain** — operator-local path exists (3G1 selector + 3G2 helper + 3F1 generator). **3G3-1** fixture ranking produces reviewable ranked JSON (advisory metadata only; not trading instruction). Live discovery/ranking **not implemented**. Operator approval required before universe generation or downstream smoke ([3G3-0 guardrails](REAL_RESEARCH_SOURCE_INTAKE.md#3g3-0-live-discoveryranking-guardrails-design-only)).
+- **Real sector pool → mapping chain** — operator-local path exists (3G1 selector + 3G2 helper + 3F1 generator). **3G3-1** fixture ranking and **3G3-2** ranked-mapping helper produce reviewable ranked JSON (advisory metadata only; not trading instruction). Live discovery/ranking **not implemented**. Operator approval required before universe generation or downstream smoke ([3G3-0 guardrails](REAL_RESEARCH_SOURCE_INTAKE.md#3g3-0-live-discoveryranking-guardrails-design-only)).
 
 - **Controlled Day 1 walk-through** — Foundation 8B~8I ops chain을 **1회** 수동 검증하고 **8I no-write rehearsal에서 종료**. 30거래일 pilot **시작과 동일하지 않다**. runbook: `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through.
 - **Real API fetchers** — Controlled Day 1 **이후** deferred. FRED/DART/yfinance/news HTTP intake는 별도 구현·review 후.
