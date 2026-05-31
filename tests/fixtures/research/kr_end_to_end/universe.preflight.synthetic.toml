@@ -1,0 +1,17 @@
+# Synthetic KR universe for 3H1 end-to-end preflight tests (test fixtures only).
+version = 1
+name = "kr-end-to-end-preflight-universe-v1"
+description = "Synthetic KR universe for 3H1 preflight fixture validation."
+base_market = "KR"
+
+[[symbols]]
+symbol = "005930"
+market = "KR"
+enabled = true
+display_name = "Samsung Electronics"
+
+[[symbols]]
+symbol = "000660"
+market = "KR"
+enabled = true
+display_name = "SK hynix"

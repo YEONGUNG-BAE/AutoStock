@@ -1,0 +1,20 @@
+# Incomplete provider mapping for 3H1 coverage-failure tests (missing 000660).
+version = 1
+name = "kr-end-to-end-preflight-incomplete-v1"
+description = "Incomplete mapping for 3H1 coverage failure tests."
+
+[[mappings]]
+symbol = "005930"
+market = "KR"
+display_name = "Samsung Electronics"
+enabled = true
+stock_code = "005930"
+
+[mappings.yfinance]
+provider_symbol = "005930.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "005930"
+corp_name = "Samsung Electronics"

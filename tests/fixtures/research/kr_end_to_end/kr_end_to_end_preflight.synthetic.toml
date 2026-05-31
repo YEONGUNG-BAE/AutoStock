@@ -1,0 +1,25 @@
+# Synthetic 3H1 end-to-end preflight manifest fixture.
+version = 1
+name = "kr-end-to-end-preflight-synthetic-v1"
+description = "Synthetic fixture-first KR end-to-end preflight manifest for 3H1 tests."
+base_market = "KR"
+
+[artifacts]
+universe = "universe.preflight.synthetic.toml"
+provider_mapping = "provider_mappings.preflight.synthetic.toml"
+candidate_pool = "../kr_candidates/kr_sector_candidate_pool.synthetic.toml"
+factor_inputs = "../kr_factors/kr_factor_inputs.synthetic.toml"
+
+[settings]
+require_yfinance = true
+require_dart = true
+require_symbol_coverage = true
+context_budget_profile = "kr-real-smoke"
+
+[commands]
+emit_followup_commands = true
+day = "2026-05-30"
+price_snapshot_dir = "runtime/research/2026-05-30/sources/price"
+dart_snapshot_dir = "runtime/research/2026-05-30/sources/dart"
+combined_out_dir = "runtime/research/2026-05-30"
+scout_out_dir = "runtime/research/2026-05-30/scout"

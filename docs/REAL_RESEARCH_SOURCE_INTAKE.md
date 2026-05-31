@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3-1** fixture-first ranking model **implemented** (`ops/rank_kr_candidates.py`); **3G3-2** operator-local real ranking input workflow **implemented** (`ops/build_kr_real_ranked_mapping.py`); **3G3-3** discovery snapshot replay adapter **implemented** (`ops/replay_kr_discovery_snapshot.py`); **3G3-4A** live-shaped fake-transport discovery snapshot fetcher **implemented** (`kr_discovery_live_client.py`); **3G3-4B** operator-triggered HTTP discovery live smoke **implemented** (`ops/run_kr_discovery_live_smoke.py`); **3G3-5** fixture-first KR discovery source schema mapper **implemented** (`ops/map_kr_discovery_fixture.py`); **3G3-6** operator-triggered source-specific KR discovery live endpoint adapter **implemented** (`ops/run_kr_discovery_source_live_smoke.py`); **3G3-6+** live factor scoring / adapter hardening **deferred**; **3G4-0** factor scoring guardrails **documented**; **3G4-1** through **3G4-5** + **3G4-H1** factor intake **implemented**; **3H0** operator end-to-end intake guardrail checkpoint **documented** (docs-only); **3H1** operator-local manifest/preflight helper **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3-1** fixture-first ranking model **implemented** (`ops/rank_kr_candidates.py`); **3G3-2** operator-local real ranking input workflow **implemented** (`ops/build_kr_real_ranked_mapping.py`); **3G3-3** discovery snapshot replay adapter **implemented** (`ops/replay_kr_discovery_snapshot.py`); **3G3-4A** live-shaped fake-transport discovery snapshot fetcher **implemented** (`kr_discovery_live_client.py`); **3G3-4B** operator-triggered HTTP discovery live smoke **implemented** (`ops/run_kr_discovery_live_smoke.py`); **3G3-5** fixture-first KR discovery source schema mapper **implemented** (`ops/map_kr_discovery_fixture.py`); **3G3-6** operator-triggered source-specific KR discovery live endpoint adapter **implemented** (`ops/run_kr_discovery_source_live_smoke.py`); **3G3-6+** live factor scoring / adapter hardening **deferred**; **3G4-0** factor scoring guardrails **documented**; **3G4-1** through **3G4-5** + **3G4-H1** factor intake **implemented**; **3H0** operator end-to-end intake guardrail checkpoint **documented** (docs-only); **3H1** operator-local manifest/preflight helper **implemented** (`ops/preflight_kr_end_to_end_intake.py`); **3H2+** end-to-end hardening **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -1619,11 +1619,11 @@ Define the approved operator-local end-to-end path from discovered/ranked/factor
 
 | In scope | Out of scope |
 |---|---|
-| Approved artifact flow across existing ops scripts | New orchestration CLI (deferred to **3H1**) |
-| Operator review gate before config promotion | Automatic promotion of generated configs into `config/` |
-| Explicit 3E PRICE/DART/combined context smoke boundaries | Live trading, broker, PaperLoop, KIS write path |
-| 8B validate-only → 8B normal → 8C → 8D Scout packet | Automatic universe mutation |
-| Forbidden shortcuts list | Scheduled/automatic fetch |
+| Approved artifact flow across existing ops scripts | Automatic promotion of generated configs into `config/` |
+| Operator review gate before config promotion | Live trading, broker, PaperLoop, KIS write path |
+| Explicit 3E PRICE/DART/combined context smoke boundaries | Automatic universe mutation |
+| 8B validate-only → 8B normal → 8C → 8D Scout packet | Scheduled/automatic fetch |
+| Forbidden shortcuts list | Full orchestration (**3H1** is preflight/checklist only) |
 
 This is **not** a workflow implementation, **not** live trading, **not** auto-promotion, **not** automatic universe mutation, and **not** broker/PaperLoop/KIS integration.
 
@@ -1709,22 +1709,57 @@ All stages produce **reviewable local artifacts** under `/tmp` or `runtime/` fir
 | Source endpoints or error JSON echoing secrets | Sanitized errors only; keys never in snapshots/logs |
 | Runtime snapshots tracked in git | `runtime/` is gitignored; never commit |
 
-### Next deferred step — 3H1 (unimplemented)
+### 3H1 — operator-local end-to-end manifest/preflight helper
 
-**3H1 — operator-local end-to-end manifest/preflight helper** remains **deferred and unimplemented**.
+**Status:** implemented
 
-Likely scope (design only; **no CLI exists yet**):
+**Purpose:**
+Thin preflight/checklist helper for the [3H0](#3h0--operator-end-to-end-intake-guardrail-checkpoint) documented path. Reads a local manifest TOML of **already-existing** artifact paths, validates existence/parse, validates universe/provider mapping coverage, and emits a reviewable summary JSON plus optional follow-up command plan. **Not** an orchestrator — does not fetch, smoke, mutate config, or trade.
 
-- Read a local manifest of already-existing artifact paths (candidate pool, factor inputs, corp-code snapshot, generated universe/mapping, staged JSONL paths).
-- Validate that listed files exist and parse.
-- Verify generated universe/provider mapping coverage via `validate_provider_mappings_cover_universe(require_yfinance=True, require_dart=True)`.
-- Optionally print the exact follow-up commands referencing **existing** ops scripts only.
+**Scope:**
 
-**3H1 must not:** fetch live data, mutate checked-in config, run broker/PaperLoop/KIS, or submit orders.
+| Component | Path | Network |
+|---|---|---|
+| **3H1 ops** | `ops/preflight_kr_end_to_end_intake.py` + tests | None |
+
+**Preflight path:**
+
+```text
+operator manifest TOML (artifact paths only)
+→ load_kr_end_to_end_preflight_manifest()
+→ required universe/provider_mapping exist + parse
+→ validate_provider_mappings_cover_universe(require_yfinance=..., require_dart=...)
+→ optional artifact checks (parse where loaders exist)
+→ summary JSON (+ optional plan Markdown with review-only commands)
+→ operator review
+```
+
+**Rules:**
+
+- Validates **existing** artifacts only — no live fetch, no 3E smoke execution, no 8B/8C/Scout execution
+- `require_symbol_coverage` is a manifest setting for follow-up **command plan** only — **not** passed to `validate_provider_mappings_cover_universe`
+- `--force` applies only to `summary_out` / `plan_out` — never modifies input artifacts or checked-in config
+- Follow-up commands reference **existing** ops scripts only; preflight does **not** execute them
+- No env/API key read; no broker/write/execution path
+
+**3H1 ops helper (local manifest only; no network/env):**
+
+```bash
+PYTHONPATH=src uv run python ops/preflight_kr_end_to_end_intake.py \
+  --manifest tests/fixtures/research/kr_end_to_end/kr_end_to_end_preflight.synthetic.toml \
+  --summary-out /tmp/kr_end_to_end_preflight_summary.json \
+  --plan-out /tmp/kr_end_to_end_preflight_plan.md \
+  --force \
+  --json
+```
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H2+ (unimplemented)**
 
 **3H2+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
-Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H0 operator note.
+Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 
 ---
 

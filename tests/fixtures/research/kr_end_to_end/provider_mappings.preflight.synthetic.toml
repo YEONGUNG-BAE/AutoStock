@@ -1,0 +1,36 @@
+# Synthetic provider mapping for 3H1 preflight tests (matches universe.preflight.synthetic.toml).
+version = 1
+name = "kr-end-to-end-preflight-provider-mappings-v1"
+description = "Provider mappings for 3H1 preflight synthetic universe."
+
+[[mappings]]
+symbol = "005930"
+market = "KR"
+display_name = "Samsung Electronics"
+enabled = true
+stock_code = "005930"
+
+[mappings.yfinance]
+provider_symbol = "005930.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00126380"
+stock_code = "005930"
+corp_name = "Samsung Electronics"
+
+[[mappings]]
+symbol = "000660"
+market = "KR"
+display_name = "SK hynix"
+enabled = true
+stock_code = "000660"
+
+[mappings.yfinance]
+provider_symbol = "000660.KS"
+currency = "KRW"
+
+[mappings.dart]
+corp_code = "00164779"
+stock_code = "000660"
+corp_name = "SK hynix"

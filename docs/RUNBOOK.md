@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2017 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2066 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2017 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2066 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -902,14 +902,31 @@ Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
 
 **3H0 operator note — end-to-end intake guardrail checkpoint (docs-only; no new command):**
 
-**3H0** documents the approved operator-local path from KR candidate discovery/ranking/factor scoring through 3E combined research context and Scout packet. It is a **guardrail checkpoint only** — there is **no** `ops/run_3h0_*.py` command and **no** 3H1 preflight helper yet.
+**3H0** documents the approved operator-local path from KR candidate discovery/ranking/factor scoring through 3E combined research context and Scout packet. It is a **guardrail checkpoint only** — there is **no** `ops/run_3h0_*.py` command.
+
+**3H1 preflight note — manifest/preflight helper (validates existing artifacts only; does not execute smokes):**
+
+After discovery/factor/ranking workflows produce reviewable local artifacts, run preflight before optional 3E smokes. Preflight reads a manifest TOML, validates universe/provider mapping coverage, checks optional artifact paths, and writes a reviewable summary + optional follow-up command plan. **Follow-up commands are operator-run manually** — preflight does not execute them.
+
+```bash
+PYTHONPATH=src uv run python ops/preflight_kr_end_to_end_intake.py \
+  --manifest /path/to/operator/kr_end_to_end_preflight.local.toml \
+  --summary-out /tmp/kr_end_to_end_preflight_summary.json \
+  --plan-out /tmp/kr_end_to_end_preflight_plan.md \
+  --force \
+  --json
+```
+
+Use **`/tmp`** or **`runtime/`** for summary/plan outputs first. Do **not** commit generated universe/provider mapping until operator review completes. Synthetic fixture: `tests/fixtures/research/kr_end_to_end/kr_end_to_end_preflight.synthetic.toml`.
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
 **Approved high-level order of operations** (each step uses **existing** ops scripts; detail in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md` § 3H0](REAL_RESEARCH_SOURCE_INTAKE.md#3h0--operator-end-to-end-intake-guardrail-checkpoint)):
 
 1. **Discovery side** — produce a reviewable sector-tagged candidate pool only (`ops/replay_kr_discovery_snapshot.py`, `ops/run_kr_discovery_live_smoke.py`, `ops/run_kr_discovery_source_live_smoke.py`, optional `ops/map_kr_discovery_fixture.py`). No direct universe/provider mapping mutation.
 2. **Factor side** — immutable raw factor snapshot + optional canonical factor input TOML (`ops/run_kr_factor_source_live_smoke.py`, `ops/map_kr_factor_fixture.py`). No direct ranking/universe/mapping mutation from live factor smoke.
 3. **Ranking/generation** — factor input TOML → `ops/generate_kr_factor_signals.py`; factor-ranked mapping → `ops/build_kr_factor_ranked_mapping.py`; bundle → `ops/build_kr_factor_bundle_mapping.py`. Generated universe/provider mapping TOML remains operator-reviewable; checked-in `config/universe*.toml` and `config/provider_mappings*.toml` are **not** auto-mutated.
-4. **Validation** — generated mapping must pass `load_universe_toml`, `load_provider_mapping_toml`, and `validate_provider_mappings_cover_universe(require_yfinance=True, require_dart=True)` (CLI: `ops/validate_provider_mapping.py`).
+4. **Validation** — generated mapping must pass `load_universe_toml`, `load_provider_mapping_toml`, and `validate_provider_mappings_cover_universe(require_yfinance=True, require_dart=True)` (CLI: `ops/validate_provider_mapping.py` or **3H1** `ops/preflight_kr_end_to_end_intake.py`).
 5. **3E research intake** — operator **explicitly** runs PRICE smoke (`ops/run_kr_real_price_smoke.py`) and DART smoke (`ops/run_kr_real_dart_smoke.py`) using **reviewed** generated universe/mapping paths only when chosen; FRED macro JSONL stays separate; concatenate JSONL sources explicitly; combined context via `ops/build_kr_real_combined_context_smoke.py` with context budget cap.
 6. **Context/Scout** — 8B validate-only first; 8B normal with `--context-budget-profile kr-real-smoke`; 8C `--require-symbol-coverage` relies on PRICE; DART disclosures remain context-only (`market=None`); Scout consumes capped Date.md date_ids. No broker/PaperLoop/KIS/write path.
 
@@ -920,7 +937,7 @@ Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
 - PRICE, DART, and combined context smokes remain **separate explicit operator commands** — no automatic chaining in 3H0.
 - Ranking/factor scores are **advisory metadata only** — not buy/sell/hold signals or allocation guidance.
 
-**Deferred next step:** **3H1** operator-local manifest/preflight helper (unimplemented; no CLI examples here).
+**Deferred next step:** **3H2+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1161,7 +1178,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2017 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2066 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
