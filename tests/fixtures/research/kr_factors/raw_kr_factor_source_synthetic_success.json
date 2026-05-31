@@ -1,0 +1,76 @@
+{
+  "source_key": "kr_factor_source",
+  "source_format": "synthetic_factor_v1",
+  "snapshot_version": 1,
+  "market": "KR",
+  "as_of": "2026-05-30T00:00:00+09:00",
+  "external_service": "synthetic-factor-fixture",
+  "universe_hint": "synthetic-kr-factor-universe",
+  "items": [
+    {
+      "ticker": "900001",
+      "displayName": "SYNTH Alpha Factor",
+      "liquidityPercentile": 0.95,
+      "marketCapPercentile": 0.90,
+      "profitabilityScore": 0.85,
+      "balanceSheetScore": 0.75,
+      "momentumPercentile": 0.70,
+      "volatilityRisk": 0.10,
+      "note": "Synthetic fixture only.",
+      "sectorCode": "SEMICONDUCTORS",
+      "lastUpdated": "2026-05-30T00:00:00+09:00"
+    },
+    {
+      "ticker": "KR:900002",
+      "displayName": "SYNTH Beta Factor",
+      "liquidityPercentile": 0.80,
+      "marketCapPercentile": 0.70,
+      "profitabilityScore": 0.95,
+      "balanceSheetScore": 0.85,
+      "momentumPercentile": 0.60,
+      "volatilityRisk": 0.05,
+      "note": "Synthetic fixture only; market-prefixed ticker normalization.",
+      "sectorCode": "INTERNET",
+      "lastUpdated": "2026-05-30T00:00:00+09:00"
+    },
+    {
+      "ticker": "900003",
+      "displayName": "SYNTH Gamma Factor",
+      "liquidityPercentile": 0.70,
+      "marketCapPercentile": 0.75,
+      "profitabilityScore": 0.60,
+      "balanceSheetScore": 0.70,
+      "momentumPercentile": 0.85,
+      "volatilityRisk": 0.20,
+      "note": "Synthetic fixture only.",
+      "sectorCode": "SEMICONDUCTORS",
+      "lastUpdated": "2026-05-30T00:00:00+09:00"
+    },
+    {
+      "ticker": "900004",
+      "displayName": "SYNTH Delta Factor",
+      "liquidityPercentile": 0.55,
+      "marketCapPercentile": 0.50,
+      "profitabilityScore": 0.45,
+      "balanceSheetScore": 0.40,
+      "momentumPercentile": 0.35,
+      "volatilityRisk": 0.30,
+      "note": "Synthetic fixture only; disabled downstream in candidate pool.",
+      "sectorCode": "INTERNET",
+      "lastUpdated": "2026-05-30T00:00:00+09:00"
+    },
+    {
+      "ticker": "900005",
+      "displayName": "SYNTH Epsilon Factor",
+      "liquidityPercentile": 0.40,
+      "marketCapPercentile": 0.45,
+      "profitabilityScore": 0.35,
+      "balanceSheetScore": 0.30,
+      "momentumPercentile": 0.25,
+      "volatilityRisk": 0.15,
+      "note": "Synthetic fixture only; ineligible downstream in candidate pool.",
+      "sectorCode": "SEMICONDUCTORS",
+      "lastUpdated": "2026-05-30T00:00:00+09:00"
+    }
+  ]
+}

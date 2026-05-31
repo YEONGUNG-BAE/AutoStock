@@ -333,6 +333,8 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "ops" / "generate_kr_factor_signals.py",
         REPO_ROOT / "ops" / "build_kr_factor_ranked_mapping.py",
         REPO_ROOT / "ops" / "build_kr_factor_bundle_mapping.py",
+        REPO_ROOT / "src" / "data" / "kr_factor_source_adapter.py",
+        REPO_ROOT / "ops" / "map_kr_factor_fixture.py",
     ]
     forbidden = (
         "requests",

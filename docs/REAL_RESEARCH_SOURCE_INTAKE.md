@@ -1320,7 +1320,7 @@ Factor scoring must not call:
 - **3G4-1:** fixture-first factor signal generator
 - **3G4-2:** factor scorer → 3G3-1 ranking signal TOML integration
 - **3G4-3:** operator-local real factor input bundle — **implemented** (see [3G4-3](#3g4-3--operator-local-factor-input-bundle-workflow))
-- **3G4-4:** source-specific factor adapter design
+- **3G4-4:** source-specific factor adapter — **implemented** (see [3G4-4](#3g4-4--fixture-first-source-specific-factor-adapter))
 - **3G4-5:** first operator-triggered live factor smoke
 - **3G4+ hardening:** calibration, provenance, drift checks, explainability
 
@@ -1478,6 +1478,60 @@ PYTHONPATH=src uv run python ops/build_kr_factor_bundle_mapping.py \
 Approved follow-up: generated universe/provider mapping → 3E2/3E3/3E4 smoke → operator review.
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_bundle_workflow.py -v`.
+
+---
+
+## 3G4-4 — fixture-first source-specific factor adapter
+
+**Status:** implemented
+
+**Purpose:**
+Convert provider-shaped local factor source payloads into canonical 3G4-1 factor input TOML. Advisory research metadata only — not live factor scoring, not trading instruction, not universe/provider mapping mutation.
+
+**Scope:**
+
+| Component | Path | Network |
+|---|---|---|
+| **3G4-4** | `kr_factor_source_adapter.py` + `ops/map_kr_factor_fixture.py` + tests | None |
+
+**Fixture-first path:**
+
+```text
+source-specific factor payload JSON (fixture)
+→ map_kr_factor_fixture.py
+→ canonical factor input TOML (3G4-1 schema)
+→ generate_kr_factor_signals.py (3G4-1)
+→ build_kr_factor_ranked_mapping.py (3G4-2)
+→ build_kr_factor_bundle_mapping.py (3G4-3, optional)
+→ operator review
+```
+
+**Rules:**
+
+- Output is canonical factor input TOML only (`version`, `name`, `description`, `as_of`, `factor_score_version`, `[[factors]]`)
+- No `action`/`buy`/`sell`/`hold`/order/allocation fields
+- No `corp_code`, no `yfinance_provider_symbol`, no provider mapping/universe output in adapter output
+- Source-only fields (`displayName`, `sectorCode`, `lastUpdated`, `external_service`, `universe_hint`) accepted in source payload but not emitted
+- Symbol normalization via existing `normalize_stock_code` (must match candidate pool lookup keys)
+- Self-validation via existing `load_kr_factor_inputs_toml`; adapter remaps failures to `stage="validate"`
+- Live factor transport remains **deferred** (3G4-5+)
+
+**3G4-4 ops helper (local files only; no env/API keys):**
+
+```bash
+PYTHONPATH=src uv run python ops/map_kr_factor_fixture.py \
+  --source tests/fixtures/research/kr_factors/raw_kr_factor_source_synthetic_success.json \
+  --factor-inputs-out /tmp/kr_factor_inputs.generated.toml \
+  --output-name kr-factor-inputs-from-source-v1 \
+  --output-description "Synthetic source-mapped KR factor inputs." \
+  --factor-score-version kr-factor-fixture-v1 \
+  --force \
+  --json
+```
+
+Approved follow-up: mapped factor input TOML → 3G4-1 / 3G4-2 / 3G4-3 workflows → operator review.
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_source_adapter.py -v`.
 
 ---
 
