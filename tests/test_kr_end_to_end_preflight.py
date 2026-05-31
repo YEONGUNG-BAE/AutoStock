@@ -35,6 +35,7 @@ INCOMPLETE_MAPPING = (
 OPS_SCRIPT = REPO_ROOT / "ops" / "preflight_kr_end_to_end_intake.py"
 VALIDATOR_SCRIPT = REPO_ROOT / "ops" / "validate_kr_end_to_end_preflight_plan.py"
 HANDOFF_MANIFEST_SCRIPT = REPO_ROOT / "ops" / "build_kr_end_to_end_handoff_manifest.py"
+HANDOFF_VERIFY_SCRIPT = REPO_ROOT / "ops" / "verify_kr_end_to_end_handoff_manifest.py"
 STATIC_SCAN_FILE = REPO_ROOT / "tests" / "test_fetch_research_sources.py"
 
 _FORBIDDEN_OUTPUT_FIELDS = frozenset(
@@ -99,6 +100,11 @@ from build_kr_end_to_end_handoff_manifest import (
     _write_manifest_output,
     build_handoff_manifest,
     build_kr_end_to_end_handoff_manifest,
+)
+from verify_kr_end_to_end_handoff_manifest import (
+    KrEndToEndHandoffManifestVerifyError,
+    load_handoff_manifest,
+    verify_kr_end_to_end_handoff_manifest,
 )
 from validate_kr_end_to_end_preflight_plan import (
     KrEndToEndPlanValidationError,
@@ -3448,6 +3454,552 @@ def test_handoff_manifest_no_env_api_key_read_in_ops_source() -> None:
 
 def test_handoff_manifest_no_subprocess_os_system_exec_eval_in_ops_source() -> None:
     source = HANDOFF_MANIFEST_SCRIPT.read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "subprocess" not in lowered
+    assert "os.system" not in lowered
+    assert " exec(" not in lowered
+    assert " eval(" not in lowered
+
+
+# --- 3H8: operator handoff manifest integrity verifier ---
+
+
+_VERIFY_SUCCESS_KEYS = frozenset(
+    {
+        "status",
+        "stage",
+        "mode",
+        "manifest",
+        "artifacts_count",
+        "verified_artifacts_count",
+        "hashes_verified",
+        "metadata_verified",
+        "commands_execute_in_verifier",
+        "review_only",
+    }
+)
+
+
+def _run_verify_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return subprocess.run(
+        [sys.executable, str(HANDOFF_VERIFY_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _valid_handoff_manifest_path(tmp_path: Path) -> Path:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    return manifest_out
+
+
+def _write_handoff_manifest_dict(tmp_path: Path, payload: dict[str, object]) -> Path:
+    path = tmp_path / "handoff_manifest.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _loaded_handoff_manifest_dict(tmp_path: Path) -> dict[str, object]:
+    return json.loads(_valid_handoff_manifest_path(tmp_path).read_text(encoding="utf-8"))
+
+
+def _refresh_manifest_integrity_for_role(payload: dict[str, object], role: str) -> None:
+    """artifact 파일 변경 후 manifest entry size/sha256만 현재 바이트에 맞춘다."""
+    import hashlib
+
+    for entry in payload["artifacts"]:  # type: ignore[union-attr]
+        if entry["role"] != role:
+            continue
+        data = Path(entry["path"]).read_bytes()
+        entry["size_bytes"] = len(data)
+        entry["sha256"] = hashlib.sha256(data).hexdigest()
+        return
+    raise AssertionError(f"artifact role not found in manifest: {role}")
+
+
+def test_handoff_verifier_accepts_manifest_from_3h7_builder(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert result["status"] == "ok"
+    assert result["artifacts_count"] == 4
+    assert result["verified_artifacts_count"] == 4
+
+
+def test_handoff_verifier_cli_validates_manifest_with_json(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    proc = _run_verify_cli("--manifest", str(manifest_path), "--json")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "kr-end-to-end-handoff-manifest-verification"
+
+
+def test_handoff_verifier_blank_manifest_path_args_stage() -> None:
+    proc = _run_verify_cli("--manifest", "   ", "--json")
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "args"
+
+
+def test_handoff_verifier_missing_manifest_file_parse_stage(tmp_path: Path) -> None:
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="file not found") as exc:
+        load_handoff_manifest(tmp_path / "missing.json")
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_verifier_invalid_manifest_json_parse_stage(tmp_path: Path) -> None:
+    path = tmp_path / "handoff_manifest.json"
+    path.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="JSON parse failed") as exc:
+        load_handoff_manifest(path)
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_verifier_manifest_root_list_parse_stage(tmp_path: Path) -> None:
+    path = tmp_path / "handoff_manifest.json"
+    path.write_text("[1,2,3]\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="root must be an object") as exc:
+        load_handoff_manifest(path)
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_verifier_manifest_top_level_mode_mismatch(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["mode"] = "wrong-mode"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="mode mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_status_must_be_ok(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["status"] = "error"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="status must be ok") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_stage_must_be_complete(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["stage"] = "validate"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="stage must be complete") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifacts_must_be_non_empty_list(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["artifacts"] = []
+    payload["artifacts_count"] = 0
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="non-empty list") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifacts_count_must_equal_len(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["artifacts_count"] = 99
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="artifacts_count mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_entries_contain_required_keys(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    entry.pop("sha256")
+    payload["artifacts"] = [entry]
+    payload["artifacts_count"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="missing required fields") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_unknown_artifact_role_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    entry["role"] = "unknown_role"
+    payload["artifacts"] = [entry]
+    payload["artifacts_count"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="role not recognized") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_duplicate_artifact_role_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    duplicate = dict(payload["artifacts"][0])  # type: ignore[index]
+    payload["artifacts"] = [duplicate, duplicate]
+    payload["artifacts_count"] = 2
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="role duplicated") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_roles_out_of_order_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    artifacts = list(payload["artifacts"])  # type: ignore[arg-type]
+    payload["artifacts"] = [artifacts[1], artifacts[0], *artifacts[2:]]
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="out of canonical order") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_kind_mismatch_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    entry["kind"] = "markdown"
+    payload["artifacts"] = [entry]
+    payload["artifacts_count"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="kind mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_exists_false_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    entry["exists"] = False
+    payload["artifacts"] = [entry]
+    payload["artifacts_count"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="exists must be true") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_path_missing_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["path"] = str(tmp_path / "missing_summary.json")
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="artifact not found") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_path_directory_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    directory = tmp_path / "not_a_file"
+    directory.mkdir()
+    payload["artifacts"][0]["path"] = str(directory)
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="artifact is not a file") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_size_mismatch_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["size_bytes"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="size mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_sha256_mismatch_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["sha256"] = "a" * 64
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="sha256 mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_sha256_malformed_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["artifacts"][0]["sha256"] = "NOT_VALID_HEX"  # type: ignore[index]
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="lowercase hex") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_referenced_json_invalid_json_parse_stage(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    summary_path = Path(payload["artifacts"][0]["path"])
+    summary_path.write_text("{bad-json", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "preflight_summary")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="JSON parse failed") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_verifier_referenced_json_root_non_object_parse_stage(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    summary_path = Path(payload["artifacts"][0]["path"])
+    summary_path.write_text("[1,2,3]\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "preflight_summary")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="root must be an object") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_verifier_preflight_summary_non_ok_status_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    summary_path = Path(payload["artifacts"][0]["path"])
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary_payload["status"] = "error"
+    summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "preflight_summary")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="status must be ok") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_preflight_summary_custom_mode_accepted_when_recorded_matches(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload["mode"] = "custom-preflight-mode-for-test"
+    summary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(manifest_out=manifest_out, preflight_summary=summary, force=True)
+    verify_kr_end_to_end_handoff_manifest(manifest_out)
+
+
+def test_handoff_verifier_preflight_summary_recorded_metadata_mismatch_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["json_mode"] = "wrong-recorded-mode"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="json_mode mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_structured_plan_wrong_actual_mode_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    plan_entry = next(entry for entry in payload["artifacts"] if entry["role"] == "structured_plan")
+    plan_path = Path(plan_entry["path"])
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_payload["mode"] = "wrong-mode"
+    plan_path.write_text(json.dumps(plan_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "structured_plan")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="structured plan mode mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_structured_plan_review_only_false_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    plan_entry = next(entry for entry in payload["artifacts"] if entry["role"] == "structured_plan")
+    plan_path = Path(plan_entry["path"])
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_payload["review_only"] = False
+    plan_path.write_text(json.dumps(plan_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "structured_plan")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="review_only must be true") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_structured_plan_recorded_json_status_non_null_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in payload["artifacts"]:
+        if entry["role"] == "structured_plan":
+            entry["json_status"] = "ok"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="json_status must be null") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_structured_plan_recorded_json_mode_mismatch_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in payload["artifacts"]:
+        if entry["role"] == "structured_plan":
+            entry["json_mode"] = "wrong-recorded-mode"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="json_mode mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_validation_report_wrong_actual_mode_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report_entry = next(entry for entry in payload["artifacts"] if entry["role"] == "validation_report")
+    report_path = Path(report_entry["path"])
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    report_payload["mode"] = "wrong-mode"
+    report_path.write_text(json.dumps(report_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "validation_report")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="validation report mode mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_validation_report_non_ok_status_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report_entry = next(entry for entry in payload["artifacts"] if entry["role"] == "validation_report")
+    report_path = Path(report_entry["path"])
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    report_payload["status"] = "error"
+    report_path.write_text(json.dumps(report_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "validation_report")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="validation report status must be ok") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_validation_report_non_complete_stage_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report_entry = next(entry for entry in payload["artifacts"] if entry["role"] == "validation_report")
+    report_path = Path(report_entry["path"])
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    report_payload["stage"] = "validate"
+    report_path.write_text(json.dumps(report_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    _refresh_manifest_integrity_for_role(payload, "validation_report")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="validation report stage must be complete") as exc:
+        verify_kr_end_to_end_handoff_manifest(manifest_path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_validation_report_recorded_metadata_mismatch_fails_validate(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in payload["artifacts"]:
+        if entry["role"] == "validation_report":
+            entry["json_stage"] = "validate"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="json_stage mismatch") as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_plan_md_content_not_parsed_only_size_hash_checked(tmp_path: Path) -> None:
+    plan = _valid_plan_md_path(tmp_path)
+    secret = "SECRET_PLAN_BODY_NOT_PARSED"
+    plan.write_text(plan.read_text(encoding="utf-8") + f"\n{secret}\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(manifest_out=manifest_out, plan_md=plan, force=True)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_out)
+    assert result["hashes_verified"] is True
+    proc = _run_verify_cli("--manifest", str(manifest_out), "--json")
+    assert secret not in proc.stdout
+
+
+def test_handoff_verifier_success_json_compact_keys(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    proc = _run_verify_cli("--manifest", str(manifest_path), "--json")
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS
+
+
+def test_handoff_verifier_cli_known_errors_no_traceback(tmp_path: Path) -> None:
+    proc = _run_verify_cli("--manifest", str(tmp_path / "missing.json"), "--json")
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_handoff_verifier_cli_known_errors_do_not_echo_raw_manifest_body(tmp_path: Path) -> None:
+    path = tmp_path / "handoff_manifest.json"
+    secret = '{"version":1,"secret_marker":"RAW_MANIFEST_SECRET"}'
+    path.write_text(secret, encoding="utf-8")
+    proc = _run_verify_cli("--manifest", str(path), "--json")
+    assert proc.returncode == 1
+    assert "RAW_MANIFEST_SECRET" not in proc.stdout
+    assert secret not in proc.stdout
+
+
+def test_handoff_verifier_does_not_write_any_files(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    before = {p.name for p in tmp_path.iterdir()}
+    verify_kr_end_to_end_handoff_manifest(manifest_path)
+    after = {p.name for p in tmp_path.iterdir()}
+    assert before == after
+
+
+def test_handoff_verifier_does_not_create_temp_files(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    verify_kr_end_to_end_handoff_manifest(manifest_path)
+    leftovers = list(tmp_path.glob(".tmp_*"))
+    assert leftovers == []
+
+
+def test_handoff_verifier_does_not_execute_generated_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("handoff manifest verifier must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    verify_kr_end_to_end_handoff_manifest(manifest_path)
+
+
+def test_handoff_verifier_ops_source_passes_shared_static_scan() -> None:
+    source = HANDOFF_VERIFY_SCRIPT.read_text(encoding="utf-8").lower()
+    for token in _FORBIDDEN_STATIC_TOKENS:
+        assert token not in source, f"handoff verifier ops must not reference {token!r}"
+
+
+def test_static_scan_includes_handoff_verifier_ops_file() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert "verify_kr_end_to_end_handoff_manifest.py" in text
+
+
+def test_handoff_verifier_shared_forbidden_tuple_unchanged() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert '"submit_order"' in text
+    assert '"paperbroker"' in text
+
+
+def test_handoff_verifier_no_env_api_key_read_in_ops_source() -> None:
+    source = HANDOFF_VERIFY_SCRIPT.read_text(encoding="utf-8").lower()
+    assert "os.environ" not in source
+    assert "getenv" not in source
+
+
+def test_handoff_verifier_no_subprocess_os_system_exec_eval_in_ops_source() -> None:
+    source = HANDOFF_VERIFY_SCRIPT.read_text(encoding="utf-8")
     lowered = source.lower()
     assert "subprocess" not in lowered
     assert "os.system" not in lowered
