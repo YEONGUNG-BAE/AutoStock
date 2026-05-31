@@ -73,7 +73,8 @@
 - ~~Real Intake **3G3-4A** — live-shaped fake-transport discovery snapshot fetcher~~ Done: `kr_discovery_live_client.py` + tests; injected transport → immutable raw discovery snapshot; validate-before-commit; real live transport deferred to 3G3-4B.
 - ~~Real Intake **3G3-4B** — operator-triggered HTTP discovery live smoke~~ Done: `kr_discovery_http_client.py`, `ops/run_kr_discovery_live_smoke.py` + tests; operator-supplied endpoint URL; sanitized HTTP errors; optional 3G3-3 candidate pool replay; no env/API keys.
 - ~~Real Intake **3G3-5** — fixture-first KR discovery source schema mapper~~ Done: `kr_discovery_schema_mapper.py`, `ops/map_kr_discovery_fixture.py`, synthetic provider payload fixture + tests; source-specific fixture → canonical transport → 3G3-4A snapshot → optional 3G3-3 candidate pool; no network/env.
-- Real Intake **3G3-5+** — source-specific live endpoint adapter, live factor hardening — deferred.
+- ~~Real Intake **3G3-6** — operator-triggered source-specific KR discovery live endpoint adapter~~ Done: `kr_discovery_source_payload_snapshot.py`, `ops/run_kr_discovery_source_live_smoke.py` + tests; HTTP → immutable source snapshot → 3G3-5 mapper → 3G3-4A canonical snapshot → optional 3G3-3 candidate pool; no env/API keys.
+- Real Intake **3G3-6+** — source-specific live adapter hardening, live factor hardening — deferred.
 - Real Intake **3G4+** — factor scoring / ranking hardening (scoring versioning, explainability, regression fixtures, operator approval path) — deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

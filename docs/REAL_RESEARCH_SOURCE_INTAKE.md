@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3-1** fixture-first ranking model **implemented** (`ops/rank_kr_candidates.py`); **3G3-2** operator-local real ranking input workflow **implemented** (`ops/build_kr_real_ranked_mapping.py`); **3G3-3** discovery snapshot replay adapter **implemented** (`ops/replay_kr_discovery_snapshot.py`); **3G3-4A** live-shaped fake-transport discovery snapshot fetcher **implemented** (`kr_discovery_live_client.py`); **3G3-4B** operator-triggered HTTP discovery live smoke **implemented** (`ops/run_kr_discovery_live_smoke.py`); **3G3-5** fixture-first KR discovery source schema mapper **implemented** (`ops/map_kr_discovery_fixture.py`); **3G3-5+** source-specific live endpoint adapter / live factor scoring **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3-1** fixture-first ranking model **implemented** (`ops/rank_kr_candidates.py`); **3G3-2** operator-local real ranking input workflow **implemented** (`ops/build_kr_real_ranked_mapping.py`); **3G3-3** discovery snapshot replay adapter **implemented** (`ops/replay_kr_discovery_snapshot.py`); **3G3-4A** live-shaped fake-transport discovery snapshot fetcher **implemented** (`kr_discovery_live_client.py`); **3G3-4B** operator-triggered HTTP discovery live smoke **implemented** (`ops/run_kr_discovery_live_smoke.py`); **3G3-5** fixture-first KR discovery source schema mapper **implemented** (`ops/map_kr_discovery_fixture.py`); **3G3-6** operator-triggered source-specific KR discovery live endpoint adapter **implemented** (`ops/run_kr_discovery_source_live_smoke.py`); **3G3-6+** live factor scoring / adapter hardening **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -893,7 +893,8 @@ live/fixture source
 | **3G3-4A** | Live-shaped fake-transport discovery snapshot fetcher — injected transport only; immutable raw snapshot |
 | **3G3-4B** | Operator-triggered HTTP discovery live smoke — operator-supplied endpoint; sanitized errors; optional candidate pool replay |
 | **3G3-5** | Fixture-first discovery source schema mapper — source-specific local fixture → canonical transport → 3G3-4A snapshot |
-| **3G3-5+** | Source-specific live endpoint adapter / factor hardening |
+| **3G3-6** | Operator-triggered source-specific live endpoint adapter — HTTP → source snapshot → mapper → 4A canonical snapshot |
+| **3G3-6+** | Source-specific live adapter hardening / factor hardening |
 | **3G4+** | Factor scoring / ranking hardening — scoring versioning; source timestamps; explainability fields; regression fixtures; operator approval path |
 
 Do **not** implement these phases until a separate intake task explicitly requests them.
@@ -1133,12 +1134,13 @@ Synthetic proof: `uv run pytest tests/test_kr_discovery_http_client.py tests/tes
 
 ## 3G3-5 Fixture-first KR discovery source schema mapper (3G3-5)
 
-> **3G3-5 (implemented):** source-specific local fixture payload (`synthetic-provider-v1`) → canonical discovery transport payload → 3G3-4A immutable raw snapshot → optional 3G3-3 candidate pool replay. Output is **canonical raw discovery snapshot only** (optional candidate pool) — not universe, not trading. Live factor scoring and source-specific live endpoint integration remain **deferred**.
+> **3G3-5 (implemented):** source-specific local fixture payload (`synthetic-provider-v1`) → canonical discovery transport payload → 3G3-4A immutable raw snapshot → optional 3G3-3 candidate pool replay. Output is **canonical raw discovery snapshot only** (optional candidate pool) — not universe, not trading. Live factor scoring remains **deferred**.
 
 | Phase | Scope | Network |
 |---|---|---|
 | **3G3-5** | `kr_discovery_schema_mapper.py` + `ops/map_kr_discovery_fixture.py` + synthetic provider payload fixture | None |
-| **Next** | **3G3-5+** source-specific live endpoint adapter, factor hardening | Deferred |
+| **3G3-6** | `kr_discovery_source_payload_snapshot.py` + `ops/run_kr_discovery_source_live_smoke.py` | Operator HTTP GET only |
+| **Next** | **3G3-6+** adapter hardening, factor hardening | Deferred |
 
 **Mapper path:**
 
@@ -1177,6 +1179,59 @@ PYTHONPATH=src uv run python ops/map_kr_discovery_fixture.py \
 - No env/API key reads; no hardcoded KRX endpoint; no universe/provider mapping direct write by mapper CLI
 
 Synthetic proof: `uv run pytest tests/test_kr_discovery_schema_mapper.py -v`.
+
+---
+
+## 3G3-6 Operator-triggered source-specific KR discovery live endpoint adapter (3G3-6)
+
+> **3G3-6 (implemented):** operator-supplied HTTP endpoint → source-specific JSON (`synthetic-provider-v1`) → immutable raw source-payload snapshot → 3G3-5 mapper → 3G3-4A canonical discovery snapshot → optional 3G3-3 candidate pool replay. Endpoint is operator-supplied only — no hardcoded KRX URL, no env/API keys. Live factor scoring remains **deferred**.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3G3-6** | `kr_discovery_source_payload_snapshot.py` + `ops/run_kr_discovery_source_live_smoke.py` + tests | Operator HTTP GET only |
+| **Next** | **3G3-6+** adapter hardening, factor hardening | Deferred |
+
+**Live source-specific path:**
+
+```text
+operator-supplied endpoint URL
+→ fetch_kr_discovery_http_payload()  # 3G3-4B HTTP client
+→ write_source_payload_snapshot()    # raw_source_<timestamp>_<sha8>.json
+→ parse/map via 3G3-5 mapper
+→ fetch_live_kr_discovery_snapshot() # 3G3-4A canonical raw_<timestamp>_<sha8>.json
+→ optional replay_kr_discovery_snapshot()  # 3G3-3 candidate pool
+→ operator review
+```
+
+**3G3-6 ops helper (operator-triggered; no env/API keys):**
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/run_kr_discovery_source_live_smoke.py \
+  --endpoint-url "https://operator-supplied.example/synthetic-provider-v1.json" \
+  --source-snapshot-dir "runtime/research/${DAY}/sources/kr_discovery_source_payload" \
+  --canonical-snapshot-dir "runtime/research/${DAY}/sources/kr_discovery" \
+  --candidate-pool-out "/tmp/kr_discovery_candidate_pool.toml" \
+  --pool-name "kr-discovery-source-live-pool-v1" \
+  --pool-description "Operator-triggered source-specific KR discovery live smoke replay." \
+  --fetched-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --universe-hint synthetic-provider-v1-live-smoke \
+  --external-service synthetic-provider-live-endpoint \
+  --timeout-seconds 15 \
+  --force \
+  --json
+```
+
+**Rules:**
+
+- HTTP `fetch`/`parse` stages preserved from 3G3-4B; mapper-local `parse`/`map` remapped to CLI `stage="map"`
+- Source snapshot: `raw_source_` prefix; key-based forbidden-field validation (not value substring scan for broad trading words)
+- Source/canonical snapshots immutable (`--force` does not overwrite); `--force` applies to candidate pool replay only
+- Success/error JSON omits `endpoint_url`; HTTP errors sanitized via 3G3-4B client
+- Approved follow-up: candidate pool → 3G3-2 ranked mapping → 3E2/3E3/3E4 → operator review
+
+Synthetic proof: `uv run pytest tests/test_kr_discovery_source_live_smoke.py -v`.
 
 ---
 

@@ -122,6 +122,11 @@ def load_synthetic_provider_payload(path: Path) -> SyntheticProviderPayload:
     except json.JSONDecodeError as exc:
         raise KrDiscoverySchemaMappingError("parse", f"invalid source payload JSON: {exc.msg}") from exc
 
+    return parse_synthetic_provider_payload_mapping(raw)
+
+
+def parse_synthetic_provider_payload_mapping(raw: Mapping[str, Any]) -> SyntheticProviderPayload:
+    """in-memory synthetic-provider-v1 payload를 strict schema로 파싱한다."""
     if not isinstance(raw, dict):
         raise KrDiscoverySchemaMappingError("parse", "source payload root must be a JSON object")
 
