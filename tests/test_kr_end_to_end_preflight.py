@@ -34,6 +34,7 @@ INCOMPLETE_MAPPING = (
 )
 OPS_SCRIPT = REPO_ROOT / "ops" / "preflight_kr_end_to_end_intake.py"
 VALIDATOR_SCRIPT = REPO_ROOT / "ops" / "validate_kr_end_to_end_preflight_plan.py"
+HANDOFF_MANIFEST_SCRIPT = REPO_ROOT / "ops" / "build_kr_end_to_end_handoff_manifest.py"
 STATIC_SCAN_FILE = REPO_ROOT / "tests" / "test_fetch_research_sources.py"
 
 _FORBIDDEN_OUTPUT_FIELDS = frozenset(
@@ -92,6 +93,12 @@ from preflight_kr_end_to_end_intake import (
     _write_output,
     load_kr_end_to_end_preflight_manifest,
     run_kr_end_to_end_preflight,
+)
+from build_kr_end_to_end_handoff_manifest import (
+    KrEndToEndHandoffManifestError,
+    _write_manifest_output,
+    build_handoff_manifest,
+    build_kr_end_to_end_handoff_manifest,
 )
 from validate_kr_end_to_end_preflight_plan import (
     KrEndToEndPlanValidationError,
@@ -2618,3 +2625,831 @@ def test_validator_build_validation_report_derived_from_validated_payload(tmp_pa
     assert report["forbidden_shortcuts_count"] == len(loaded["forbidden_shortcuts"])
     assert report["step_ids"] == summary["step_ids"]
     assert report["scripts"] == summary["scripts"]
+
+
+# --- 3H7: operator handoff manifest / artifact integrity index ---
+
+
+_MANIFEST_EXPECTED_TOP_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status",
+        "stage",
+        "generated_by",
+        "artifacts",
+        "artifacts_count",
+        "all_artifacts_present",
+        "commands_execute_in_builder",
+        "review_only",
+    }
+)
+_ARTIFACT_ENTRY_KEYS = frozenset(
+    {
+        "role",
+        "path",
+        "exists",
+        "kind",
+        "size_bytes",
+        "sha256",
+        "json_mode",
+        "json_status",
+        "json_stage",
+    }
+)
+_ROLE_ORDER = (
+    "preflight_summary",
+    "plan_md",
+    "structured_plan",
+    "validation_report",
+)
+
+
+def _run_handoff_manifest_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return subprocess.run(
+        [sys.executable, str(HANDOFF_MANIFEST_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _valid_preflight_summary_path(tmp_path: Path) -> Path:
+    _copy_preflight_fixtures(tmp_path)
+    manifest_path = _write_manifest(tmp_path, _valid_manifest_body())
+    summary_out = tmp_path / "preflight_summary.json"
+    run_kr_end_to_end_preflight(
+        manifest_path,
+        summary_out=summary_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    return summary_out
+
+
+def _valid_plan_md_path(tmp_path: Path) -> Path:
+    _copy_preflight_fixtures(tmp_path)
+    manifest_path = _write_manifest(tmp_path, _valid_manifest_body())
+    plan_out = tmp_path / "plan.md"
+    run_kr_end_to_end_preflight(
+        manifest_path,
+        plan_out=plan_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    return plan_out
+
+
+def _valid_validation_report_path(tmp_path: Path) -> Path:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    plan, summary = _load_and_validate_structured_plan(plan_path)
+    report = _build_validation_report(plan, plan_path, summary)
+    _write_report_output(report_out, report, force=True)
+    return report_out
+
+
+def _all_four_artifact_paths(tmp_path: Path) -> dict[str, Path]:
+    _copy_preflight_fixtures(tmp_path)
+    manifest_path = _write_manifest(tmp_path, _valid_manifest_body())
+    summary_out = tmp_path / "preflight_summary.json"
+    plan_out = tmp_path / "plan.md"
+    structured_out = tmp_path / "structured_plan.json"
+    run_kr_end_to_end_preflight(
+        manifest_path,
+        summary_out=summary_out,
+        plan_out=plan_out,
+        structured_plan_out=structured_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    report_out = tmp_path / "validation_report.json"
+    plan, summary = _load_and_validate_structured_plan(structured_out)
+    report = _build_validation_report(plan, structured_out, summary)
+    _write_report_output(report_out, report, force=True)
+    return {
+        "preflight_summary": summary_out,
+        "plan_md": plan_out,
+        "structured_plan": structured_out,
+        "validation_report": report_out,
+    }
+
+
+def test_handoff_manifest_cli_requires_at_least_one_artifact_input(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli("--manifest-out", str(manifest_out), "--json")
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "args"
+    assert "at least one artifact input" in error["message"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "path_factory"),
+    [
+        ("--preflight-summary", _valid_preflight_summary_path),
+        ("--plan-md", _valid_plan_md_path),
+        ("--structured-plan", _valid_structured_plan_path),
+        ("--validation-report", _valid_validation_report_path),
+    ],
+)
+def test_handoff_manifest_cli_accepts_each_artifact_independently(
+    tmp_path: Path,
+    flag: str,
+    path_factory: object,
+) -> None:
+    artifact_path = path_factory(tmp_path)  # type: ignore[operator]
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        flag,
+        str(artifact_path),
+        "--manifest-out",
+        str(manifest_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["artifacts_count"] == 1
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["artifacts_count"] == 1
+
+
+def test_handoff_manifest_cli_accepts_all_four_artifact_inputs(tmp_path: Path) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(artifacts["preflight_summary"]),
+        "--plan-md",
+        str(artifacts["plan_md"]),
+        "--structured-plan",
+        str(artifacts["structured_plan"]),
+        "--validation-report",
+        str(artifacts["validation_report"]),
+        "--manifest-out",
+        str(manifest_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["artifacts_count"] == 4
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert set(manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+
+
+def test_handoff_manifest_file_mode_is_handoff_manifest_mode(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["mode"] == "kr-end-to-end-handoff-manifest"
+
+
+def test_handoff_manifest_cli_success_mode_is_build_mode(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["mode"] == "kr-end-to-end-handoff-manifest-build"
+
+
+def test_handoff_manifest_cli_error_mode_is_build_mode(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli("--manifest-out", str(manifest_out), "--json")
+    error = json.loads(proc.stdout)
+    assert error["mode"] == "kr-end-to-end-handoff-manifest-build"
+
+
+def test_handoff_manifest_artifact_entries_in_role_order(tmp_path: Path) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert [entry["role"] for entry in manifest["artifacts"]] == list(_ROLE_ORDER)
+
+
+def test_handoff_manifest_artifact_entry_shape(tmp_path: Path) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    for entry in manifest["artifacts"]:
+        assert set(entry.keys()) == _ARTIFACT_ENTRY_KEYS
+
+
+def test_handoff_manifest_sha256_matches_file_bytes(tmp_path: Path) -> None:
+    import hashlib
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    expected = hashlib.sha256(summary.read_bytes()).hexdigest()
+    assert manifest["artifacts"][0]["sha256"] == expected
+
+
+def test_handoff_manifest_size_bytes_matches_file_size(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["size_bytes"] == summary.stat().st_size
+
+
+def test_handoff_manifest_plan_md_not_content_parsed(tmp_path: Path) -> None:
+    plan = _valid_plan_md_path(tmp_path)
+    secret_marker = "SECRET_PLAN_MARKER_NOT_IN_MANIFEST"
+    plan.write_text(plan.read_text(encoding="utf-8") + f"\n{secret_marker}\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(manifest_out=manifest_out, plan_md=plan, force=True)
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    dumped = json.dumps(manifest)
+    assert secret_marker not in dumped
+    assert manifest["artifacts"][0]["kind"] == "markdown"
+    assert manifest["artifacts"][0]["json_mode"] is None
+
+
+def test_handoff_manifest_preflight_summary_status_checked_only_if_present(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload.pop("status", None)
+    summary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["json_status"] is None
+
+
+def test_handoff_manifest_preflight_summary_mode_extracted_not_strict(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload["mode"] = "custom-preflight-mode-for-test"
+    summary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["json_mode"] == "custom-preflight-mode-for-test"
+
+
+def test_handoff_manifest_preflight_summary_uses_nullable_getters(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload["stage"] = "complete"
+    summary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    entry = json.loads(manifest_out.read_text(encoding="utf-8"))["artifacts"][0]
+    assert entry["json_mode"] == payload["mode"]
+    assert entry["json_status"] == payload["status"]
+    assert entry["json_stage"] == "complete"
+
+
+def test_handoff_manifest_preflight_summary_non_ok_status_fails_validate(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload["status"] = "error"
+    summary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="status must be ok") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_structured_plan_mode_must_match(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["mode"] = "wrong-mode"
+    plan_path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="structured plan mode mismatch") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=plan_path,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_structured_plan_review_only_must_be_true(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["review_only"] = False
+    plan_path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="review_only must be true") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=plan_path,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_structured_plan_status_stage_absence_recorded_as_null(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        structured_plan=plan_path,
+        force=True,
+    )
+    entry = json.loads(manifest_out.read_text(encoding="utf-8"))["artifacts"][0]
+    assert entry["json_mode"] == "kr-end-to-end-intake-followup-plan"
+    assert entry["json_status"] is None
+    assert entry["json_stage"] is None
+
+
+def test_handoff_manifest_validation_report_mode_status_stage(tmp_path: Path) -> None:
+    report = _valid_validation_report_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        validation_report=report,
+        force=True,
+    )
+    entry = json.loads(manifest_out.read_text(encoding="utf-8"))["artifacts"][0]
+    assert entry["json_mode"] == "kr-end-to-end-preflight-plan-validation-report"
+    assert entry["json_status"] == "ok"
+    assert entry["json_stage"] == "complete"
+
+
+def test_handoff_manifest_invalid_json_artifact_fails_parse(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not-json", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="JSON parse failed") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=bad,
+            force=True,
+        )
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_manifest_missing_artifact_path_fails_validate(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="artifact not found") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=tmp_path / "missing.json",
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_directory_path_fails_validate(tmp_path: Path) -> None:
+    directory = tmp_path / "not_a_file"
+    directory.mkdir()
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="artifact is not a file") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            plan_md=directory,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_validation_report_wrong_mode_fails_validate(tmp_path: Path) -> None:
+    report = _valid_validation_report_path(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["mode"] = "wrong-mode"
+    report.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="validation report mode mismatch") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            validation_report=report,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_validation_report_non_ok_status_fails_validate(tmp_path: Path) -> None:
+    report = _valid_validation_report_path(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["status"] = "error"
+    report.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="validation report status must be ok") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            validation_report=report,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_validation_report_non_complete_stage_fails_validate(tmp_path: Path) -> None:
+    report = _valid_validation_report_path(tmp_path)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["stage"] = "validate"
+    report.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="validation report stage must be complete") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            validation_report=report,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_invalid_artifact_with_existing_manifest_out_fails_before_write(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest_out.write_text('{"preserved": true}\n', encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestError, match="JSON parse failed") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=bad,
+            force=False,
+        )
+    assert exc.value.stage == "parse"
+
+
+def test_handoff_manifest_invalid_artifact_leaves_existing_manifest_untouched(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    original = '{"preserved": true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestError):
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            structured_plan=bad,
+            force=False,
+        )
+    assert manifest_out.read_text(encoding="utf-8") == original
+
+
+def test_handoff_manifest_out_exists_without_force_write_stage(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "write"
+
+
+def test_handoff_manifest_out_exists_without_force_reports_field_name_not_path(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--json",
+    )
+    error = json.loads(proc.stdout)
+    assert error["message"] == "output already exists: manifest_out"
+    assert str(manifest_out) not in error["message"]
+
+
+def test_handoff_manifest_force_overwrites_manifest_out(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert written["mode"] == "kr-end-to-end-handoff-manifest"
+    assert "old" not in written
+
+
+def test_handoff_manifest_write_failure_preserves_existing_manifest_out(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    original = '{"status":"ok","preserved":true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndHandoffManifestError, match="output write failed: PermissionError") as exc:
+            _write_manifest_output(
+                manifest_out,
+                build_handoff_manifest({"preflight_summary": summary}),
+                force=True,
+            )
+    assert exc.value.stage == "write"
+    assert manifest_out.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_handoff_manifest_write_failure_sanitizes_exception_detail(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    secret = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+            _write_manifest_output(
+                manifest_out,
+                {"version": 1, "mode": "kr-end-to-end-handoff-manifest"},
+                force=True,
+            )
+    assert exc.value.message == "output write failed: PermissionError"
+    assert secret not in exc.value.message
+    assert exc.value.__cause__ is None
+
+
+def test_handoff_manifest_temp_file_cleaned_after_write_failure(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "nested" / "handoff_manifest.json"
+    manifest_out.parent.mkdir(parents=True)
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        if _self.name.startswith(".tmp_handoff_manifest_"):
+            raise PermissionError("blocked")
+        Path.write_text(_self, *_args, **_kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndHandoffManifestError):
+            _write_manifest_output(
+                manifest_out,
+                build_handoff_manifest({"preflight_summary": summary}),
+                force=True,
+            )
+    leftovers = list(manifest_out.parent.glob(".tmp_handoff_manifest_*"))
+    assert leftovers == []
+
+
+def test_handoff_manifest_temp_file_created_under_manifest_parent(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "nested" / "handoff_manifest.json"
+    observed_temp_parent: list[Path] = []
+    original_write_text = Path.write_text
+
+    def _capture_temp_write(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith(".tmp_handoff_manifest_"):
+            observed_temp_parent.append(self.parent)
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _capture_temp_write):
+        _write_manifest_output(
+            manifest_out,
+            build_handoff_manifest({"preflight_summary": summary}),
+            force=True,
+        )
+    assert observed_temp_parent == [manifest_out.parent]
+    assert manifest_out.is_file()
+
+
+def test_handoff_manifest_success_json_compact_keys(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == {
+        "status",
+        "stage",
+        "mode",
+        "manifest_out",
+        "artifacts_count",
+        "all_artifacts_present",
+        "commands_execute_in_builder",
+        "review_only",
+    }
+
+
+def test_handoff_manifest_cli_known_errors_no_traceback(tmp_path: Path) -> None:
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--structured-plan",
+        str(tmp_path / "missing.json"),
+        "--manifest-out",
+        str(manifest_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_handoff_manifest_cli_known_errors_do_not_echo_raw_artifact_bodies(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.json"
+    secret = '{"version":1,"secret_marker":"RAW_JSON_SECRET"}'
+    bad.write_text(secret, encoding="utf-8")
+    manifest_out = tmp_path / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--structured-plan",
+        str(bad),
+        "--manifest-out",
+        str(manifest_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert "RAW_JSON_SECRET" not in proc.stdout
+    assert secret not in proc.stdout
+
+
+def test_handoff_manifest_does_not_include_structured_steps(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        structured_plan=plan_path,
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert "steps" not in manifest
+    dumped = json.dumps(manifest)
+    assert "validate-provider-mapping" not in dumped
+
+
+def test_handoff_manifest_does_not_include_command_lines(tmp_path: Path) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert "command" not in manifest
+    assert "followup_commands" not in manifest
+    for entry in manifest["artifacts"]:
+        assert "command" not in entry
+    dumped = json.dumps(manifest)
+    assert "PYTHONPATH=src" not in dumped
+
+
+def test_handoff_manifest_does_not_include_endpoint_urls(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    dumped = manifest_out.read_text(encoding="utf-8")
+    assert "https://" not in dumped
+    assert "http://" not in dumped
+
+
+def test_handoff_manifest_does_not_include_env_api_key_names(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    dumped = manifest_out.read_text(encoding="utf-8").lower()
+    assert "fred_api_key" not in dumped
+    assert "dart_api_key" not in dumped
+    assert "api_key" not in dumped
+
+
+def test_handoff_manifest_does_not_include_trading_action_order_allocation_fields(tmp_path: Path) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    _walk_forbidden_fields(manifest)
+
+
+def test_handoff_manifest_builder_does_not_execute_generated_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = _all_four_artifact_paths(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("handoff manifest builder must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+    )
+
+
+def test_handoff_manifest_ops_source_passes_shared_static_scan() -> None:
+    source = HANDOFF_MANIFEST_SCRIPT.read_text(encoding="utf-8").lower()
+    for token in _FORBIDDEN_STATIC_TOKENS:
+        assert token not in source, f"handoff manifest ops must not reference {token!r}"
+
+
+def test_static_scan_includes_handoff_manifest_ops_file() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert "build_kr_end_to_end_handoff_manifest.py" in text
+
+
+def test_handoff_manifest_shared_forbidden_tuple_unchanged() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert '"submit_order"' in text
+    assert '"paperbroker"' in text
+
+
+def test_handoff_manifest_no_env_api_key_read_in_ops_source() -> None:
+    source = HANDOFF_MANIFEST_SCRIPT.read_text(encoding="utf-8").lower()
+    assert "os.environ" not in source
+    assert "getenv" not in source
+
+
+def test_handoff_manifest_no_subprocess_os_system_exec_eval_in_ops_source() -> None:
+    source = HANDOFF_MANIFEST_SCRIPT.read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "subprocess" not in lowered
+    assert "os.system" not in lowered
+    assert " exec(" not in lowered
+    assert " eval(" not in lowered

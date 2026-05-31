@@ -1860,9 +1860,27 @@ Optional compact validation report JSON artifact after successful structured pla
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H7+ (unimplemented)**
+### 3H7 — operator handoff manifest / artifact integrity index
 
-**3H7+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Optional compact handoff manifest JSON that indexes preflight/handoff artifact paths with sha256/size metadata — operator audit/handoff only; no command execution.
+
+**Behavior (read-only; no execution):**
+
+| Area | Behavior |
+|---|---|
+| **CLI** | `ops/build_kr_end_to_end_handoff_manifest.py --manifest-out PATH [--preflight-summary PATH] [--plan-md PATH] [--structured-plan PATH] [--validation-report PATH] [--force] [--json]` |
+| **Manifest** | Indexes supplied artifacts only; records role/path/exists/size_bytes/sha256 and optional JSON mode/status/stage for known JSON artifacts; embeds no artifact bodies |
+| **Safety** | `--force` applies only to `--manifest-out`; validate-before-write; atomic same-directory temp → replace |
+| **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H8+ (unimplemented)**
+
+**3H8+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 
