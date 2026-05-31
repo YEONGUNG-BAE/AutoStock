@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest verifier (3H8).
+"""KR end-to-end operator handoff manifest verifier (3H8/3H9).
 
 3H7 handoff manifest JSON → schema/integrity/metadata 재검증만 수행.
+3H9: top-level·artifact entry exact-key schema lock(unknown key 거부).
 artifact/manifest mutation·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -131,6 +132,10 @@ def _validate_artifact_roles(roles: list[str]) -> None:
 def _validate_artifact_entry_schema(entry: object, *, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise KrEndToEndHandoffManifestVerifyError("validate", "artifact entry must be an object")
+
+    unknown = set(entry.keys()) - _ARTIFACT_ENTRY_KEYS
+    if unknown:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "artifact entry contains unknown fields")
 
     missing = _ARTIFACT_ENTRY_KEYS - set(entry.keys())
     if missing:
@@ -278,6 +283,10 @@ def _verify_artifact_entry(entry: dict[str, Any]) -> None:
 
 def _validate_manifest_schema(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """handoff manifest top-level schema와 artifact entry schema를 검증한다."""
+    unknown = set(payload.keys()) - _TOP_LEVEL_KEYS
+    if unknown:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "handoff manifest contains unknown top-level fields")
+
     missing = _TOP_LEVEL_KEYS - set(payload.keys())
     if missing:
         raise KrEndToEndHandoffManifestVerifyError("validate", "handoff manifest missing required fields")

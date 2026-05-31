@@ -91,7 +91,8 @@
 - ~~Real Intake **3H6** — structured plan validator optional validation report~~ Done: `--report-out` / `--force` on `ops/validate_kr_end_to_end_preflight_plan.py`; compact audit JSON after successful validation only; atomic write; no command execution; no network/env.
 - ~~Real Intake **3H7** — operator handoff manifest / artifact integrity index~~ Done: `ops/build_kr_end_to_end_handoff_manifest.py`; indexes artifact paths/sha256 only; embeds no artifact bodies; atomic write; no command execution; no network/env.
 - ~~Real Intake **3H8** — operator handoff manifest integrity verifier~~ Done: `ops/verify_kr_end_to_end_handoff_manifest.py`; recomputes size/sha256 and validates recorded JSON metadata; writes no files; no command execution; no network/env.
-- Real Intake **3H9+** — end-to-end hardening (richer provenance, drift checks, orchestration ergonomics) — Deferred. Broker/PaperLoop/KIS remains out of scope for Real Research Source Intake.
+- ~~Real Intake **3H9** — handoff manifest verifier schema hardening~~ Done: exact-key schema lock on top-level manifest and artifact entries; unknown keys rejected at validate stage; no workflow behavior change; no network/env.
+- Real Intake **3H10+** — end-to-end hardening (richer provenance, drift checks, orchestration ergonomics) — Deferred. Broker/PaperLoop/KIS remains out of scope for Real Research Source Intake.
 - Real Intake **3G4+** — calibration / provenance / drift checks / explainability hardening — Deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

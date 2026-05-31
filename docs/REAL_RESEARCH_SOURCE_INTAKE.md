@@ -1890,15 +1890,32 @@ Optional read-only verifier for 3H7 handoff manifest JSON — recomputes artifac
 | Area | Behavior |
 |---|---|
 | **CLI** | `ops/verify_kr_end_to_end_handoff_manifest.py --manifest PATH [--json]` |
-| **Verification** | Manifest schema lock; artifact existence/file checks; size/sha256 recompute; recorded-vs-actual JSON metadata compare |
+| **Verification** | Manifest exact-key schema lock (3H9); artifact existence/file checks; size/sha256 recompute; recorded-vs-actual JSON metadata compare |
 | **Safety** | Writes no files; creates no temp files; does not mutate manifest or referenced artifacts |
 | **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H9+ (unimplemented)**
+### 3H9 — handoff manifest verifier schema hardening
 
-**3H9+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Exact-key schema lock for 3H8 handoff manifest verifier — unknown top-level manifest keys and unknown artifact entry keys are rejected at `validate` stage.
+
+**Behavior (read-only; no execution):**
+
+| Area | Behavior |
+|---|---|
+| **Schema lock** | Top-level manifest object must contain exactly the 10 expected keys; each artifact entry must contain exactly the 9 expected keys |
+| **Unknown keys** | Rejected at `stage="validate"` — no broader JSON body scan of referenced artifacts |
+| **Compatibility** | Manifests emitted by 3H7 builder pass unchanged |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H10+ (unimplemented)**
+
+**3H10+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

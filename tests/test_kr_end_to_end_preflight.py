@@ -103,6 +103,8 @@ from build_kr_end_to_end_handoff_manifest import (
 )
 from verify_kr_end_to_end_handoff_manifest import (
     KrEndToEndHandoffManifestVerifyError,
+    _validate_artifact_entry_schema,
+    _validate_manifest_schema,
     load_handoff_manifest,
     verify_kr_end_to_end_handoff_manifest,
 )
@@ -3631,6 +3633,83 @@ def test_handoff_verifier_artifact_entries_contain_required_keys(tmp_path: Path)
     path = _write_handoff_manifest_dict(tmp_path, payload)
     with pytest.raises(KrEndToEndHandoffManifestVerifyError, match="missing required fields") as exc:
         verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_top_level_unknown_key_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["unexpected_top_level_field"] = "not-allowed"
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="unknown top-level fields",
+    ) as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_top_level_missing_key_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload.pop("review_only")
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="missing required fields",
+    ) as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_top_level_exact_key_set_from_builder(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert set(payload.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+    verify_kr_end_to_end_handoff_manifest(manifest_path)
+
+
+def test_handoff_verifier_artifact_entry_unknown_key_fails_validate(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    entry["unexpected_entry_field"] = "not-allowed"
+    payload["artifacts"] = [entry]
+    payload["artifacts_count"] = 1
+    path = _write_handoff_manifest_dict(tmp_path, payload)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="unknown fields",
+    ) as exc:
+        verify_kr_end_to_end_handoff_manifest(path)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_artifact_entry_exact_key_set_from_builder(tmp_path: Path) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in payload["artifacts"]:
+        assert set(entry.keys()) == _ARTIFACT_ENTRY_KEYS
+    verify_kr_end_to_end_handoff_manifest(manifest_path)
+
+
+def test_handoff_verifier_artifact_entry_unknown_key_checked_on_raw_input(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    raw_entry = dict(payload["artifacts"][0])  # type: ignore[index]
+    raw_entry["unexpected_entry_field"] = "not-allowed"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="unknown fields",
+    ) as exc:
+        _validate_artifact_entry_schema(raw_entry, index=0)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_manifest_unknown_key_checked_on_raw_payload(tmp_path: Path) -> None:
+    payload = _loaded_handoff_manifest_dict(tmp_path)
+    payload["unexpected_top_level_field"] = "not-allowed"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="unknown top-level fields",
+    ) as exc:
+        _validate_manifest_schema(payload)  # type: ignore[arg-type]
     assert exc.value.stage == "validate"
 
 
