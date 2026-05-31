@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1955 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2005 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1955 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2005 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -876,6 +876,30 @@ Approved follow-up: mapped factor input TOML → 3G4-1 `generate_kr_factor_signa
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_source_adapter.py -v`.
 
+**3G4-5 operator-triggered KR factor source live smoke (HTTP → immutable raw snapshot → optional canonical factor input TOML only):**
+
+Operator-supplied endpoint URL only — **no env/API key read**, no hardcoded live endpoint. Do **not** put secrets in the endpoint URL query string; prefer a server-side session or headerless public JSON path where possible.
+
+```bash
+DAY=2026-05-30
+PYTHONPATH=src uv run python ops/run_kr_factor_source_live_smoke.py \
+  --endpoint-url "https://example.test/factor-source.json" \
+  --snapshot-dir "runtime/research/${DAY}/sources/kr_factor_source" \
+  --fetched-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --factor-inputs-out "/tmp/kr_factor_inputs.live_smoke.toml" \
+  --output-name kr-factor-inputs-live-smoke-v1 \
+  --output-description "Operator-triggered KR factor source live smoke." \
+  --factor-score-version kr-factor-live-smoke-v1 \
+  --force \
+  --json
+```
+
+- Raw snapshots under `runtime/research/.../sources/kr_factor_source` are **immutable** (`--force` never overwrites them).
+- Omit `--factor-inputs-out` to fetch + snapshot only; add replay flags when ready to map through 3G4-4.
+- Approved follow-up after operator review: generated factor input TOML → 3G4-1 `generate_kr_factor_signals.py` → 3G4-2 `build_kr_factor_ranked_mapping.py` → 3G4-3 bundle workflow (optional).
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
+
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
 `kr_discovery_live_client.fetch_live_kr_discovery_snapshot()` accepts injected fake transport only — used in tests to prove transport → immutable raw snapshot → 3G3-3 replay chain.
@@ -1115,7 +1139,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1955 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2005 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

@@ -1321,8 +1321,8 @@ Factor scoring must not call:
 - **3G4-2:** factor scorer → 3G3-1 ranking signal TOML integration
 - **3G4-3:** operator-local real factor input bundle — **implemented** (see [3G4-3](#3g4-3--operator-local-factor-input-bundle-workflow))
 - **3G4-4:** source-specific factor adapter — **implemented** (see [3G4-4](#3g4-4--fixture-first-source-specific-factor-adapter))
-- **3G4-5:** first operator-triggered live factor smoke
-- **3G4+ hardening:** calibration, provenance, drift checks, explainability
+- **3G4-5:** first operator-triggered live factor smoke — **implemented** (see [3G4-5](#3g4-5--operator-triggered-live-factor-source-smoke))
+- **3G4+ hardening:** calibration, provenance, drift checks, explainability — deferred
 
 ---
 
@@ -1514,7 +1514,7 @@ source-specific factor payload JSON (fixture)
 - Source-only fields (`displayName`, `sectorCode`, `lastUpdated`, `external_service`, `universe_hint`) accepted in source payload but not emitted
 - Symbol normalization via existing `normalize_stock_code` (must match candidate pool lookup keys)
 - Self-validation via existing `load_kr_factor_inputs_toml`; adapter remaps failures to `stage="validate"`
-- Live factor transport remains **deferred** (3G4-5+)
+- Live factor transport: operator-triggered smoke only in **3G4-5** (not scheduled/automatic)
 
 **3G4-4 ops helper (local files only; no env/API keys):**
 
@@ -1532,6 +1532,61 @@ PYTHONPATH=src uv run python ops/map_kr_factor_fixture.py \
 Approved follow-up: mapped factor input TOML → 3G4-1 / 3G4-2 / 3G4-3 workflows → operator review.
 
 Synthetic proof: `uv run pytest tests/test_kr_factor_source_adapter.py -v`.
+
+---
+
+## 3G4-5 — operator-triggered live factor source smoke
+
+**Status:** implemented
+
+**Purpose:**
+Operator-triggered live-shaped proof that a source-specific factor JSON endpoint can be fetched, snapshotted immutably, validated through the 3G4-4 parser, and optionally replayed into canonical 3G4-1 factor input TOML. Not scheduled fetch, not automatic scoring, not trading.
+
+**Scope:**
+
+| Component | Path | Network |
+|---|---|---|
+| **3G4-5 HTTP client** | `kr_factor_source_http_client.py` | urllib stdlib (module-isolated) |
+| **3G4-5 snapshot** | `kr_factor_source_payload_snapshot.py` | None |
+| **3G4-5 ops** | `ops/run_kr_factor_source_live_smoke.py` + tests | HTTP via injected client in tests only |
+
+**Operator path:**
+
+```text
+operator-supplied endpoint URL
+→ sanitized HTTP fetch (stdlib urllib, module-isolated)
+→ JSON source payload object
+→ immutable raw source payload snapshot (no wrapper envelope)
+→ load_kr_factor_source_payload() validation (3G4-4)
+→ optional replay_kr_factor_source_payload() → canonical factor input TOML only
+→ operator follow-up: 3G4-1 / 3G4-2 / 3G4-3
+```
+
+**Rules:**
+
+- Endpoint URL is **operator-supplied**; no hardcoded live endpoint; **no env/API key read**
+- Raw snapshots are **immutable**; `--force` applies only to optional `--factor-inputs-out`
+- Snapshot file is the **raw source payload itself** (not `{payload: ...}` wrapper; no `request`/endpoint/metadata envelope)
+- Optional replay output is **canonical factor input TOML only** — no ranking signal / ranked JSON / universe / provider mapping
+- Error/success JSON must not echo endpoint URL, query strings, or secrets
+- Downstream ranking/mapping remains **operator follow-up** after review
+
+**3G4-5 ops helper:**
+
+```bash
+PYTHONPATH=src uv run python ops/run_kr_factor_source_live_smoke.py \
+  --endpoint-url "https://example.test/factor-source.json" \
+  --snapshot-dir "runtime/research/2026-05-30/sources/kr_factor_source" \
+  --fetched-at "2026-05-30T03:00:00+00:00" \
+  --factor-inputs-out "/tmp/kr_factor_inputs.live_smoke.toml" \
+  --output-name kr-factor-inputs-live-smoke-v1 \
+  --output-description "Operator-triggered KR factor source live smoke." \
+  --factor-score-version kr-factor-live-smoke-v1 \
+  --force \
+  --json
+```
+
+Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
 
 ---
 
