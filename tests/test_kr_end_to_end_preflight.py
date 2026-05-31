@@ -96,6 +96,9 @@ from preflight_kr_end_to_end_intake import (
 from validate_kr_end_to_end_preflight_plan import (
     KrEndToEndPlanValidationError,
     _FOLLOWUP_COMMAND_ALLOWLIST as _VALIDATOR_FOLLOWUP_COMMAND_ALLOWLIST,
+    _build_validation_report,
+    _load_and_validate_structured_plan,
+    _write_report_output,
     load_structured_preflight_plan,
     validate_structured_preflight_plan,
 )
@@ -1996,3 +1999,622 @@ def test_validator_forbidden_structured_allocation_field_rejected(tmp_path: Path
     with pytest.raises(KrEndToEndPlanValidationError, match="unknown fields") as exc:
         validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
     assert exc.value.stage == "validate"
+
+
+# --- 3H6: structured plan validator optional validation report ---
+
+
+_REPORT_EXPECTED_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status",
+        "stage",
+        "structured_plan",
+        "plan_mode",
+        "plan_name",
+        "generated_by",
+        "review_only",
+        "commands_execute_in_validator",
+        "steps_count",
+        "scripts_count",
+        "manual_steps_count",
+        "step_ids",
+        "scripts",
+        "warnings_count",
+        "forbidden_shortcuts_count",
+        "allowlist_status",
+        "schema_status",
+    }
+)
+
+
+def test_validator_success_without_report_out_unchanged(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    result = validate_structured_preflight_plan(plan_path)
+    assert result["status"] == "ok"
+    assert result["stage"] == "complete"
+    assert result["mode"] == "kr-end-to-end-preflight-plan-validation"
+    assert "report_out" not in result
+    assert "report_written" not in result
+
+
+def test_validator_force_without_report_out_is_harmless_noop(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    proc = _run_validator_cli("--structured-plan", str(plan_path), "--force", "--json")
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "ok"
+    assert payload["report_written"] is False
+
+
+def test_validator_cli_accepts_report_out(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    assert report_out.is_file()
+
+
+def test_validator_cli_accepts_force_flag(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(report_out.read_text(encoding="utf-8"))
+    assert written["status"] == "ok"
+
+
+def test_validator_report_out_writes_json_normally(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["status"] == "ok"
+    assert report["stage"] == "complete"
+
+
+def test_validator_report_write_only_after_validation_success(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["report_written"] is True
+    assert payload["report_out"] == str(report_out.resolve())
+    assert report_out.is_file()
+
+
+def test_validator_failure_with_existing_report_out_fails_at_validate_not_write(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["version"] = 2
+    plan_path = _write_structured_plan(tmp_path, payload)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"preexisting": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "validate"
+    assert json.loads(report_out.read_text(encoding="utf-8"))["preexisting"] is True
+
+
+def test_validator_failure_does_not_create_report(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["mode"] = "wrong-mode"
+    plan_path = _write_structured_plan(tmp_path, payload)
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert not report_out.exists()
+
+
+def test_validator_invalid_plan_with_report_out_fails_at_validate_not_write(tmp_path: Path) -> None:
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(path),
+        "--report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "parse"
+    assert not report_out.exists()
+
+
+def test_validator_report_top_level_schema(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert set(report.keys()) == _REPORT_EXPECTED_KEYS
+
+
+def test_validator_report_mode_is_validation_report_mode(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["mode"] == "kr-end-to-end-preflight-plan-validation-report"
+
+
+def test_validator_report_plan_mode_matches_structured_plan(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["plan_mode"] == "kr-end-to-end-intake-followup-plan"
+
+
+def test_validator_success_json_mode_unchanged_with_report_out(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["mode"] == "kr-end-to-end-preflight-plan-validation"
+
+
+def test_validator_report_contains_no_validated_at(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert "validated_at" not in report
+
+
+def test_validator_report_contains_no_full_steps_array(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert "steps" not in report
+
+
+def test_validator_report_contains_no_command_lines(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert "command" not in report
+    dumped = json.dumps(report)
+    assert "PYTHONPATH=src" not in dumped
+
+
+def test_validator_report_forbidden_shortcuts_count_only_not_contents(tmp_path: Path) -> None:
+    plan_payload = _structured_plan_payload(tmp_path)
+    plan_path = _write_structured_plan(tmp_path, plan_payload)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["forbidden_shortcuts_count"] == len(plan_payload["forbidden_shortcuts"])
+    assert "forbidden_shortcuts" not in report
+    for shortcut in plan_payload["forbidden_shortcuts"]:
+        assert shortcut not in json.dumps(report)
+
+
+def test_validator_report_step_ids_in_validated_order(tmp_path: Path) -> None:
+    plan_payload = _structured_plan_payload(tmp_path)
+    plan_path = _write_structured_plan(tmp_path, plan_payload)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["step_ids"] == [step["id"] for step in plan_payload["steps"]]
+
+
+def test_validator_report_scripts_list_and_count(tmp_path: Path) -> None:
+    plan_payload = _structured_plan_payload(tmp_path)
+    plan_path = _write_structured_plan(tmp_path, plan_payload)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    expected_scripts = [
+        step["script"]
+        for step in plan_payload["steps"]
+        if step.get("script") is not None
+    ]
+    assert report["scripts"] == expected_scripts
+    assert report["scripts_count"] == len(expected_scripts)
+
+
+def test_validator_report_manual_steps_count_correct(tmp_path: Path) -> None:
+    plan_payload = _structured_plan_payload(tmp_path)
+    plan_path = _write_structured_plan(tmp_path, plan_payload)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    expected_manual = sum(1 for step in plan_payload["steps"] if step.get("script") is None)
+    assert report["manual_steps_count"] == expected_manual
+
+
+def test_validator_report_steps_count_invariant(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["steps_count"] == report["scripts_count"] + report["manual_steps_count"]
+
+
+def test_validator_report_review_only_true(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["review_only"] is True
+
+
+def test_validator_report_commands_execute_in_validator_false(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["commands_execute_in_validator"] is False
+
+
+def test_validator_report_allowlist_and_schema_status_ok(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert report["allowlist_status"] == "ok"
+    assert report["schema_status"] == "ok"
+
+
+def test_validator_report_exists_without_force_write_stage(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "write"
+
+
+def test_validator_report_exists_without_force_reports_field_name_not_path(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--json",
+    )
+    error = json.loads(proc.stdout)
+    assert error["message"] == "output already exists: report_out"
+    assert str(report_out) not in error["message"]
+
+
+def test_validator_force_overwrites_existing_report(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(report_out.read_text(encoding="utf-8"))
+    assert written["mode"] == "kr-end-to-end-preflight-plan-validation-report"
+    assert "old" not in written
+
+
+def test_validator_report_write_failure_preserves_existing_report(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    original = '{"status":"ok","preserved":true}\n'
+    report_out.write_text(original, encoding="utf-8")
+    secret = "SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPlanValidationError, match="output write failed: PermissionError") as exc:
+            _write_report_output(
+                report_out,
+                {"version": 1, "mode": "kr-end-to-end-preflight-plan-validation-report"},
+                force=True,
+            )
+    assert exc.value.stage == "write"
+    assert report_out.read_text(encoding="utf-8") == original
+    assert secret not in exc.value.message
+
+
+def test_validator_report_write_failure_sanitizes_exception_detail(tmp_path: Path) -> None:
+    report_out = tmp_path / "validation_report.json"
+    secret = "/raw/path/with/SECRET_VALUE_TEST"
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPlanValidationError) as exc:
+            _write_report_output(
+                report_out,
+                {"version": 1, "mode": "kr-end-to-end-preflight-plan-validation-report"},
+                force=True,
+            )
+    assert exc.value.message == "output write failed: PermissionError"
+    assert secret not in exc.value.message
+    assert exc.value.__cause__ is None
+
+
+def test_validator_report_temp_file_cleaned_after_write_failure(tmp_path: Path) -> None:
+    report_out = tmp_path / "nested" / "validation_report.json"
+    report_out.parent.mkdir(parents=True)
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> None:
+        if _self.name.startswith(".tmp_validation_report_"):
+            raise PermissionError("blocked")
+        Path.write_text(_self, *_args, **_kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _raise_permission_error):
+        with pytest.raises(KrEndToEndPlanValidationError):
+            _write_report_output(
+                report_out,
+                {"version": 1, "mode": "kr-end-to-end-preflight-plan-validation-report"},
+                force=True,
+            )
+    leftovers = list(report_out.parent.glob(".tmp_validation_report_*"))
+    assert leftovers == []
+
+
+def test_validator_report_temp_file_created_under_report_parent(tmp_path: Path) -> None:
+    report_out = tmp_path / "nested" / "validation_report.json"
+    observed_temp_parent: list[Path] = []
+    original_write_text = Path.write_text
+
+    def _capture_temp_write(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith(".tmp_validation_report_"):
+            observed_temp_parent.append(self.parent)
+        return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "write_text", _capture_temp_write):
+        _write_report_output(
+            report_out,
+            {"version": 1, "mode": "kr-end-to-end-preflight-plan-validation-report", "status": "ok"},
+            force=True,
+        )
+    assert observed_temp_parent == [report_out.parent]
+    assert report_out.is_file()
+
+
+def test_validator_cli_report_write_errors_no_traceback(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_validator_report_json_no_endpoint_urls(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8")
+    assert "https://" not in dumped
+    assert "http://" not in dumped
+
+
+def test_validator_report_json_no_env_api_key_names(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    dumped = report_out.read_text(encoding="utf-8").lower()
+    assert "fred_api_key" not in dumped
+    assert "dart_api_key" not in dumped
+    assert "api_key" not in dumped
+
+
+def test_validator_report_json_no_trading_action_order_allocation_fields(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    report_out = tmp_path / "validation_report.json"
+    _run_validator_cli(
+        "--structured-plan",
+        str(plan_path),
+        "--report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    _walk_forbidden_fields(report)
+
+
+def test_validator_build_validation_report_derived_from_validated_payload(tmp_path: Path) -> None:
+    plan_payload = _structured_plan_payload(tmp_path)
+    plan_path = _write_structured_plan(tmp_path, plan_payload)
+    loaded = load_structured_preflight_plan(plan_path)
+    plan, summary = _load_and_validate_structured_plan(plan_path)
+    report = _build_validation_report(plan, plan_path, summary)
+    assert report["plan_mode"] == loaded["mode"]
+    assert report["plan_name"] == loaded["name"]
+    assert report["generated_by"] == loaded["generated_by"]
+    assert report["warnings_count"] == len(loaded["warnings"])
+    assert report["forbidden_shortcuts_count"] == len(loaded["forbidden_shortcuts"])
+    assert report["step_ids"] == summary["step_ids"]
+    assert report["scripts"] == summary["scripts"]

@@ -1842,9 +1842,27 @@ Refine 3H4 validator command-line safety without changing the public validator c
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H6+ (unimplemented)**
+### 3H6 — structured plan validator optional validation report
 
-**3H6+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Optional compact validation report JSON artifact after successful structured plan validation — operator handoff/audit only; no command execution.
+
+**Behavior (read-only; no execution):**
+
+| Area | Behavior |
+|---|---|
+| **CLI** | `ops/validate_kr_end_to_end_preflight_plan.py --structured-plan PATH [--report-out PATH] [--force] [--json]` |
+| **Report** | Written only after successful validation; atomic same-directory temp → replace; compact summary (counts, step IDs, allowlisted scripts) — no raw commands, artifact bodies, or timestamps |
+| **Safety** | `--force` applies only to `--report-out`; validation failure never writes report; report is review/audit only |
+| **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H7+ (unimplemented)**
+
+**3H7+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2183 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2219 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2183 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2219 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -906,7 +906,7 @@ Synthetic proof: `uv run pytest tests/test_kr_factor_source_live_smoke.py -v`.
 
 **3H1 preflight note — manifest/preflight helper (validates existing artifacts only; does not execute smokes):**
 
-After discovery/factor/ranking workflows produce reviewable local artifacts, run preflight before optional 3E smokes. Preflight reads a manifest TOML, validates universe/provider mapping coverage, checks optional artifact paths, and writes a reviewable summary + optional follow-up command plan. **Follow-up commands are operator-run manually** — preflight does not execute them. **3H2 hardening:** summary/plan writes are atomic (same-directory temp → replace); follow-up command plan is positive-allowlist validated; no workflow semantics change. **3H3:** optional structured follow-up plan JSON (`--structured-plan-out`) for review/tooling only — not execution. **3H4:** optional structured plan validator (`ops/validate_kr_end_to_end_preflight_plan.py`) — read-only schema/allowlist audit before handoff; does not execute commands.
+After discovery/factor/ranking workflows produce reviewable local artifacts, run preflight before optional 3E smokes. Preflight reads a manifest TOML, validates universe/provider mapping coverage, checks optional artifact paths, and writes a reviewable summary + optional follow-up command plan. **Follow-up commands are operator-run manually** — preflight does not execute them. **3H2 hardening:** summary/plan writes are atomic (same-directory temp → replace); follow-up command plan is positive-allowlist validated; no workflow semantics change. **3H3:** optional structured follow-up plan JSON (`--structured-plan-out`) for review/tooling only — not execution. **3H4:** optional structured plan validator (`ops/validate_kr_end_to_end_preflight_plan.py`) — read-only schema/allowlist audit before handoff; does not execute commands. **3H6:** optional validation report JSON (`--report-out`) — compact audit summary after successful validation; excludes raw commands and artifact bodies.
 
 ```bash
 PYTHONPATH=src uv run python ops/preflight_kr_end_to_end_intake.py \
@@ -927,10 +927,12 @@ Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 ```bash
 PYTHONPATH=src uv run python ops/validate_kr_end_to_end_preflight_plan.py \
   --structured-plan /tmp/kr_end_to_end_preflight_structured_plan.json \
+  --report-out /tmp/kr_end_to_end_preflight_plan_validation_report.json \
+  --force \
   --json
 ```
 
-Read-only — validates schema, allowlist, review-only flags; does not execute generated commands. **3H5:** command-line safety avoids broad trading substring false positives; structured-field rejection and exact unsafe execution token guard preserved.
+Read-only — validates schema, allowlist, review-only flags; does not execute generated commands. **3H5:** command-line safety avoids broad trading substring false positives; structured-field rejection and exact unsafe execution token guard preserved. **3H6:** optional `--report-out` writes compact validation report JSON after successful validation only; report excludes raw commands and artifact bodies.
 
 **Approved high-level order of operations** (each step uses **existing** ops scripts; detail in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md` § 3H0](REAL_RESEARCH_SOURCE_INTAKE.md#3h0--operator-end-to-end-intake-guardrail-checkpoint)):
 
@@ -948,7 +950,7 @@ Read-only — validates schema, allowlist, review-only flags; does not execute g
 - PRICE, DART, and combined context smokes remain **separate explicit operator commands** — no automatic chaining in 3H0.
 - Ranking/factor scores are **advisory metadata only** — not buy/sell/hold signals or allocation guidance.
 
-**Deferred next step:** **3H6+** end-to-end hardening (unimplemented).
+**Deferred next step:** **3H7+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1189,7 +1191,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2183 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2219 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""KR end-to-end structured follow-up plan validator (3H4/3H5).
+"""KR end-to-end structured follow-up plan validator (3H4/3H5/3H6).
 
 3H3 structured JSON plan → schema/allowlist/review-only 검증만 수행.
+선택적 validation report JSON 출력(3H6) — operator handoff/audit 전용.
 명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -11,12 +12,14 @@ import argparse
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
-StageName = Literal["args", "parse", "validate", "complete"]
+StageName = Literal["args", "parse", "validate", "write", "complete"]
 
 _MODE = "kr-end-to-end-preflight-plan-validation"
+_REPORT_MODE = "kr-end-to-end-preflight-plan-validation-report"
 _STRUCTURED_MODE = "kr-end-to-end-intake-followup-plan"
 _GENERATED_BY = "ops/preflight_kr_end_to_end_intake.py"
 
@@ -294,7 +297,7 @@ def _validate_step_object(step: object, *, index: int) -> str:
     return step_id
 
 
-def _validate_top_level(payload: dict[str, Any]) -> tuple[list[str], int]:
+def _validate_top_level(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
     unknown = set(payload.keys()) - _TOP_LEVEL_KEYS
     if unknown:
         raise KrEndToEndPlanValidationError("validate", "structured plan contains unknown top-level fields")
@@ -333,35 +336,110 @@ def _validate_top_level(payload: dict[str, Any]) -> tuple[list[str], int]:
         raise KrEndToEndPlanValidationError("validate", "structured plan warnings must be a list of strings")
 
     step_ids: list[str] = []
-    scripts_count = 0
+    scripts: list[str] = []
     for index, step in enumerate(steps):
         step_ids.append(_validate_step_object(step, index=index))
         script = step.get("script") if isinstance(step, dict) else None
         if isinstance(script, str) and script in _FOLLOWUP_COMMAND_ALLOWLIST:
-            scripts_count += 1
+            scripts.append(script)
 
     _validate_step_ids(step_ids)
     _walk_forbidden_field_names(payload)
     _validate_sensitive_string(_required_nonblank_string(payload.get("manifest"), field_name="manifest"), context="field")
     _validate_sensitive_string(_required_nonblank_string(payload.get("name"), field_name="name"), context="field")
 
-    return step_ids, scripts_count
+    return step_ids, scripts
 
 
-def validate_structured_preflight_plan(path: Path) -> dict[str, Any]:
-    """structured plan JSON 파일을 로드·검증하고 성공 summary dict를 반환한다."""
+def _validate_structured_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """검증된 structured plan payload에서 report/success summary를 파생한다."""
+    step_ids, scripts = _validate_top_level(payload)
+    manual_steps_count = len(step_ids) - len(scripts)
+    return {
+        "step_ids": step_ids,
+        "scripts": scripts,
+        "scripts_count": len(scripts),
+        "manual_steps_count": manual_steps_count,
+        "steps_count": len(step_ids),
+    }
+
+
+def _load_and_validate_structured_plan(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """structured plan을 로드·검증하고 (plan, validation_summary)를 반환한다."""
     payload = load_structured_preflight_plan(path)
-    _step_ids, scripts_count = _validate_top_level(payload)
+    summary = _validate_structured_plan_payload(payload)
+    return payload, summary
+
+
+def _build_success_payload(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    """CLI/API 성공 JSON payload를 구성한다."""
     return {
         "status": "ok",
         "stage": "complete",
         "mode": _MODE,
         "structured_plan": str(path.resolve()),
-        "steps_count": len(_step_ids),
-        "scripts_count": scripts_count,
+        "steps_count": summary["steps_count"],
+        "scripts_count": summary["scripts_count"],
         "review_only": True,
         "commands_execute_in_validator": False,
     }
+
+
+def _build_validation_report(
+    plan: dict[str, Any],
+    plan_path: Path,
+    validation_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """검증 성공 후 operator handoff/audit용 compact report JSON을 구성한다."""
+    return {
+        "version": 1,
+        "mode": _REPORT_MODE,
+        "status": "ok",
+        "stage": "complete",
+        "structured_plan": str(plan_path.resolve()),
+        "plan_mode": plan["mode"],
+        "plan_name": plan["name"],
+        "generated_by": plan["generated_by"],
+        "review_only": True,
+        "commands_execute_in_validator": False,
+        "steps_count": validation_summary["steps_count"],
+        "scripts_count": validation_summary["scripts_count"],
+        "manual_steps_count": validation_summary["manual_steps_count"],
+        "step_ids": validation_summary["step_ids"],
+        "scripts": validation_summary["scripts"],
+        "warnings_count": len(plan["warnings"]),
+        "forbidden_shortcuts_count": len(plan["forbidden_shortcuts"]),
+        "allowlist_status": "ok",
+        "schema_status": "ok",
+    }
+
+
+def _write_report_output(path: Path, report: dict[str, Any], *, force: bool) -> None:
+    """validation report JSON을 atomic replace로 기록한다."""
+    report_out = path.resolve()
+    if report_out.exists() and not force:
+        raise KrEndToEndPlanValidationError("write", "output already exists: report_out")
+
+    report_out.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = report_out.parent / f".tmp_validation_report_{uuid.uuid4().hex}.json"
+    try:
+        serialized = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        temp_path.write_text(serialized, encoding="utf-8")
+        temp_path.replace(report_out)
+    except OSError as exc:
+        raise KrEndToEndPlanValidationError(
+            "write",
+            f"output write failed: {type(exc).__name__}",
+        ) from None
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def validate_structured_preflight_plan(path: Path) -> dict[str, Any]:
+    """structured plan JSON 파일을 로드·검증하고 성공 summary dict를 반환한다."""
+    _plan, summary = _load_and_validate_structured_plan(path)
+    return _build_success_payload(path, summary)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -369,6 +447,16 @@ def _build_parser() -> argparse.ArgumentParser:
         description="KR end-to-end structured follow-up plan validator — read-only schema/allowlist audit.",
     )
     parser.add_argument("--structured-plan", required=True, help="structured follow-up plan JSON path")
+    parser.add_argument(
+        "--report-out",
+        default=None,
+        help="optional compact validation report JSON path (written only after successful validation)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing report_out when supplied (no-op without --report-out)",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON to stdout")
     return parser
 
@@ -395,8 +483,12 @@ def main(argv: list[str] | None = None) -> int:
             print(error_payload["message"], file=sys.stderr)
         return 1
 
+    plan_path = Path(args.structured_plan)
+    report_out = Path(args.report_out).resolve() if args.report_out else None
+
     try:
-        payload = validate_structured_preflight_plan(Path(args.structured_plan))
+        plan, summary = _load_and_validate_structured_plan(plan_path)
+        payload = _build_success_payload(plan_path, summary)
     except KrEndToEndPlanValidationError as exc:
         error_payload = {"status": "error", "stage": exc.stage, "message": exc.message, "mode": _MODE}
         if args.json:
@@ -404,6 +496,22 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(exc.message, file=sys.stderr)
         return 1
+
+    if report_out is not None:
+        try:
+            report = _build_validation_report(plan, plan_path, summary)
+            _write_report_output(report_out, report, force=bool(args.force))
+        except KrEndToEndPlanValidationError as exc:
+            error_payload = {"status": "error", "stage": exc.stage, "message": exc.message, "mode": _MODE}
+            if args.json:
+                _emit_json(error_payload, stream=sys.stdout)
+            else:
+                print(exc.message, file=sys.stderr)
+            return 1
+        payload["report_out"] = str(report_out)
+        payload["report_written"] = True
+    else:
+        payload["report_written"] = False
 
     if args.json:
         _emit_json(payload, stream=sys.stdout)
