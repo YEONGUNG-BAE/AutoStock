@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1445 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1482 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1445 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1482 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -521,6 +521,40 @@ PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
 
 Generator N-scale proof (synthetic, checked-in): `uv run pytest tests/test_kr_real_generated_universe_expansion.py -v`. Sector discovery / automatic ranking remains **deferred** (3E5+).
 
+**3G1 sector-tagged KR candidate pool (local files only; no live API/env/network):**
+
+Selected candidate TOML **drops pool-only metadata** before 3F1 generator: root `base_market` and entry fields `sector`, `industry`, `eligible`, `priority`, `notes`, `corp_code` are excluded from export.
+
+```bash
+PYTHONPATH=src uv run python ops/select_kr_candidates.py \
+  --candidate-pool tests/fixtures/research/kr_candidates/kr_sector_candidate_pool.synthetic.toml \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 3 \
+  --max-per-sector 2 \
+  --out-candidates /tmp/kr_candidates.selected.toml \
+  --force \
+  --json
+
+# Chain: selected candidates → 3F1 generator → validation → 3E smoke flows
+PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
+  --candidates /tmp/kr_candidates.selected.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_synthetic_multi.xml \
+  --universe-out /tmp/universe.kr-selected.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-selected.generated.toml \
+  --universe-name kr-selected-generated-v1 \
+  --provider-mapping-name kr-selected-provider-mappings-v1 \
+  --force \
+  --json
+
+PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
+  --universe /tmp/universe.kr-selected.generated.toml \
+  --provider-mapping /tmp/provider_mappings.kr-selected.generated.toml \
+  --json
+```
+
+Live sector discovery, ranking, and automatic universe expansion remain **deferred** (3E5+).
+
 ```bash
 DAY=2026-05-30
 PYTHONPATH=src uv run python ops/fetch_research_sources.py \
@@ -754,7 +788,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1445 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1482 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

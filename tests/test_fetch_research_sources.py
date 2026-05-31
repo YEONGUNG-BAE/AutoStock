@@ -315,6 +315,8 @@ def test_new_files_do_not_use_forbidden_network_or_trading_tokens() -> None:
         REPO_ROOT / "ops" / "run_kr_real_dart_smoke.py",
         REPO_ROOT / "ops" / "build_kr_real_combined_context_smoke.py",
         REPO_ROOT / "ops" / "generate_kr_provider_mapping.py",
+        REPO_ROOT / "src" / "data" / "kr_candidate_pool.py",
+        REPO_ROOT / "ops" / "select_kr_candidates.py",
     ]
     forbidden = (
         "requests",
