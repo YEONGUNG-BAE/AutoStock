@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3E5+** live sector discovery / ranking / automatic universe expansion **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3E5+** live sector discovery / ranking / automatic universe expansion **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -728,6 +728,42 @@ PYTHONPATH=src uv run python ops/select_kr_candidates.py \
 4. Use generated files in 3E2/3E3/3E4 smoke flows.
 
 Automatic/live sector discovery, ranking, and factor scoring remain **deferred**.
+
+---
+
+## 3G2 Operator-local real sector pool workflow (3G2)
+
+> **3G2 (implemented):** single CLI chains 3G1 select/export → 3F1 generate → provider mapping validation for operator-supplied sector pool + local corp-code snapshot. **Not** live sector discovery, ranking, or automatic universe construction.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3G2** | `ops/build_kr_real_sector_pool_mapping.py` + workflow tests | None (operator supplies local pool + corp-code snapshot) |
+| **Next** | **3E5+** live sector discovery / ranking / factor scoring / automatic universe expansion | Deferred |
+
+**3G2 ops helper (operator-local; no live API in tests):**
+
+```bash
+PYTHONPATH=src uv run python ops/build_kr_real_sector_pool_mapping.py \
+  --candidate-pool /path/to/operator/kr_sector_pool.local.toml \
+  --corp-code-zip runtime/research/${DAY}/sources/dart_corp_code/<snapshot>.zip \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 5 \
+  --max-per-sector 2 \
+  --selected-candidates-out /tmp/kr_candidates.selected.toml \
+  --universe-out /tmp/universe.kr-real.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.generated.toml \
+  --selection-name kr-real-selected-v1 \
+  --selection-description "Operator-selected KR candidates." \
+  --universe-name kr-real-generated-v1 \
+  --provider-mapping-name kr-real-provider-mappings-generated-v1 \
+  --force \
+  --json
+```
+
+**Operator chain:** 3C2 corp-code snapshot (runtime artifact; never commit) → operator sector pool TOML (explicit yfinance symbols) → 3G2 helper → generated universe/mapping → 3E2/3E3/3E4 flows.
+
+Error stages: missing corp-code **mode** → `args`; missing corp-code **file** → `resolve` (from 3F1 generator).
 
 ---
 

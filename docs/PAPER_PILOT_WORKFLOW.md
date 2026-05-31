@@ -596,7 +596,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 | 종료점 | 여전히 **8I no-write** ([G4](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | KIS | v1 **범위 밖** ([G3](REAL_RESEARCH_SOURCE_INTAKE.md#mandatory-design-guards-g1g4)) |
 | 첫 구현 후보 | **FRED** (`FactType.MACRO`) — yfinance/DART는 follow-on |
-| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1** (sector-tagged candidate pool + selector; export drops pool metadata before 3F1); **3E5+** live sector discovery / ranking deferred |
+| 구현 상태 | **1A–2B + 3A + 3A.1 + 3B1 + 3B2 + 3C1 + 3C2 + 3D1 + 3E1 + 3E2 + 3E3 + 3E4 + 3F1 + 3F2 + 3G1 + 3G2** (operator-local sector pool → universe/mapping chain); **3E5+** live sector discovery / ranking deferred |
 
 ### Controlled walk-through vs 30-trading-day pilot
 

@@ -65,6 +65,7 @@
 - ~~Real Intake **3F1** — fixture-first KR universe/provider mapping generator~~ Done: `kr_provider_mapping_generator.py`, `ops/generate_kr_provider_mapping.py`, candidate fixture + disambiguation XML; corp_code from local resolver only; stock_code normalization; self-validates via existing loaders. P3 cleanup: control-char rejection at parse/CLI/render (write-safety).
 - ~~Real Intake **3F2** — generator-based KR expansion workflow~~ Done: synthetic 5-candidate fixtures + scale tests (`test_kr_real_generated_universe_expansion.py`); operator-local real expansion documented in RUNBOOK (3C2 snapshot → candidate TOML → generator → validate → 3E2/3E3/3E4). Provider auto-generation from operator-curated candidates is supported; sector discovery/ranking is not.
 - ~~Real Intake **3G1** — fixture-first sector-tagged KR candidate pool~~ Done: `kr_candidate_pool.py`, `ops/select_kr_candidates.py`, synthetic sector pool fixture + tests; deterministic sector/priority selection; export to 3F1 candidate TOML with pool metadata stripped.
+- ~~Real Intake **3G2** — operator-local real sector pool workflow~~ Done: `ops/build_kr_real_sector_pool_mapping.py` chains 3G1 export → 3F1 generate → provider mapping validation; workflow tests use synthetic pool + corp-code fixtures only.
 - Real Intake **3E5+** — live sector discovery, ranking, factor scoring, provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
 

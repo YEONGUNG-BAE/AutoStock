@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1482 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1502 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1482 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1502 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -555,6 +555,40 @@ PYTHONPATH=src uv run python ops/validate_provider_mapping.py \
 
 Live sector discovery, ranking, and automatic universe expansion remain **deferred** (3E5+).
 
+**3G2 operator-local sector pool → universe/mapping workflow (local files only; no live API/env/network in tests):**
+
+Prerequisites: operator sector-tagged candidate pool TOML (explicit `yfinance_provider_symbol`; no `corp_code`) + local 3C2 corp-code master ZIP/XML snapshot (**runtime artifact; never commit**).
+
+```bash
+DAY=2026-05-30
+# Step 1: 3C2 corp-code master snapshot (operator-local; output JSON snapshot_path → use in step 2)
+SNAPSHOT="<snapshot_path from 3C2 --live-fetch>"
+
+# Step 2–4: select → generate → validate (single helper)
+PYTHONPATH=src uv run python ops/build_kr_real_sector_pool_mapping.py \
+  --candidate-pool /path/to/operator/kr_sector_pool.local.toml \
+  --corp-code-zip "$SNAPSHOT" \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 5 \
+  --max-per-sector 2 \
+  --selected-candidates-out /tmp/kr_candidates.selected.toml \
+  --universe-out /tmp/universe.kr-real.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-real.generated.toml \
+  --selection-name kr-real-selected-v1 \
+  --selection-description "Operator-selected KR candidates." \
+  --universe-name kr-real-generated-v1 \
+  --provider-mapping-name kr-real-provider-mappings-generated-v1 \
+  --force \
+  --json
+
+# Step 5: use generated files in 3E2/3E3/3E4 flows
+```
+
+Missing corp-code **mode** (neither `--corp-code-xml` nor `--corp-code-zip`) fails at `stage="args"`. Missing corp-code **file** fails at `stage="resolve"`. Selected candidate TOML drops pool-only metadata (`base_market`, `sector`, `industry`, `eligible`, `priority`, `notes`) before 3F1 generator.
+
+Synthetic workflow proof: `uv run pytest tests/test_kr_real_sector_pool_workflow.py -v`.
+
 ```bash
 DAY=2026-05-30
 PYTHONPATH=src uv run python ops/fetch_research_sources.py \
@@ -788,7 +822,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1482 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1502 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
