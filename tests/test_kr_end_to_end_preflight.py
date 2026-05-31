@@ -33,6 +33,7 @@ INCOMPLETE_MAPPING = (
     / "provider_mappings.preflight.incomplete.toml"
 )
 OPS_SCRIPT = REPO_ROOT / "ops" / "preflight_kr_end_to_end_intake.py"
+VALIDATOR_SCRIPT = REPO_ROOT / "ops" / "validate_kr_end_to_end_preflight_plan.py"
 STATIC_SCAN_FILE = REPO_ROOT / "tests" / "test_fetch_research_sources.py"
 
 _FORBIDDEN_OUTPUT_FIELDS = frozenset(
@@ -91,6 +92,12 @@ from preflight_kr_end_to_end_intake import (
     _write_output,
     load_kr_end_to_end_preflight_manifest,
     run_kr_end_to_end_preflight,
+)
+from validate_kr_end_to_end_preflight_plan import (
+    KrEndToEndPlanValidationError,
+    _FOLLOWUP_COMMAND_ALLOWLIST as _VALIDATOR_FOLLOWUP_COMMAND_ALLOWLIST,
+    load_structured_preflight_plan,
+    validate_structured_preflight_plan,
 )
 
 
@@ -1488,3 +1495,410 @@ def test_summary_without_structured_plan_omits_structured_metadata(tmp_path: Pat
     assert "structured_plan_generated" not in payload
     assert "structured_plan_steps_count" not in payload
     assert "structured_plan_out" not in payload
+
+
+# --- 3H4: structured follow-up plan validator ---
+
+
+def _run_validator_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return subprocess.run(
+        [sys.executable, str(VALIDATOR_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _write_structured_plan(tmp_path: Path, payload: dict[str, object]) -> Path:
+    path = tmp_path / "structured_plan.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def _valid_structured_plan_path(tmp_path: Path) -> Path:
+    payload = _structured_plan_payload(tmp_path)
+    return _write_structured_plan(tmp_path, payload)
+
+
+def test_validator_accepts_plan_generated_by_3h3_helper(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    result = validate_structured_preflight_plan(plan_path)
+    assert result["status"] == "ok"
+    assert result["stage"] == "complete"
+
+
+def test_validator_cli_success_with_json(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    proc = _run_validator_cli("--structured-plan", str(plan_path), "--json")
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "ok"
+    assert payload["stage"] == "complete"
+    assert payload["mode"] == "kr-end-to-end-preflight-plan-validation"
+
+
+def test_validator_missing_plan_file_parse_stage() -> None:
+    with pytest.raises(KrEndToEndPlanValidationError, match="structured plan file not found") as exc:
+        validate_structured_preflight_plan(Path("/nonexistent/structured_plan.json"))
+    assert exc.value.stage == "parse"
+
+
+def test_validator_invalid_json_parse_stage(tmp_path: Path) -> None:
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(KrEndToEndPlanValidationError, match="JSON parse failed") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "parse"
+
+
+def test_validator_json_root_list_parse_stage(tmp_path: Path) -> None:
+    path = tmp_path / "bad.json"
+    path.write_text("[]\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndPlanValidationError, match="root must be an object") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "parse"
+
+
+def test_validator_version_must_be_one(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["version"] = 2
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="version must be exactly 1") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_mode_must_match(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["mode"] = "wrong-mode"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="mode mismatch") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_generated_by_must_match(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["generated_by"] = "ops/other.py"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="generated_by mismatch") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_review_only_must_be_true(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["review_only"] = False
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="review_only must be true") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_steps_must_be_non_empty(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"] = []
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="steps must be a non-empty list") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_step_requires_core_fields(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    del payload["steps"][0]["id"]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="id is required") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_step_command_must_be_non_empty_string_list(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = []
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="command must be a non-empty list") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_executable_step_script_must_be_allowlisted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["script"] = "ops/not_allowlisted_script.py"
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",
+    ]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="script not allowlisted") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_executable_step_command_ops_script_allowlisted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/not_allowlisted_script.py --json",
+    ]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="(script not allowlisted|command script not allowlisted)") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_executable_step_script_mismatch_fails(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["script"] = "ops/validate_provider_mapping.py"
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/run_kr_real_price_smoke.py --json",
+    ]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="script mismatch") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_comment_manual_step_with_null_script_accepted(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    concat = next(step for step in payload["steps"] if step["id"] == "concatenate-jsonl")
+    assert concat["script"] is None
+    path = _write_structured_plan(tmp_path, payload)
+    validate_structured_preflight_plan(path)
+
+
+def test_validator_comment_manual_step_with_ops_script_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    concat = next(step for step in payload["steps"] if step["id"] == "concatenate-jsonl")
+    concat["script"] = None
+    concat["command"] = ["PYTHONPATH=src uv run python ops/validate_provider_mapping.py --json"]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="manual step must not contain ops script") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_executes_in_preflight_true_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["executes_in_preflight"] = True
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="executes_in_preflight must be false") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_requires_operator_review_false_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["requires_operator_review"] = False
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="requires_operator_review must be true") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_allowed_false_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["allowed"] = False
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="allowed must be true") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_default_synthetic_plan_has_eight_step_ids_in_order(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    assert [step["id"] for step in payload["steps"]] == [
+        "validate-provider-mapping",
+        "price-smoke",
+        "dart-smoke",
+        "concatenate-jsonl",
+        "research-source-intake-validate-only",
+        "combined-context-smoke",
+        "date-md-smoke",
+        "scout-manual-packet",
+    ]
+    result = validate_structured_preflight_plan(_write_structured_plan(tmp_path, payload))
+    assert result["steps_count"] == 8
+    assert result["scripts_count"] == 7
+
+
+def test_validator_accepts_conditional_step_id_subset(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"] = [
+        step
+        for step in payload["steps"]
+        if step["id"] in {"validate-provider-mapping", "research-source-intake-validate-only"}
+    ]
+    path = _write_structured_plan(tmp_path, payload)
+    result = validate_structured_preflight_plan(path)
+    assert result["steps_count"] == 2
+
+
+def test_validator_unknown_step_id_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["id"] = "unknown-step"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="step id not recognized") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_duplicate_step_id_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    duplicate = dict(payload["steps"][0])
+    payload["steps"] = [payload["steps"][0], duplicate]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="step id duplicated") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_step_ids_out_of_canonical_order_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    steps = payload["steps"]
+    payload["steps"] = [steps[1], steps[0], *steps[2:]]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="out of canonical order") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_invented_3h0_command_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = ["PYTHONPATH=src uv run python ops/run_3h0_smoke.py --json"]
+    payload["steps"][0]["script"] = None
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="invented workflow command") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_invented_3h1_command_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = [
+        "PYTHONPATH=src uv run python ops/preflight_kr_end_to_end_intake.py --json",
+    ]
+    payload["steps"][0]["script"] = None
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="invented preflight command") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_config_promotion_command_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = ["cp generated.toml config/universe.toml"]
+    payload["steps"][0]["script"] = None
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="config promotion command") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_endpoint_url_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["manifest"] = "https://example.test/manifest.toml"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="endpoint URL") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_env_api_key_name_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["command"] = ["# DART_API_KEY=secret"]
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="env or API key reference") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_trading_order_field_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["order"] = "buy"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="unknown top-level fields") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_trading_action_field_in_step_rejected(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["action"] = "buy"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="unknown fields") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_disallowed_script_validate_stage(tmp_path: Path) -> None:
+    payload = _structured_plan_payload(tmp_path)
+    payload["steps"][0]["script"] = "ops/evil_script.py"
+    path = _write_structured_plan(tmp_path, payload)
+    with pytest.raises(KrEndToEndPlanValidationError, match="script not allowlisted") as exc:
+        validate_structured_preflight_plan(path)
+    assert exc.value.stage == "validate"
+
+
+def test_validator_cli_known_errors_no_traceback(tmp_path: Path) -> None:
+    proc = _run_validator_cli("--structured-plan", str(tmp_path / "missing.json"), "--json")
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_validator_cli_known_errors_do_not_echo_raw_json(tmp_path: Path) -> None:
+    path = tmp_path / "bad.json"
+    secret = '{"version":1,"secret_marker":"RAW_JSON_SECRET"}'
+    path.write_text(secret, encoding="utf-8")
+    proc = _run_validator_cli("--structured-plan", str(path), "--json")
+    assert proc.returncode == 1
+    assert "RAW_JSON_SECRET" not in proc.stdout
+    assert secret not in proc.stdout
+
+
+def test_validator_does_not_execute_plan_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("validator must not execute plan commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    validate_structured_preflight_plan(plan_path)
+
+
+def test_validator_ops_source_passes_shared_static_scan() -> None:
+    source = VALIDATOR_SCRIPT.read_text(encoding="utf-8").lower()
+    for token in _FORBIDDEN_STATIC_TOKENS:
+        assert token not in source, f"validator ops must not reference {token!r}"
+
+
+def test_static_scan_includes_validator_ops_file() -> None:
+    text = STATIC_SCAN_FILE.read_text(encoding="utf-8")
+    assert "validate_kr_end_to_end_preflight_plan.py" in text
+
+
+def test_validator_allowlist_matches_preflight_allowlist() -> None:
+    assert _VALIDATOR_FOLLOWUP_COMMAND_ALLOWLIST == _FOLLOWUP_COMMAND_ALLOWLIST
+
+
+def test_validator_no_env_api_key_read_in_ops_source() -> None:
+    source = VALIDATOR_SCRIPT.read_text(encoding="utf-8").lower()
+    assert "os.environ" not in source
+    assert "getenv" not in source
+
+
+def test_validator_no_subprocess_os_system_exec_eval_in_ops_source() -> None:
+    source = VALIDATOR_SCRIPT.read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "subprocess" not in lowered
+    assert "os.system" not in lowered
+    assert " exec(" not in lowered
+    assert " eval(" not in lowered
+
+
+def test_load_structured_preflight_plan_returns_object(tmp_path: Path) -> None:
+    plan_path = _valid_structured_plan_path(tmp_path)
+    loaded = load_structured_preflight_plan(plan_path)
+    assert loaded["mode"] == "kr-end-to-end-intake-followup-plan"

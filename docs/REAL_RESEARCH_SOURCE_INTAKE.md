@@ -1804,9 +1804,29 @@ Add optional structured follow-up plan JSON parallel to the existing Markdown pl
 
 Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
 
-**Next deferred step — 3H4+ (unimplemented)**
+### 3H4 — structured follow-up plan validator
 
-**3H4+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
+**Status:** implemented
+
+**Purpose:**
+Independent read-only validator for the 3H3 structured follow-up plan JSON artifact — schema lock, positive command allowlist drift guard, review-only flags, and handoff/audit safety only.
+
+**Behavior (read-only; no execution):**
+
+| Area | Behavior |
+|---|---|
+| **CLI** | `ops/validate_kr_end_to_end_preflight_plan.py --structured-plan PATH [--json]` |
+| **Validation** | `version=1`, `mode=kr-end-to-end-intake-followup-plan`, `generated_by`, `review_only=true`, non-empty `steps[]`, canonical step-id subset/order, per-step allowlist + `script`/`command` consistency |
+| **Safety** | Rejects endpoint URLs, env/API key references, trading/order/allocation fields, config-promotion commands, invented 3H0/3H1 commands |
+| **Execution** | Does **not** execute plan commands, live fetches, smokes, or config mutation |
+
+Optional but recommended before operator handoff or downstream tooling ingestion.
+
+Synthetic proof: `uv run pytest tests/test_kr_end_to_end_preflight.py -v`.
+
+**Next deferred step — 3H5+ (unimplemented)**
+
+**3H5+** — end-to-end hardening (calibration, drift checks, richer provenance) remains deferred. Broker/PaperLoop/KIS integration remains out of scope for Real Research Source Intake.
 
 Detail cross-reference: [`docs/RUNBOOK.md`](RUNBOOK.md) § 3H1 preflight note.
 

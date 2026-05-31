@@ -86,7 +86,8 @@
 - ~~Real Intake **3H1** — operator-local end-to-end manifest/preflight helper~~ Done: `ops/preflight_kr_end_to_end_intake.py` + synthetic manifest fixture + tests; validates existing artifact paths + provider mapping coverage; optional review-only follow-up command plan; no live fetch/smoke/8B/8C/Scout execution; no config mutation; no network/env.
 - ~~Real Intake **3H2** — end-to-end preflight hardening cleanup~~ Done: atomic summary/plan writes; write-error sanitization; positive allowlist validation for follow-up command plan; no workflow semantics change; no network/env.
 - ~~Real Intake **3H3** — structured follow-up plan JSON artifact~~ Done: optional `[outputs].structured_plan_out` / `--structured-plan-out`; single internal `FollowupStep` representation for Markdown + JSON; review-only; no command execution; no network/env.
-- Real Intake **3H4+** — end-to-end hardening (richer provenance, drift checks, orchestration ergonomics) — Deferred. Broker/PaperLoop/KIS remains out of scope for Real Research Source Intake.
+- ~~Real Intake **3H4** — structured follow-up plan validator~~ Done: `ops/validate_kr_end_to_end_preflight_plan.py`; read-only schema/allowlist/review-only audit for 3H3 JSON; drift guard vs preflight allowlist; no command execution; no network/env.
+- Real Intake **3H5+** — end-to-end hardening (richer provenance, drift checks, orchestration ergonomics) — Deferred. Broker/PaperLoop/KIS remains out of scope for Real Research Source Intake.
 - Real Intake **3G4+** — calibration / provenance / drift checks / explainability hardening — Deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.
