@@ -67,7 +67,8 @@
 - ~~Real Intake **3G1** — fixture-first sector-tagged KR candidate pool~~ Done: `kr_candidate_pool.py`, `ops/select_kr_candidates.py`, synthetic sector pool fixture + tests; deterministic sector/priority selection; export to 3F1 candidate TOML with pool metadata stripped.
 - ~~Real Intake **3G2** — operator-local real sector pool workflow~~ Done: `ops/build_kr_real_sector_pool_mapping.py` chains 3G1 export → 3F1 generate → provider mapping validation; workflow tests use synthetic pool + corp-code fixtures only.
 - ~~Real Intake **3G3-0** — live discovery/ranking guardrails~~ Done (docs-only): G1–G6 boundary checkpoint in `docs/REAL_RESEARCH_SOURCE_INTAKE.md`; approved expansion path and phase split documented; no code/tests.
-- Real Intake **3G3-1+** — fixture-first ranking model, operator-local real ranking input, live discovery source adapter, first live discovery smoke — deferred.
+- ~~Real Intake **3G3-1** — fixture-first KR candidate ranking model~~ Done: `kr_candidate_ranker.py`, `ops/rank_kr_candidates.py`, synthetic ranking signal fixture + tests; deterministic weighted score with explainable components; ranked JSON is reviewable metadata only.
+- Real Intake **3G3-2+** — operator-local real ranking input, live discovery source adapter, first live discovery smoke — deferred.
 - Real Intake **3G4+** — factor scoring / ranking hardening (scoring versioning, explainability, regression fixtures, operator approval path) — deferred.
 - Real Intake **3E5+** — provider auto-refresh, automatic universe expansion — deferred.
 - Date.md must remain a read-only reference for LLM prompts; Date-ID validation failures must reject the corresponding LLM output.

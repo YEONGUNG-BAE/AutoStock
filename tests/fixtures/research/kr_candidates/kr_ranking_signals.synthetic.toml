@@ -1,0 +1,36 @@
+# Synthetic fixture ranking signals for 3G3-1 KR candidate ranking tests.
+version = 1
+name = "kr-ranking-signals-synthetic-v1"
+description = "Synthetic fixture ranking signals for KR candidate ranking tests."
+as_of = "2026-05-30T00:00:00+09:00"
+score_version = "kr-ranking-fixture-v1"
+
+[[signals]]
+symbol = "900001"
+market = "KR"
+liquidity_score = 0.95
+market_cap_score = 0.90
+quality_score = 0.80
+momentum_score = 0.70
+risk_penalty = 0.10
+notes = "Synthetic fixture only."
+
+[[signals]]
+symbol = "900002"
+market = "KR"
+liquidity_score = 0.80
+market_cap_score = 0.70
+quality_score = 0.90
+momentum_score = 0.60
+risk_penalty = 0.05
+notes = "Synthetic fixture only."
+
+[[signals]]
+symbol = "900003"
+market = "KR"
+liquidity_score = 0.70
+market_cap_score = 0.75
+quality_score = 0.65
+momentum_score = 0.85
+risk_penalty = 0.20
+notes = "Synthetic fixture only."

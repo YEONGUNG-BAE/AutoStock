@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `1502 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `1530 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1502 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`1530 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -601,11 +601,45 @@ The **current approved real expansion path** remains operator-local only:
 
 **Do not:**
 
-- run live discovery/ranking commands — they **do not exist yet**
+- run live **discovery** commands — they **do not exist yet** (fixture ranking via `ops/rank_kr_candidates.py` is advisory metadata only)
 - proceed directly from ranking/discovery output to trading or portfolio execution
 - mutate checked-in `config/universe*.toml` or `config/provider_mappings*.toml` from discovery output
 
 Future ranking output is **advisory metadata only** (see [3G3-0 guardrails](REAL_RESEARCH_SOURCE_INTAKE.md#3g3-0-live-discoveryranking-guardrails-design-only) in Real Research Source Intake design doc).
+
+**3G3-1 fixture-first candidate ranking (local files only; not trading instruction):**
+
+Ranked JSON is reviewable metadata only. Do **not** treat scores as buy/sell/hold signals or allocation guidance.
+
+```bash
+PYTHONPATH=src uv run python ops/rank_kr_candidates.py \
+  --candidate-pool tests/fixtures/research/kr_candidates/kr_sector_candidate_pool.synthetic.toml \
+  --ranking-signals tests/fixtures/research/kr_candidates/kr_ranking_signals.synthetic.toml \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 5 \
+  --max-per-sector 3 \
+  --ranked-out /tmp/kr_candidates.ranked.json \
+  --selected-candidates-out /tmp/kr_candidates.ranked.selected.toml \
+  --top-n 3 \
+  --selection-name kr-ranked-selected-v1 \
+  --selection-description "Ranked synthetic KR candidates." \
+  --force \
+  --json
+
+# Approved path: ranked artifact → selected candidate TOML → 3F1 → validation → 3E2/3E3/3E4 → operator review
+PYTHONPATH=src uv run python ops/generate_kr_provider_mapping.py \
+  --candidates /tmp/kr_candidates.ranked.selected.toml \
+  --corp-code-xml tests/fixtures/research/dart/corp_code_synthetic_multi.xml \
+  --universe-out /tmp/universe.kr-ranked.generated.toml \
+  --provider-mapping-out /tmp/provider_mappings.kr-ranked.generated.toml \
+  --universe-name kr-ranked-generated-v1 \
+  --provider-mapping-name kr-ranked-provider-mappings-v1 \
+  --force \
+  --json
+```
+
+Live discovery and live factor scoring remain **deferred** (3G3-2+). Synthetic proof: `uv run pytest tests/test_kr_candidate_ranker.py -v`.
 
 ```bash
 DAY=2026-05-30
@@ -840,7 +874,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1502 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `1530 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

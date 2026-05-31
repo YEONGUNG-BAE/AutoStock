@@ -1,6 +1,6 @@
 # Real Research Source Intake v1 — Design
 
-> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3+** live sector discovery / ranking / factor scoring **deferred**  
+> **Status:** 1A replay **implemented**; 1B FRED live-smoke **implemented** (urllib isolated in `fred_http_client.py`); 2A generic PRICE replay **implemented**; 2B yfinance PRICE live-smoke **implemented** (yfinance lazy-imported only in `price_live_client.py`); 3A DART `DISCLOSURE` replay/fixture **implemented**; 3A.1 Scout packet context for symbol-matched DART `DISCLOSURE` (`market=None`) **implemented**; combined FRED+PRICE+DART runtime smoke **verified** (8B/8C with symbol coverage + 8D Scout context) — **3B0–3B2** DART live-smoke **implemented**; **3C1** corp-code resolver fixture-first **implemented** (`dart_corp_code_resolver.py`); **3C2** live corp-code master fetch **implemented** (`dart_corp_code_http_client.py` + immutable ZIP snapshot); **3D1** provider mapping registry fixture-first **implemented** (`provider_mapping_registry.py`); **3E1** static KR real-company sample universe + provider mapping **implemented**; **3E2** KR real sample live PRICE smoke **implemented** (`ops/run_kr_real_price_smoke.py`); **3E3** KR real sample live DART disclosure smoke **implemented** (`ops/run_kr_real_dart_smoke.py`); **3E4** combined FRED+PRICE+DART context with Date.md/Scout budget caps **implemented**; **3F1** fixture-first KR universe/provider mapping generator **implemented** (`ops/generate_kr_provider_mapping.py`); **3F2** generator-based KR expansion workflow **implemented** (synthetic scale proof + operator-local real expansion path); **3G1** fixture-first sector-tagged KR candidate pool **implemented** (`ops/select_kr_candidates.py`); **3G2** operator-local real sector pool workflow **implemented** (`ops/build_kr_real_sector_pool_mapping.py`); **3G3-0** live discovery/ranking guardrails **documented** (design-only); **3G3-1** fixture-first ranking model **implemented** (`ops/rank_kr_candidates.py`); **3G3-2+** live discovery / live factor scoring **deferred**  
 > **Scope:** real external research data → existing Foundation **8B** intake path  
 > **Not in scope:** Scout/Allocator/Analysis LLM agents, trading, broker, KIS, write mode
 
@@ -894,6 +894,65 @@ live/fixture source
 | **3G4+** | Factor scoring / ranking hardening — scoring versioning; source timestamps; explainability fields; regression fixtures; operator approval path |
 
 Do **not** implement these phases until a separate intake task explicitly requests them.
+
+---
+
+## 3G3-1 Fixture-first KR candidate ranking model (3G3-1)
+
+> **3G3-1 (implemented):** local sector pool + fixture ranking signals → reviewable ranked JSON (+ optional clean 3F1 candidate export). Ranking output is **metadata only** — not trading instruction, allocation, or investment recommendation. Live discovery and live factor scoring remain **deferred**.
+
+| Phase | Scope | Network |
+|---|---|---|
+| **3G3-1** | `kr_candidate_ranker.py` + `ops/rank_kr_candidates.py` + synthetic ranking signal fixture | None |
+| **Next** | **3G3-2+** operator-local real ranking input, live discovery adapter, live discovery smoke | Deferred |
+
+**Score version:** `kr-ranking-fixture-v1`  
+**Precision:** 4 decimal places for contributions and final clamped score.
+
+**Weighted formula:**
+
+```text
+raw_score =
+  0.35 * liquidity_score
++ 0.25 * market_cap_score
++ 0.20 * quality_score
++ 0.20 * momentum_score
+- 0.20 * risk_penalty
+```
+
+Then clamp to `[0.0, 1.0]`. Tie-break: score DESC → sector ASC → priority ASC (missing last) → symbol ASC.
+
+**3G3-1 ops helper (local files only):**
+
+```bash
+PYTHONPATH=src uv run python ops/rank_kr_candidates.py \
+  --candidate-pool tests/fixtures/research/kr_candidates/kr_sector_candidate_pool.synthetic.toml \
+  --ranking-signals tests/fixtures/research/kr_candidates/kr_ranking_signals.synthetic.toml \
+  --sector semiconductors \
+  --sector internet \
+  --max-total 5 \
+  --max-per-sector 3 \
+  --ranked-out /tmp/kr_candidates.ranked.json \
+  --selected-candidates-out /tmp/kr_candidates.ranked.selected.toml \
+  --top-n 3 \
+  --selection-name kr-ranked-selected-v1 \
+  --selection-description "Ranked synthetic KR candidates." \
+  --force \
+  --json
+```
+
+**Approved downstream path (ranking is advisory only):**
+
+```text
+ranked JSON artifact
+→ optional selected candidate TOML (no ranking metadata)
+→ 3F1 generator
+→ provider mapping validation
+→ 3E2/3E3/3E4
+→ operator review
+```
+
+Ranked JSON must not contain trading/action/allocation/order fields. Missing ranking signal for a selected candidate fails at `stage="rank"`.
 
 ---
 
