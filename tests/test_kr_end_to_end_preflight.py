@@ -105,7 +105,9 @@ from verify_kr_end_to_end_handoff_manifest import (
     KrEndToEndHandoffManifestVerifyError,
     _build_verification_report,
     _validate_artifact_entry_schema,
+    _validate_artifact_roles,
     _validate_manifest_schema,
+    _validate_verification_report_payload,
     _verify_handoff_manifest_with_entries,
     _write_verification_report_output,
     load_handoff_manifest,
@@ -5388,4 +5390,451 @@ def test_handoff_verifier_report_out_parent_created_only_for_contained_write(tmp
     )
     assert report_out.parent.is_dir()
     assert report_out.is_file()
+
+
+# --- 3H13: verification report schema self-validation ---
+
+
+def _built_valid_verification_report(tmp_path: Path) -> dict[str, object]:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    summary, roles, resolved_base = _verify_handoff_manifest_with_entries(manifest_path)
+    report = _build_verification_report(summary, roles, resolved_base=resolved_base)
+    _validate_verification_report_payload(report)
+    return report
+
+
+def test_handoff_verifier_report_self_validator_accepts_generated_report(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    assert report["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert report["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+
+
+def test_handoff_verifier_report_self_validator_rejects_unknown_top_level_key(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["unexpected"] = True
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report contains unknown fields",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_missing_required_key(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    del report["schema_verified"]
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report missing required fields",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_wrong_mode(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["mode"] = "wrong-mode"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report has invalid mode",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_wrong_status(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["status"] = "error"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="invalid status",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_wrong_stage(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["stage"] = "validate"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="invalid stage",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_wrong_generated_by(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["generated_by"] = "ops/other.py"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="invalid generated_by",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_blank_manifest(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["manifest"] = "   "
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="manifest is required",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_invalid_base_dir_type(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["base_dir"] = 123
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="base_dir must be string or null",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_containment_false_when_base_dir_null(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["path_containment_verified"] = True
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="path_containment_verified must be false when base_dir is null",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_containment_false_when_base_dir_set(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    summary, roles, resolved_base = _verify_handoff_manifest_with_entries(manifest_path, base_dir=tmp_path)
+    report = _build_verification_report(summary, roles, resolved_base=resolved_base)
+    report["path_containment_verified"] = False
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="path_containment_verified must be true when base_dir is set",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_artifacts_count_zero(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifacts_count"] = 0
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="artifacts_count must be a positive integer",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_verified_artifacts_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["verified_artifacts_count"] = 3
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report counts are inconsistent",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_hashes_verified_false(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["hashes_verified"] = False
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="hashes_verified must be true",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_metadata_verified_false(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["metadata_verified"] = False
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="metadata_verified must be true",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_schema_verified_false(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["schema_verified"] = False
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="schema_verified must be true",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_commands_execute_true(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["commands_execute_in_verifier"] = True
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="commands_execute_in_verifier must be false",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_review_only_false(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["review_only"] = False
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="review_only must be true",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_artifact_roles_empty(tmp_path: Path) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifact_roles"] = []
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report has invalid artifact roles",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_artifact_roles_unknown_role(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifact_roles"] = ["preflight_summary", "unknown_role"]
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="artifact role not recognized",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_artifact_roles_duplicate_role(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifact_roles"] = ["preflight_summary", "preflight_summary"]
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="artifact role duplicated",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_self_validator_rejects_artifact_roles_out_of_canonical_order(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifact_roles"] = ["plan_md", "preflight_summary"]
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="artifact roles out of canonical order",
+    ) as exc:
+        _validate_verification_report_payload(report)
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_artifact_roles_validation_reuses_validate_artifact_roles(
+    tmp_path: Path,
+) -> None:
+    report = _built_valid_verification_report(tmp_path)
+    report["artifact_roles"] = ["validation_report", "structured_plan"]
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as direct_exc:
+        _validate_artifact_roles(report["artifact_roles"])  # type: ignore[arg-type]
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as report_exc:
+        _validate_verification_report_payload(report)
+    assert direct_exc.value.message == report_exc.value.message
+    assert direct_exc.value.stage == report_exc.value.stage == "validate"
+
+
+def test_handoff_verifier_invalid_generated_report_fails_validate_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    original_build = _build_verification_report
+
+    def _bad_build(*args: object, **kwargs: object) -> dict[str, object]:
+        report = original_build(*args, **kwargs)  # type: ignore[arg-type]
+        report["unexpected_field"] = True
+        return report
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_build_verification_report", _bad_build)
+    write_called: list[bool] = []
+    original_write = _write_verification_report_output
+
+    def _track_write(*args: object, **kwargs: object) -> None:
+        write_called.append(True)
+        return original_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(verify_module, "_write_verification_report_output", _track_write)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report contains unknown fields",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert write_called == []
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_invalid_generated_report_with_existing_report_out_fails_validate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"preexisting": true}\n', encoding="utf-8")
+    original_build = _build_verification_report
+
+    def _bad_build(*args: object, **kwargs: object) -> dict[str, object]:
+        report = original_build(*args, **kwargs)  # type: ignore[arg-type]
+        report["mode"] = "wrong-mode"
+        return report
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_build_verification_report", _bad_build)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification report has invalid mode",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            verification_report_out=report_out,
+        )
+    assert exc.value.stage == "validate"
+    assert json.loads(report_out.read_text(encoding="utf-8"))["preexisting"] is True
+
+
+def test_handoff_verifier_invalid_generated_report_does_not_create_report_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "nested" / "handoff_manifest_verification_report.json"
+    original_build = _build_verification_report
+
+    def _bad_build(*args: object, **kwargs: object) -> dict[str, object]:
+        report = original_build(*args, **kwargs)  # type: ignore[arg-type]
+        report["status"] = "error"
+        return report
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_build_verification_report", _bad_build)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError):
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_invalid_generated_report_does_not_create_parent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "nested" / "handoff_manifest_verification_report.json"
+    original_build = _build_verification_report
+
+    def _bad_build(*args: object, **kwargs: object) -> dict[str, object]:
+        report = original_build(*args, **kwargs)  # type: ignore[arg-type]
+        report["review_only"] = False
+        return report
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_build_verification_report", _bad_build)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError):
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert not report_out.parent.exists()
+
+
+def test_handoff_verifier_valid_report_out_existing_without_force_still_write_stage(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "write"
+
+
+def test_handoff_verifier_report_self_validation_runs_before_exists_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _valid_handoff_manifest_path(tmp_path)
+    report_out = tmp_path / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"preexisting": true}\n', encoding="utf-8")
+    call_order: list[str] = []
+    original_validate = _validate_verification_report_payload
+    original_write = _write_verification_report_output
+
+    def _track_validate(report: dict[str, object]) -> None:
+        call_order.append("validate")
+        return original_validate(report)
+
+    def _track_write(*args: object, **kwargs: object) -> None:
+        call_order.append("write")
+        return original_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_validate_verification_report_payload", _track_validate)
+    monkeypatch.setattr(verify_module, "_write_verification_report_output", _track_write)
+    run_verify_kr_end_to_end_handoff_manifest(
+        manifest_path,
+        verification_report_out=report_out,
+        force=True,
+    )
+    assert call_order == ["validate", "write"]
 

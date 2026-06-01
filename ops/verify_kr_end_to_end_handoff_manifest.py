@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10/3H11/3H12).
+"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10/3H11/3H12/3H13).
 
 3H7 handoff manifest JSON → schema/integrity/metadata 재검증만 수행.
 3H9: top-level·artifact entry exact-key schema lock(unknown key 거부).
 3H10: optional --base-dir path containment(해석된 canonical path만 비교).
 3H11: optional --verification-report-out compact audit report(검증 성공 후에만 기록).
 3H12: base_dir 사용 시 verification report 출력 경로도 base_dir 내부여야 함.
+3H13: verification report payload in-memory schema self-validation(기록 전 exact-key·값 검증).
 artifact/manifest mutation·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -72,6 +73,27 @@ _ARTIFACT_ENTRY_KEYS = frozenset(
     }
 )
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+_VERIFICATION_REPORT_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status",
+        "stage",
+        "generated_by",
+        "manifest",
+        "base_dir",
+        "path_containment_verified",
+        "artifacts_count",
+        "verified_artifacts_count",
+        "hashes_verified",
+        "metadata_verified",
+        "schema_verified",
+        "commands_execute_in_verifier",
+        "review_only",
+        "artifact_roles",
+    }
+)
 
 
 class KrEndToEndHandoffManifestVerifyError(ValueError):
@@ -434,6 +456,117 @@ def _build_success_payload(
     return payload
 
 
+def _validate_verification_report_payload(report: dict[str, object]) -> None:
+    """verification report JSON payload를 exact-key schema로 in-memory 검증한다."""
+    unknown = set(report.keys()) - _VERIFICATION_REPORT_KEYS
+    if unknown:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report contains unknown fields",
+        )
+
+    missing = _VERIFICATION_REPORT_KEYS - set(report.keys())
+    if missing:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report missing required fields",
+        )
+
+    if report.get("version") != 1:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid version")
+
+    if report.get("mode") != _REPORT_MODE:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid mode")
+
+    if report.get("status") != "ok":
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid status")
+
+    if report.get("stage") != "complete":
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid stage")
+
+    if report.get("generated_by") != _REPORT_GENERATED_BY:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report has invalid generated_by",
+        )
+
+    manifest = report.get("manifest")
+    if not isinstance(manifest, str) or not manifest.strip():
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report manifest is required")
+
+    base_dir = report.get("base_dir")
+    if base_dir is not None and (not isinstance(base_dir, str) or not base_dir.strip()):
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report base_dir must be string or null")
+
+    path_containment_verified = report.get("path_containment_verified")
+    if not isinstance(path_containment_verified, bool):
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report path_containment_verified must be boolean",
+        )
+    if base_dir is None:
+        if path_containment_verified is not False:
+            raise KrEndToEndHandoffManifestVerifyError(
+                "validate",
+                "verification report path_containment_verified must be false when base_dir is null",
+            )
+    elif path_containment_verified is not True:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report path_containment_verified must be true when base_dir is set",
+        )
+
+    artifacts_count = report.get("artifacts_count")
+    if not isinstance(artifacts_count, int) or isinstance(artifacts_count, bool) or artifacts_count <= 0:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report artifacts_count must be a positive integer",
+        )
+
+    verified_artifacts_count = report.get("verified_artifacts_count")
+    if (
+        not isinstance(verified_artifacts_count, int)
+        or isinstance(verified_artifacts_count, bool)
+        or verified_artifacts_count <= 0
+    ):
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report verified_artifacts_count must be a positive integer",
+        )
+
+    if verified_artifacts_count != artifacts_count:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report counts are inconsistent",
+        )
+
+    if report.get("hashes_verified") is not True:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report hashes_verified must be true")
+
+    if report.get("metadata_verified") is not True:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report metadata_verified must be true")
+
+    if report.get("schema_verified") is not True:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report schema_verified must be true")
+
+    if report.get("commands_execute_in_verifier") is not False:
+        raise KrEndToEndHandoffManifestVerifyError(
+            "validate",
+            "verification report commands_execute_in_verifier must be false",
+        )
+
+    if report.get("review_only") is not True:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report review_only must be true")
+
+    artifact_roles = report.get("artifact_roles")
+    if not isinstance(artifact_roles, list) or not artifact_roles:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid artifact roles")
+    if not all(isinstance(role, str) for role in artifact_roles):
+        raise KrEndToEndHandoffManifestVerifyError("validate", "verification report has invalid artifact roles")
+
+    _validate_artifact_roles(artifact_roles)
+
+
 def _build_verification_report(
     summary: dict[str, object],
     artifact_roles: list[str],
@@ -508,6 +641,7 @@ def run_verify_kr_end_to_end_handoff_manifest(
         )
 
     report = _build_verification_report(summary, artifact_roles, resolved_base=resolved_base)
+    _validate_verification_report_payload(report)
     _write_verification_report_output(report_path, report, force=force)
 
     result = dict(summary)

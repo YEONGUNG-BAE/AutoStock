@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2396 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2425 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2396 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2425 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -957,11 +957,11 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
   --json
 ```
 
-Read-only — recomputes artifact size/sha256 and verifies recorded JSON metadata; exact-key schema lock rejects unknown manifest/entry keys (3H9); optional `--base-dir` path containment (3H10); optional `--verification-report-out` compact audit report after successful verification (3H11); with `--base-dir`, report output must also resolve inside that base (3H12); default path writes no files; does not execute commands.
+Read-only — recomputes artifact size/sha256 and verifies recorded JSON metadata; exact-key schema lock rejects unknown manifest/entry keys (3H9); optional `--base-dir` path containment (3H10); optional `--verification-report-out` compact audit report after successful verification (3H11); with `--base-dir`, report output must also resolve inside that base (3H12); report payload is schema-validated in memory before atomic write (3H13); default path writes no files; does not execute commands.
 
 When validating a handoff bundle in a known directory, pass `--base-dir /tmp/...` so the manifest and every referenced artifact path must resolve within that base (recommended). When also writing a verification report, point `--verification-report-out` inside the same `--base-dir` bundle directory.
 
-Optional verification report (written only after successful verification; excludes artifact/manifest bodies):
+Optional verification report (written only after successful verification and in-memory schema self-validation; excludes artifact/manifest bodies):
 
 ```bash
 PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
@@ -995,7 +995,7 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
 - PRICE, DART, and combined context smokes remain **separate explicit operator commands** — no automatic chaining in 3H0.
 - Ranking/factor scores are **advisory metadata only** — not buy/sell/hold signals or allocation guidance.
 
-**Deferred next step:** **3H13+** end-to-end hardening (unimplemented).
+**Deferred next step:** **3H14+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1236,7 +1236,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2396 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2425 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
