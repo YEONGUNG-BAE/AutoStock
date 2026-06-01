@@ -5004,3 +5004,388 @@ def test_handoff_verifier_with_base_dir_and_report_adds_all_success_keys(tmp_pat
     payload = json.loads(proc.stdout)
     assert set(payload.keys()) == _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT_AND_REPORT
 
+
+# --- 3H12: verification report output path containment ---
+
+
+def test_handoff_verifier_report_out_without_base_dir_writes_outside_base(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    result = run_verify_kr_end_to_end_handoff_manifest(
+        manifest_path,
+        verification_report_out=report_out,
+        force=True,
+    )
+    assert result["verification_report_written"] is True
+    assert report_out.is_file()
+
+
+def test_handoff_verifier_report_out_inside_base_dir_with_base_dir_passes(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = bundle_dir / "nested" / "handoff_manifest_verification_report.json"
+    result = run_verify_kr_end_to_end_handoff_manifest(
+        manifest_path,
+        base_dir=bundle_dir,
+        verification_report_out=report_out,
+        force=True,
+    )
+    assert result["verification_report_written"] is True
+    assert report_out.is_file()
+
+
+def test_handoff_verifier_report_out_outside_base_dir_fails_validate(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=bundle_dir,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_out_outside_base_dir_does_not_create_report(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_report_out_outside_base_dir_does_not_create_parent_dirs(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    report_out = outside_dir / "nested" / "handoff_manifest_verification_report.json"
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    assert not outside_dir.exists()
+    assert not report_out.parent.exists()
+
+
+def test_handoff_verifier_report_out_containment_checked_after_manifest_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    build_called: list[bool] = []
+
+    original_build = _build_verification_report
+
+    def _track_build(*args: object, **kwargs: object) -> dict[str, object]:
+        build_called.append(True)
+        return original_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    import verify_kr_end_to_end_handoff_manifest as verify_module
+
+    monkeypatch.setattr(verify_module, "_build_verification_report", _track_build)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ):
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=bundle_dir,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert build_called == []
+
+
+def test_handoff_verifier_invalid_manifest_with_report_outside_base_fails_parse_not_validate(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    path = bundle_dir / "handoff_manifest.json"
+    path.write_text("{not-json", encoding="utf-8")
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "parse"
+    assert not report_out.exists()
+
+
+def test_handoff_verifier_report_out_containment_failure_message(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "validate"
+    assert error["message"] == "verification_report_out path escapes base directory"
+
+
+def test_handoff_verifier_report_out_containment_failure_does_not_echo_report_path(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert str(report_out.resolve()) not in proc.stdout
+    assert str(bundle_dir.resolve()) not in proc.stdout
+    assert str(report_out.resolve()) not in error["message"]
+
+
+def test_handoff_verifier_existing_report_out_outside_base_not_write_stage(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = outside_dir / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"preexisting": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "validate"
+    assert error["message"] == "verification_report_out path escapes base directory"
+    assert json.loads(report_out.read_text(encoding="utf-8"))["preexisting"] is True
+
+
+def test_handoff_verifier_existing_report_out_inside_base_without_force_write_stage(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = bundle_dir / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "write"
+    assert error["message"] == "output already exists: verification_report_out"
+
+
+def test_handoff_verifier_report_out_inside_base_with_force_overwrites(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = bundle_dir / "handoff_manifest_verification_report.json"
+    report_out.write_text('{"old": true}\n', encoding="utf-8")
+    proc = _run_verify_cli(
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        "--verification-report-out",
+        str(report_out),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0
+    written = json.loads(report_out.read_text(encoding="utf-8"))
+    assert written["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert "old" not in written
+
+
+def test_handoff_verifier_report_out_sibling_prefix_outside_base_rejected(tmp_path: Path) -> None:
+    base_dir = tmp_path / "h"
+    base_dir.mkdir()
+    sibling_dir = tmp_path / "handoff_evil"
+    sibling_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(base_dir)
+    report_out = sibling_dir / "handoff_manifest_verification_report.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=base_dir,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+@pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="platform lacks Path.symlink_to")
+def test_handoff_verifier_symlink_report_out_resolved_outside_base_rejected(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_report = outside_dir / "handoff_manifest_verification_report.json"
+    link_path = bundle_dir / "report_link.json"
+    try:
+        link_path.symlink_to(outside_report)
+    except OSError as exc:
+        pytest.skip(f"symlink creation not permitted: {exc}")
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=bundle_dir,
+            verification_report_out=link_path,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_verifier_report_out_containment_uses_resolved_paths_not_string_prefix(
+    tmp_path: Path,
+) -> None:
+    base_dir = tmp_path / "h"
+    base_dir.mkdir()
+    sibling_dir = tmp_path / "handoff_evil"
+    sibling_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(base_dir)
+    report_out = sibling_dir / "handoff_manifest_verification_report.json"
+    assert str(report_out).startswith(str(tmp_path / "handoff"))
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ):
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=base_dir,
+            verification_report_out=report_out,
+            force=True,
+        )
+
+
+def test_handoff_verifier_report_out_parent_not_created_before_containment_succeeds(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    nested_report = outside_dir / "nested" / "handoff_manifest_verification_report.json"
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    mkdir_calls: list[Path] = []
+    original_mkdir = Path.mkdir
+
+    def _track_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        mkdir_calls.append(self)
+        return original_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "mkdir", _track_mkdir):
+        with pytest.raises(
+            KrEndToEndHandoffManifestVerifyError,
+            match="verification_report_out path escapes base directory",
+        ):
+            run_verify_kr_end_to_end_handoff_manifest(
+                manifest_path,
+                base_dir=bundle_dir,
+                verification_report_out=nested_report,
+                force=True,
+            )
+    assert mkdir_calls == []
+
+
+def test_handoff_verifier_report_out_parent_created_only_for_contained_write(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest_path = _valid_handoff_manifest_path(bundle_dir)
+    report_out = bundle_dir / "nested" / "handoff_manifest_verification_report.json"
+    assert not report_out.parent.exists()
+    run_verify_kr_end_to_end_handoff_manifest(
+        manifest_path,
+        base_dir=bundle_dir,
+        verification_report_out=report_out,
+        force=True,
+    )
+    assert report_out.parent.is_dir()
+    assert report_out.is_file()
+

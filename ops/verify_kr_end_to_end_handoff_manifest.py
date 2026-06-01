@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10/3H11).
+"""KR end-to-end operator handoff manifest verifier (3H8/3H9/3H10/3H11/3H12).
 
 3H7 handoff manifest JSON → schema/integrity/metadata 재검증만 수행.
 3H9: top-level·artifact entry exact-key schema lock(unknown key 거부).
 3H10: optional --base-dir path containment(해석된 canonical path만 비교).
 3H11: optional --verification-report-out compact audit report(검증 성공 후에만 기록).
+3H12: base_dir 사용 시 verification report 출력 경로도 base_dir 내부여야 함.
 artifact/manifest mutation·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -499,6 +500,13 @@ def run_verify_kr_end_to_end_handoff_manifest(
         return summary
 
     report_path = verification_report_out.resolve()
+    if resolved_base is not None:
+        _assert_path_within_base(
+            report_path,
+            resolved_base,
+            field_name="verification_report_out",
+        )
+
     report = _build_verification_report(summary, artifact_roles, resolved_base=resolved_base)
     _write_verification_report_output(report_path, report, force=force)
 
