@@ -100,6 +100,7 @@ from build_kr_end_to_end_handoff_manifest import (
     _write_manifest_output,
     build_handoff_manifest,
     build_kr_end_to_end_handoff_manifest,
+    main as build_handoff_manifest_main,
 )
 from verify_kr_end_to_end_handoff_manifest import (
     KrEndToEndHandoffManifestVerifyError,
@@ -3706,6 +3707,721 @@ def test_handoff_manifest_builder_replace_failure_preserves_existing_manifest(
         )
     assert exc.value.stage == "write"
     assert manifest_out.read_text(encoding="utf-8") == original
+
+
+# --- 3H15: handoff manifest builder optional path containment ---
+
+
+def test_handoff_manifest_builder_without_base_dir_preserves_happy_path(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest = build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    assert set(manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+    assert manifest_out.is_file()
+
+
+def test_handoff_manifest_builder_without_base_dir_manifest_key_set_unchanged(tmp_path: Path) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest = build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    assert set(manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+
+
+def test_handoff_manifest_builder_with_base_dir_manifest_key_set_unchanged(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest = build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert set(manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+
+
+def test_handoff_manifest_builder_cli_accepts_base_dir(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--base-dir",
+        str(bundle_dir),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_handoff_manifest_builder_api_accepts_base_dir(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest = build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert manifest["status"] == "ok"
+
+
+def test_handoff_manifest_builder_base_dir_omitted_preserves_3h14_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    captured: dict[str, Path | None] = {"base_dir": "unset"}  # type: ignore[assignment]
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+
+    def _capture_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        captured["base_dir"] = base_dir
+        return original_verify(path, base_dir=base_dir)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _capture_verify)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    assert captured["base_dir"] is None
+
+
+def test_handoff_manifest_builder_with_base_dir_inside_bundle_passes(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    artifacts = _all_four_artifact_paths(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest = build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=artifacts["preflight_summary"],
+        plan_md=artifacts["plan_md"],
+        structured_plan=artifacts["structured_plan"],
+        validation_report=artifacts["validation_report"],
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert manifest["artifacts_count"] == 4
+    result = verify_kr_end_to_end_handoff_manifest(manifest_out, base_dir=bundle_dir)
+    assert result["status"] == "ok"
+
+
+def test_handoff_manifest_builder_with_base_dir_calls_verifier_with_resolved_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    captured: dict[str, Path | None] = {"base_dir": "unset"}  # type: ignore[assignment]
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+
+    def _capture_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        captured["base_dir"] = base_dir
+        return original_verify(path, base_dir=base_dir)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _capture_verify)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert captured["base_dir"] == bundle_dir.resolve()
+
+
+def test_handoff_manifest_builder_cli_enforces_base_dir_for_manifest_out_outside_base(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = outside_dir / "handoff_manifest.json"
+    exit_code = build_handoff_manifest_main(
+        [
+            "--preflight-summary",
+            str(summary),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_handoff_manifest_builder_cli_enforces_base_dir_for_artifact_outside_base(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    exit_code = build_handoff_manifest_main(
+        [
+            "--preflight-summary",
+            str(outside_summary),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_handoff_manifest_builder_blank_base_dir_fails_args_stage_cli() -> None:
+    exit_code = build_handoff_manifest_main(
+        [
+            "--preflight-summary",
+            "summary.json",
+            "--manifest-out",
+            "manifest.json",
+            "--base-dir",
+            "   ",
+            "--json",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_handoff_manifest_builder_blank_base_dir_fails_args_stage_api() -> None:
+    with pytest.raises(KrEndToEndHandoffManifestError, match="base directory path is required") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=Path("manifest.json"),
+            preflight_summary=Path("summary.json"),
+            base_dir=Path("   "),
+        )
+    assert exc.value.stage == "args"
+
+
+def test_handoff_manifest_builder_missing_base_dir_fails_validate(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="base directory not found") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_base_dir_is_file_fails_validate(tmp_path: Path) -> None:
+    file_base = tmp_path / "file_base"
+    file_base.write_text("not a dir\n", encoding="utf-8")
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError, match="base directory is not a directory") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=file_base,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_manifest_outside_base_dir_fails_validate(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = outside_dir / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="manifest_out path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_manifest_outside_base_dir_does_not_create_parent(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = outside_dir / "nested" / "handoff_manifest.json"
+    with pytest.raises(KrEndToEndHandoffManifestError):
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert not manifest_out.parent.exists()
+
+
+def test_handoff_manifest_builder_manifest_outside_base_dir_skips_exists_force_check(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = outside_dir / "handoff_manifest.json"
+    manifest_out.write_text('{"existing": true}\n', encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=False,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+    assert exc.value.message == "manifest_out path escapes base directory"
+
+
+def test_handoff_manifest_builder_manifest_outside_base_with_existing_output_fails_validate_not_write(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = outside_dir / "handoff_manifest.json"
+    original = '{"preserved": true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+    assert manifest_out.read_text(encoding="utf-8") == original
+
+
+def test_handoff_manifest_builder_artifact_outside_base_dir_fails_validate(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=outside_summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_artifact_outside_base_rejected_before_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    original_read_bytes = Path.read_bytes
+
+    def _guard_read_bytes(self: Path) -> bytes:
+        if self.resolve() == outside_summary.resolve():
+            raise AssertionError("outside artifact bytes must not be read before containment check")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _guard_read_bytes)
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=outside_summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_missing_artifact_outside_base_fails_containment_not_missing(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    missing_outside = outside_dir / "missing_summary.json"
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=missing_outside,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+    assert "not found" not in exc.value.message
+
+
+def test_handoff_manifest_builder_sibling_prefix_outside_base_rejected(tmp_path: Path) -> None:
+    base_dir = tmp_path / "h"
+    base_dir.mkdir()
+    sibling_dir = tmp_path / "handoff_evil"
+    sibling_dir.mkdir()
+    sibling_summary = _valid_preflight_summary_path(sibling_dir)
+    manifest_out = base_dir / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=sibling_summary,
+            force=True,
+            base_dir=base_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+@pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="platform lacks Path.symlink_to")
+def test_handoff_manifest_builder_symlink_resolved_artifact_outside_base_rejected(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    link_dir = bundle_dir / "linked"
+    try:
+        link_dir.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation not permitted: {exc}")
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=link_dir / outside_summary.name,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+@pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="platform lacks Path.symlink_to")
+def test_handoff_manifest_builder_symlink_resolved_manifest_out_outside_base_rejected(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    outside_manifest = outside_dir / "handoff_manifest.json"
+    link_manifest = bundle_dir / "linked_manifest.json"
+    try:
+        link_manifest.symlink_to(outside_manifest)
+    except OSError as exc:
+        pytest.skip(f"symlink creation not permitted: {exc}")
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="manifest_out path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=link_manifest,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_containment_failure_messages_do_not_echo_resolved_paths(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(outside_summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--base-dir",
+        str(bundle_dir),
+        "--force",
+        "--json",
+    )
+    assert proc.returncode == 1
+    error = json.loads(proc.stdout)
+    assert error["stage"] == "validate"
+    assert str(outside_summary.resolve()) not in proc.stdout
+    assert str(bundle_dir.resolve()) not in proc.stdout
+
+
+def test_handoff_manifest_builder_output_exists_inside_base_without_force_fails_write(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest_out.write_text('{"existing": true}\n', encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestError, match="output already exists: manifest_out") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=False,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "write"
+
+
+def test_handoff_manifest_builder_valid_output_inside_base_with_force_overwrites(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest_out.write_text('{"old": true}\n', encoding="utf-8")
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    manifest = json.loads(manifest_out.read_text(encoding="utf-8"))
+    assert manifest["mode"] == "kr-end-to-end-handoff-manifest"
+    assert manifest["generated_by"] == "ops/build_kr_end_to_end_handoff_manifest.py"
+
+
+def test_handoff_manifest_builder_with_base_dir_generated_manifest_passes_verifier(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest_out = _valid_handoff_manifest_path(bundle_dir)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_out, base_dir=bundle_dir)
+    assert result["status"] == "ok"
+
+
+def test_handoff_manifest_builder_with_base_dir_validate_before_commit_still_happens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    order: list[str] = []
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+    original_replace = Path.replace
+
+    def _tracking_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        order.append("verify")
+        return original_verify(path, base_dir=base_dir)
+
+    def _tracking_replace(self: Path, target: Path) -> Path:
+        order.append("replace")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _tracking_verify)
+    monkeypatch.setattr(Path, "replace", _tracking_replace)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert order == ["verify", "replace"]
+
+
+def test_handoff_manifest_builder_with_base_dir_verifier_failure_maps_to_validate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+
+
+def test_handoff_manifest_builder_with_base_dir_verifier_failure_preserves_existing_with_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    original = '{"status":"ok","preserved":true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    assert exc.value.stage == "validate"
+    assert manifest_out.read_text(encoding="utf-8") == original
+
+
+def test_handoff_manifest_builder_with_base_dir_temp_manifest_under_manifest_out_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "nested" / "handoff_manifest.json"
+    verified_paths: list[Path] = []
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+
+    def _capture_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        verified_paths.append(path)
+        assert path.name.startswith(".tmp_handoff_manifest_")
+        assert path.parent == manifest_out.parent.resolve()
+        return original_verify(path, base_dir=base_dir)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _capture_verify)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+        base_dir=bundle_dir,
+    )
+    assert verified_paths
+
+
+def test_handoff_manifest_builder_with_base_dir_temp_cleanup_on_verifier_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError):
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+            base_dir=bundle_dir,
+        )
+    leftovers = list(bundle_dir.glob(".tmp_handoff_manifest_*"))
+    assert leftovers == []
+
+
+def test_handoff_manifest_builder_with_base_dir_success_payload_keys_unchanged(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    summary = _valid_preflight_summary_path(bundle_dir)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    proc = _run_handoff_manifest_cli(
+        "--preflight-summary",
+        str(summary),
+        "--manifest-out",
+        str(manifest_out),
+        "--base-dir",
+        str(bundle_dir),
+        "--force",
+        "--json",
+    )
+    payload = json.loads(proc.stdout)
+    assert set(payload.keys()) == {
+        "status",
+        "stage",
+        "mode",
+        "manifest_out",
+        "artifacts_count",
+        "all_artifacts_present",
+        "commands_execute_in_builder",
+        "review_only",
+    }
 
 
 # --- 3H8: operator handoff manifest integrity verifier ---

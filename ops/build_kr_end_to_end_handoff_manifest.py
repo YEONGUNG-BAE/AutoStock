@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest builder (3H7/3H14).
+"""KR end-to-end operator handoff manifest builder (3H7/3H14/3H15).
 
 기존 preflight/handoff artifact 경로·무결성 메타데이터만 색인.
 3H14: 생성 manifest는 기존 verifier로 validate-before-commit 후에만 atomic replace.
+3H15: optional --base-dir containment for supplied artifacts and manifest_out.
 artifact body embed·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -144,6 +145,43 @@ def _index_artifact(role: str, kind: str, path: Path) -> dict[str, Any]:
     }
 
 
+def _resolve_base_dir(base_dir: Path | None) -> Path | None:
+    """base_dir가 주어지면 resolve 후 존재·디렉터리 여부를 검증한다."""
+    if base_dir is None:
+        return None
+    if not str(base_dir).strip():
+        raise KrEndToEndHandoffManifestError("args", "base directory path is required")
+    resolved = base_dir.resolve()
+    if not resolved.exists():
+        raise KrEndToEndHandoffManifestError("validate", "base directory not found")
+    if not resolved.is_dir():
+        raise KrEndToEndHandoffManifestError("validate", "base directory is not a directory")
+    return resolved
+
+
+def _assert_path_within_base(path: Path, base_dir: Path, *, field_name: str) -> None:
+    """해석된 canonical path만으로 base_dir 내부 포함 여부를 검증한다."""
+    resolved_child = path.resolve()
+    resolved_base = base_dir.resolve()
+    if not resolved_child.is_relative_to(resolved_base):
+        if field_name == "manifest_out":
+            message = "manifest_out path escapes base directory"
+        else:
+            message = f"{field_name} artifact path escapes base directory"
+        raise KrEndToEndHandoffManifestError("validate", message)
+
+
+def _assert_inputs_within_base(
+    artifact_paths: dict[str, Path],
+    manifest_out: Path,
+    resolved_base: Path,
+) -> None:
+    """supplied artifact·manifest_out 경로가 base_dir 내부인지 검증한다."""
+    _assert_path_within_base(manifest_out, resolved_base, field_name="manifest_out")
+    for role, path in artifact_paths.items():
+        _assert_path_within_base(path, resolved_base, field_name=role)
+
+
 def _collect_artifact_inputs(args: argparse.Namespace) -> list[tuple[str, str, Path]]:
     """CLI에서 제공된 artifact 입력만 role 순서로 수집한다."""
     provided: list[tuple[str, str, Path]] = []
@@ -181,7 +219,13 @@ def build_handoff_manifest(artifact_paths: dict[str, Path]) -> dict[str, Any]:
     }
 
 
-def _write_manifest_output(path: Path, manifest: dict[str, Any], *, force: bool) -> None:
+def _write_manifest_output(
+    path: Path,
+    manifest: dict[str, Any],
+    *,
+    force: bool,
+    base_dir: Path | None = None,
+) -> None:
     """handoff manifest JSON을 temp write → verifier 검증 → atomic replace로 기록한다."""
     manifest_out = path.resolve()
     if manifest_out.exists() and not force:
@@ -192,7 +236,7 @@ def _write_manifest_output(path: Path, manifest: dict[str, Any], *, force: bool)
     try:
         serialized = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
         temp_path.write_text(serialized, encoding="utf-8")
-        verify_kr_end_to_end_handoff_manifest(temp_path)
+        verify_kr_end_to_end_handoff_manifest(temp_path, base_dir=base_dir)
         temp_path.replace(manifest_out)
     except KrEndToEndHandoffManifestVerifyError as exc:
         raise KrEndToEndHandoffManifestError("validate", exc.message) from None
@@ -214,8 +258,11 @@ def build_kr_end_to_end_handoff_manifest(
     structured_plan: Path | None = None,
     validation_report: Path | None = None,
     force: bool = False,
+    base_dir: Path | None = None,
 ) -> dict[str, Any]:
     """artifact를 검증·색인하고 manifest_out에 atomic write한다."""
+    resolved_base = _resolve_base_dir(base_dir)
+
     artifact_paths: dict[str, Path] = {}
     if preflight_summary is not None:
         artifact_paths["preflight_summary"] = preflight_summary
@@ -229,8 +276,11 @@ def build_kr_end_to_end_handoff_manifest(
     if not artifact_paths:
         raise KrEndToEndHandoffManifestError("args", "at least one artifact input is required")
 
+    if resolved_base is not None:
+        _assert_inputs_within_base(artifact_paths, manifest_out, resolved_base)
+
     manifest = build_handoff_manifest(artifact_paths)
-    _write_manifest_output(manifest_out, manifest, force=force)
+    _write_manifest_output(manifest_out, manifest, force=force, base_dir=resolved_base)
     return manifest
 
 
@@ -261,6 +311,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="overwrite existing manifest_out only",
+    )
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help="optional handoff bundle base directory for path containment",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON to stdout")
     return parser
@@ -296,8 +351,15 @@ def main(argv: list[str] | None = None) -> int:
             raise KrEndToEndHandoffManifestError("args", "at least one artifact input is required")
 
         artifact_paths = {role: path for role, _kind, path in artifact_inputs}
-        manifest = build_handoff_manifest(artifact_paths)
-        _write_manifest_output(manifest_out, manifest, force=bool(args.force))
+        manifest = build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=artifact_paths.get("preflight_summary"),
+            plan_md=artifact_paths.get("plan_md"),
+            structured_plan=artifact_paths.get("structured_plan"),
+            validation_report=artifact_paths.get("validation_report"),
+            force=bool(args.force),
+            base_dir=Path(args.base_dir) if args.base_dir is not None else None,
+        )
     except KrEndToEndHandoffManifestError as exc:
         error_payload = {"status": "error", "stage": exc.stage, "message": exc.message, "mode": _CLI_MODE}
         if args.json:
