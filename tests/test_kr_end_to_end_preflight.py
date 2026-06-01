@@ -122,6 +122,7 @@ from validate_kr_end_to_end_preflight_plan import (
     _load_and_validate_structured_plan,
     _write_report_output,
     load_structured_preflight_plan,
+    main as validate_plan_main,
     validate_structured_preflight_plan,
 )
 
@@ -6792,4 +6793,257 @@ def test_handoff_verifier_report_self_validation_runs_before_exists_check(
         force=True,
     )
     assert call_order == ["validate", "write"]
+
+
+# --- 3H16: end-to-end handoff bundle round-trip smoke (fixture-only, no-exec) ---
+
+
+def _path_resolves_inside_base(path: Path, base: Path) -> bool:
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _run_handoff_bundle_round_trip(bundle_dir: Path) -> dict[str, object]:
+    """checked-in synthetic manifest → bundle_dir 내 handoff 산출물 round-trip(API only, no subprocess)."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    preflight_result = run_kr_end_to_end_preflight(
+        MANIFEST_FIXTURE,
+        summary_out=summary_out,
+        plan_out=plan_out,
+        structured_plan_out=structured_plan_out,
+        emit_followup_commands=True,
+        force=True,
+    )
+    validator_exit = validate_plan_main(
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ]
+    )
+    build_result = build_kr_end_to_end_handoff_manifest(
+        manifest_out=handoff_manifest_out,
+        preflight_summary=summary_out,
+        plan_md=plan_out,
+        structured_plan=structured_plan_out,
+        validation_report=validation_report_out,
+        base_dir=bundle_dir,
+        force=True,
+    )
+    verify_result = run_verify_kr_end_to_end_handoff_manifest(
+        handoff_manifest_out,
+        base_dir=bundle_dir,
+        verification_report_out=verification_report_out,
+        force=True,
+    )
+    return {
+        "bundle_dir": bundle_dir,
+        "paths": {
+            "preflight_summary": summary_out,
+            "plan_md": plan_out,
+            "structured_plan": structured_plan_out,
+            "validation_report": validation_report_out,
+            "handoff_manifest": handoff_manifest_out,
+            "verification_report": verification_report_out,
+        },
+        "preflight_result": preflight_result,
+        "validator_exit": validator_exit,
+        "build_result": build_result,
+        "verify_result": verify_result,
+    }
+
+
+def test_end_to_end_handoff_bundle_round_trip_api_no_exec(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    preflight_result = round_trip["preflight_result"]
+    assert isinstance(preflight_result, dict)
+    assert preflight_result["status"] == "ok"
+    assert preflight_result.get("stage") == "complete"
+    assert round_trip["validator_exit"] == 0
+
+    for name, path in paths.items():
+        assert isinstance(path, Path)
+        assert path.is_file(), f"missing round-trip output: {name}"
+        assert _path_resolves_inside_base(path, bundle_dir)
+
+    structured_plan = json.loads(paths["structured_plan"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert structured_plan["mode"] == "kr-end-to-end-intake-followup-plan"
+    assert structured_plan["review_only"] is True
+    assert structured_plan["steps"]
+    for step in structured_plan["steps"]:
+        assert step["executes_in_preflight"] is False
+
+    validation_report = json.loads(paths["validation_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert validation_report["mode"] == "kr-end-to-end-preflight-plan-validation-report"
+    assert validation_report["status"] == "ok"
+    assert validation_report["stage"] == "complete"
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert set(handoff_manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+    assert handoff_manifest["mode"] == "kr-end-to-end-handoff-manifest"
+    assert handoff_manifest["status"] == "ok"
+    assert handoff_manifest["stage"] == "complete"
+    assert handoff_manifest["commands_execute_in_builder"] is False
+    assert handoff_manifest["review_only"] is True
+    assert handoff_manifest["artifacts_count"] == 4
+    assert [entry["role"] for entry in handoff_manifest["artifacts"]] == list(_ROLE_ORDER)
+
+    build_result = round_trip["build_result"]
+    assert isinstance(build_result, dict)
+    assert build_result["status"] == "ok"
+    assert build_result["stage"] == "complete"
+
+    verify_result = round_trip["verify_result"]
+    assert isinstance(verify_result, dict)
+    assert verify_result["status"] == "ok"
+    assert verify_result["stage"] == "complete"
+    assert verify_result["commands_execute_in_verifier"] is False
+    assert verify_result["review_only"] is True
+    assert verify_result["path_containment_verified"] is True
+    assert verify_result["verification_report_written"] is True
+
+    verification_report = json.loads(paths["verification_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert verification_report["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert verification_report["status"] == "ok"
+    assert verification_report["stage"] == "complete"
+    assert verification_report["schema_verified"] is True
+    assert verification_report["hashes_verified"] is True
+    assert verification_report["metadata_verified"] is True
+    assert verification_report["commands_execute_in_verifier"] is False
+    assert verification_report["review_only"] is True
+    assert verification_report["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+
+
+def test_end_to_end_handoff_bundle_round_trip_all_outputs_inside_base_dir(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    for entry in handoff_manifest["artifacts"]:
+        assert _path_resolves_inside_base(Path(entry["path"]), bundle_dir)
+        assert set(entry.keys()) == _ARTIFACT_ENTRY_KEYS
+
+
+def test_end_to_end_handoff_bundle_round_trip_outputs_are_body_free(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert "steps" not in handoff_manifest
+    assert "command" not in handoff_manifest
+    assert "followup_commands" not in handoff_manifest
+    for entry in handoff_manifest["artifacts"]:
+        assert "content" not in entry
+        assert "body" not in entry
+        assert "command" not in entry
+    manifest_dumped = json.dumps(handoff_manifest)
+    assert "PYTHONPATH=src" not in manifest_dumped
+
+    validation_report = json.loads(paths["validation_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert "steps" not in validation_report
+    assert "commands" not in validation_report
+    assert "command" not in validation_report
+    assert "artifacts" not in validation_report
+    _walk_forbidden_fields(validation_report)
+
+    verification_report = json.loads(paths["verification_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert set(verification_report.keys()) == _HANDOFF_VERIFY_REPORT_EXPECTED_KEYS
+    assert "artifacts" not in verification_report
+    assert "steps" not in verification_report
+    assert "commands" not in verification_report
+    assert "command" not in verification_report
+    verification_dumped = paths["verification_report"].read_text(encoding="utf-8")  # type: ignore[index]
+    assert "https://" not in verification_dumped
+    assert "http://" not in verification_dumped
+    assert "fred_api_key" not in verification_dumped.lower()
+    assert "dart_api_key" not in verification_dumped.lower()
+    assert "api_key" not in verification_dumped.lower()
+    _walk_forbidden_fields(verification_report)
+
+
+def test_end_to_end_handoff_bundle_round_trip_rejects_outside_handoff_report(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    outside_dir = tmp_path / "outside"
+    outside_report = outside_dir / "nested" / "handoff_manifest_verification_report.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestVerifyError,
+        match="verification_report_out path escapes base directory",
+    ) as exc:
+        run_verify_kr_end_to_end_handoff_manifest(
+            paths["handoff_manifest"],  # type: ignore[arg-type]
+            base_dir=bundle_dir,
+            verification_report_out=outside_report,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert not outside_dir.exists()
+    assert not outside_report.parent.exists()
+
+
+def test_end_to_end_handoff_bundle_round_trip_rejects_outside_builder_artifact(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    outside_manifest = outside_dir / "nested" / "handoff_manifest.json"
+    with pytest.raises(
+        KrEndToEndHandoffManifestError,
+        match="preflight_summary artifact path escapes base directory",
+    ) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=paths["handoff_manifest"],  # type: ignore[arg-type]
+            preflight_summary=outside_summary,
+            plan_md=paths["plan_md"],  # type: ignore[arg-type]
+            structured_plan=paths["structured_plan"],  # type: ignore[arg-type]
+            validation_report=paths["validation_report"],  # type: ignore[arg-type]
+            base_dir=bundle_dir,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert not outside_manifest.parent.exists()
+
+
+def test_end_to_end_handoff_bundle_round_trip_no_generated_commands_executed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("handoff bundle round-trip must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    preflight_result = round_trip["preflight_result"]
+    assert isinstance(preflight_result, dict)
+    assert preflight_result["status"] == "ok"
+    verify_result = round_trip["verify_result"]
+    assert isinstance(verify_result, dict)
+    assert verify_result["status"] == "ok"
 
