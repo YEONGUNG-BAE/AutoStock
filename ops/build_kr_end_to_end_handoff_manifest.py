@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""KR end-to-end operator handoff manifest builder (3H7).
+"""KR end-to-end operator handoff manifest builder (3H7/3H14).
 
 기존 preflight/handoff artifact 경로·무결성 메타데이터만 색인.
+3H14: 생성 manifest는 기존 verifier로 validate-before-commit 후에만 atomic replace.
 artifact body embed·명령 실행·live fetch/smoke·config mutation/trading 없음.
 """
 
@@ -14,6 +15,11 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any, Literal, TextIO
+
+from verify_kr_end_to_end_handoff_manifest import (
+    KrEndToEndHandoffManifestVerifyError,
+    verify_kr_end_to_end_handoff_manifest,
+)
 
 StageName = Literal["args", "parse", "validate", "write", "complete"]
 
@@ -176,7 +182,7 @@ def build_handoff_manifest(artifact_paths: dict[str, Path]) -> dict[str, Any]:
 
 
 def _write_manifest_output(path: Path, manifest: dict[str, Any], *, force: bool) -> None:
-    """handoff manifest JSON을 atomic replace로 기록한다."""
+    """handoff manifest JSON을 temp write → verifier 검증 → atomic replace로 기록한다."""
     manifest_out = path.resolve()
     if manifest_out.exists() and not force:
         raise KrEndToEndHandoffManifestError("write", "output already exists: manifest_out")
@@ -186,7 +192,10 @@ def _write_manifest_output(path: Path, manifest: dict[str, Any], *, force: bool)
     try:
         serialized = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
         temp_path.write_text(serialized, encoding="utf-8")
+        verify_kr_end_to_end_handoff_manifest(temp_path)
         temp_path.replace(manifest_out)
+    except KrEndToEndHandoffManifestVerifyError as exc:
+        raise KrEndToEndHandoffManifestError("validate", exc.message) from None
     except OSError as exc:
         raise KrEndToEndHandoffManifestError(
             "write",

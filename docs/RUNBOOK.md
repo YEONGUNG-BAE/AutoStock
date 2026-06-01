@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2425 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2435 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2425 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2435 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -947,7 +947,7 @@ PYTHONPATH=src uv run python ops/build_kr_end_to_end_handoff_manifest.py \
   --json
 ```
 
-Optional — indexes supplied preflight/handoff artifact paths with sha256/size metadata only; embeds no artifact bodies; does not execute commands.
+Optional — indexes supplied preflight/handoff artifact paths with sha256/size metadata only; embeds no artifact bodies; does not execute commands. **3H14:** generated manifest is verifier-validated (existing 3H8 path) before atomic commit to `--manifest-out`.
 
 **3H8 handoff manifest verifier (optional; recommended before handoff/archive):**
 
@@ -995,7 +995,7 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
 - PRICE, DART, and combined context smokes remain **separate explicit operator commands** — no automatic chaining in 3H0.
 - Ranking/factor scores are **advisory metadata only** — not buy/sell/hold signals or allocation guidance.
 
-**Deferred next step:** **3H14+** end-to-end hardening (unimplemented).
+**Deferred next step:** **3H15+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1236,7 +1236,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2425 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2435 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

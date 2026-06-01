@@ -3469,6 +3469,245 @@ def test_handoff_manifest_no_subprocess_os_system_exec_eval_in_ops_source() -> N
     assert " eval(" not in lowered
 
 
+# --- 3H14: handoff manifest builder validate-before-commit ---
+
+
+def test_handoff_manifest_builder_generated_manifest_passes_verifier(tmp_path: Path) -> None:
+    manifest_out = _valid_handoff_manifest_path(tmp_path)
+    result = verify_kr_end_to_end_handoff_manifest(manifest_out)
+    assert result["status"] == "ok"
+    assert result["verified_artifacts_count"] == 4
+
+
+def test_handoff_manifest_builder_calls_verifier_before_final_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    order: list[str] = []
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+    original_replace = Path.replace
+
+    def _tracking_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        order.append("verify")
+        return original_verify(path, base_dir=base_dir)
+
+    def _tracking_replace(self: Path, target: Path) -> Path:
+        order.append("replace")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _tracking_verify)
+    monkeypatch.setattr(Path, "replace", _tracking_replace)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    assert order == ["verify", "replace"]
+
+
+def test_handoff_manifest_builder_validation_failure_maps_to_validate_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert exc.value.message == "stub verification failed"
+    assert exc.value.__cause__ is None
+
+
+def test_handoff_manifest_builder_validation_failure_does_not_create_final_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "nested" / "handoff_manifest.json"
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError):
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert not manifest_out.exists()
+
+
+def test_handoff_manifest_builder_validation_failure_does_not_replace_existing_with_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    original = '{"status":"ok","preserved":true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert manifest_out.read_text(encoding="utf-8") == original
+
+
+def test_handoff_manifest_builder_validation_failure_cleans_up_temp_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError):
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    leftovers = list(tmp_path.glob(".tmp_handoff_manifest_*"))
+    assert leftovers == []
+
+
+def test_handoff_manifest_builder_validation_failure_with_force_is_validate_not_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    manifest_out.write_text('{"old": true}\n', encoding="utf-8")
+
+    def _failing_verify(_path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        raise KrEndToEndHandoffManifestVerifyError("validate", "stub verification failed")
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _failing_verify)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "validate"
+    assert exc.value.stage != "write"
+
+
+def test_handoff_manifest_builder_temp_manifest_verified_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import build_kr_end_to_end_handoff_manifest as build_module
+
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    verified_paths: list[Path] = []
+    replace_called = {"value": False}
+    original_verify = build_module.verify_kr_end_to_end_handoff_manifest
+    original_replace = Path.replace
+
+    def _capture_verify(path: Path, *, base_dir: Path | None = None) -> dict[str, object]:
+        assert not replace_called["value"]
+        verified_paths.append(path)
+        assert path.name.startswith(".tmp_handoff_manifest_")
+        assert path.parent == manifest_out.parent.resolve()
+        return original_verify(path, base_dir=base_dir)
+
+    def _mark_replace(self: Path, target: Path) -> Path:
+        replace_called["value"] = True
+        assert verified_paths
+        return original_replace(self, target)
+
+    monkeypatch.setattr(build_module, "verify_kr_end_to_end_handoff_manifest", _capture_verify)
+    monkeypatch.setattr(Path, "replace", _mark_replace)
+    build_kr_end_to_end_handoff_manifest(
+        manifest_out=manifest_out,
+        preflight_summary=summary,
+        force=True,
+    )
+    assert replace_called["value"] is True
+
+
+def test_handoff_manifest_builder_replace_failure_maps_to_write_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+
+    def _raise_on_replace(_self: Path, _target: Path) -> Path:
+        raise PermissionError("blocked replace")
+
+    monkeypatch.setattr(Path, "replace", _raise_on_replace)
+    with pytest.raises(KrEndToEndHandoffManifestError, match="output write failed: PermissionError") as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "write"
+    assert not manifest_out.exists()
+    leftovers = list(tmp_path.glob(".tmp_handoff_manifest_*"))
+    assert leftovers == []
+
+
+def test_handoff_manifest_builder_replace_failure_preserves_existing_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = _valid_preflight_summary_path(tmp_path)
+    manifest_out = tmp_path / "handoff_manifest.json"
+    original = '{"status":"ok","preserved":true}\n'
+    manifest_out.write_text(original, encoding="utf-8")
+
+    def _raise_on_replace(_self: Path, _target: Path) -> Path:
+        raise PermissionError("blocked replace")
+
+    monkeypatch.setattr(Path, "replace", _raise_on_replace)
+    with pytest.raises(KrEndToEndHandoffManifestError) as exc:
+        build_kr_end_to_end_handoff_manifest(
+            manifest_out=manifest_out,
+            preflight_summary=summary,
+            force=True,
+        )
+    assert exc.value.stage == "write"
+    assert manifest_out.read_text(encoding="utf-8") == original
+
+
 # --- 3H8: operator handoff manifest integrity verifier ---
 
 
