@@ -93,6 +93,7 @@ from preflight_kr_end_to_end_intake import (
     _validate_structured_plan_steps,
     _write_output,
     load_kr_end_to_end_preflight_manifest,
+    main as preflight_main,
     run_kr_end_to_end_preflight,
 )
 from build_kr_end_to_end_handoff_manifest import (
@@ -112,6 +113,7 @@ from verify_kr_end_to_end_handoff_manifest import (
     _verify_handoff_manifest_with_entries,
     _write_verification_report_output,
     load_handoff_manifest,
+    main as verify_handoff_manifest_main,
     run_verify_kr_end_to_end_handoff_manifest,
     verify_kr_end_to_end_handoff_manifest,
 )
@@ -7046,4 +7048,317 @@ def test_end_to_end_handoff_bundle_round_trip_no_generated_commands_executed(
     verify_result = round_trip["verify_result"]
     assert isinstance(verify_result, dict)
     assert verify_result["status"] == "ok"
+
+
+# --- 3H17: in-process CLI handoff bundle round-trip smoke ---
+
+
+def _run_handoff_bundle_cli_round_trip(
+    bundle_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> dict[str, object]:
+    """3H17 — checked-in 합성 manifest를 네 CLI main([...]) in-process 호출만으로 한 바퀴 돌린다.
+
+    subprocess/os.system/exec/eval을 일절 쓰지 않고, operator가 실제로 입력하는 CLI 인자
+    와이어링(플래그 파싱 → 산출물 경로 → base-dir containment)을 끝에서 끝까지 검증한다.
+    생성 산출물 6종은 모두 bundle_dir 내부에 머문다.
+    """
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    # 1) preflight CLI: [outputs] 섹션 없는 합성 fixture이므로 세 출력 경로를 모두 명시한다.
+    preflight_rc = preflight_main(
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ]
+    )
+    preflight_stdout = capsys.readouterr().out
+
+    # 2) validator CLI: 구조화 plan을 검증하고 validation_report를 in-process로 기록한다.
+    validator_rc = validate_plan_main(
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ]
+    )
+    validator_stdout = capsys.readouterr().out
+
+    # 3) builder CLI: 네 산출물을 base-dir containment 하에 handoff manifest로 묶는다.
+    build_rc = build_handoff_manifest_main(
+        [
+            "--preflight-summary",
+            str(summary_out),
+            "--plan-md",
+            str(plan_out),
+            "--structured-plan",
+            str(structured_plan_out),
+            "--validation-report",
+            str(validation_report_out),
+            "--manifest-out",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ]
+    )
+    build_stdout = capsys.readouterr().out
+
+    # 4) verifier CLI: manifest를 검증하고 검증 리포트를 base-dir 내부에 기록한다.
+    verify_rc = verify_handoff_manifest_main(
+        [
+            "--manifest",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(verification_report_out),
+            "--force",
+            "--json",
+        ]
+    )
+    verify_stdout = capsys.readouterr().out
+
+    return {
+        "bundle_dir": bundle_dir,
+        "paths": {
+            "preflight_summary": summary_out,
+            "plan_md": plan_out,
+            "structured_plan": structured_plan_out,
+            "validation_report": validation_report_out,
+            "handoff_manifest": handoff_manifest_out,
+            "verification_report": verification_report_out,
+        },
+        "returncodes": {
+            "preflight": preflight_rc,
+            "validator": validator_rc,
+            "build": build_rc,
+            "verify": verify_rc,
+        },
+        "stdout": {
+            "preflight": preflight_stdout,
+            "validator": validator_stdout,
+            "build": build_stdout,
+            "verify": verify_stdout,
+        },
+    }
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_in_process_no_exec(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+
+    returncodes = round_trip["returncodes"]
+    assert isinstance(returncodes, dict)
+    assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
+
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    for name, path in paths.items():
+        assert isinstance(path, Path)
+        assert path.is_file(), f"missing CLI round-trip output: {name}"
+        assert _path_resolves_inside_base(path, bundle_dir)
+
+    preflight_summary = json.loads(paths["preflight_summary"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert preflight_summary["status"] == "ok"
+    if "stage" in preflight_summary:
+        assert preflight_summary["stage"] == "complete"
+
+    structured_plan = json.loads(paths["structured_plan"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert structured_plan["mode"] == "kr-end-to-end-intake-followup-plan"
+    assert structured_plan["review_only"] is True
+    assert structured_plan["steps"]
+    for step in structured_plan["steps"]:
+        assert step["executes_in_preflight"] is False
+
+    validation_report = json.loads(paths["validation_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert validation_report["mode"] == "kr-end-to-end-preflight-plan-validation-report"
+    assert validation_report["status"] == "ok"
+    assert validation_report["stage"] == "complete"
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert set(handoff_manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+    assert handoff_manifest["mode"] == "kr-end-to-end-handoff-manifest"
+    assert handoff_manifest["status"] == "ok"
+    assert handoff_manifest["stage"] == "complete"
+    assert handoff_manifest["commands_execute_in_builder"] is False
+    assert handoff_manifest["review_only"] is True
+    assert handoff_manifest["artifacts_count"] == 4
+    assert [entry["role"] for entry in handoff_manifest["artifacts"]] == list(_ROLE_ORDER)
+
+    verification_report = json.loads(paths["verification_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert verification_report["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert verification_report["status"] == "ok"
+    assert verification_report["stage"] == "complete"
+    assert verification_report["schema_verified"] is True
+    assert verification_report["hashes_verified"] is True
+    assert verification_report["metadata_verified"] is True
+    assert verification_report["commands_execute_in_verifier"] is False
+    assert verification_report["review_only"] is True
+    assert verification_report["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+
+    # --json 성공 stdout은 파일 본문이 아니라 상태/리턴 페이로드 확인용으로만 사용한다.
+    verify_payload = json.loads(round_trip["stdout"]["verify"])  # type: ignore[index]
+    assert verify_payload["status"] == "ok"
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_all_outputs_inside_base_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    for entry in handoff_manifest["artifacts"]:
+        assert _path_resolves_inside_base(Path(entry["path"]), bundle_dir)
+        assert set(entry.keys()) == _ARTIFACT_ENTRY_KEYS
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_outputs_are_body_free(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    handoff_manifest = json.loads(paths["handoff_manifest"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert "steps" not in handoff_manifest
+    assert "command" not in handoff_manifest
+    assert "followup_commands" not in handoff_manifest
+    for entry in handoff_manifest["artifacts"]:
+        assert "content" not in entry
+        assert "body" not in entry
+        assert "command" not in entry
+    manifest_dumped = json.dumps(handoff_manifest)
+    assert "PYTHONPATH=src" not in manifest_dumped
+
+    validation_report = json.loads(paths["validation_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert "steps" not in validation_report
+    assert "commands" not in validation_report
+    assert "command" not in validation_report
+    assert "artifacts" not in validation_report
+    _walk_forbidden_fields(validation_report)
+
+    verification_report = json.loads(paths["verification_report"].read_text(encoding="utf-8"))  # type: ignore[index]
+    assert set(verification_report.keys()) == _HANDOFF_VERIFY_REPORT_EXPECTED_KEYS
+    assert "artifacts" not in verification_report
+    assert "steps" not in verification_report
+    assert "commands" not in verification_report
+    assert "command" not in verification_report
+    verification_dumped = paths["verification_report"].read_text(encoding="utf-8")  # type: ignore[index]
+    assert "https://" not in verification_dumped
+    assert "http://" not in verification_dumped
+    assert "fred_api_key" not in verification_dumped.lower()
+    assert "dart_api_key" not in verification_dumped.lower()
+    assert "api_key" not in verification_dumped.lower()
+    _walk_forbidden_fields(verification_report)
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_rejects_outside_handoff_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    outside_dir = tmp_path / "outside"
+    outside_report = outside_dir / "nested" / "handoff_manifest_verification_report.json"
+    # known-error CLI 규약: 도메인 예외를 재전파하지 않고 rc==1을 반환한다(pytest.raises 금지).
+    rc = verify_handoff_manifest_main(
+        [
+            "--manifest",
+            str(paths["handoff_manifest"]),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(outside_report),
+            "--force",
+            "--json",
+        ]
+    )
+    error_payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert error_payload["status"] == "error"
+    assert error_payload["stage"] == "validate"
+    assert not outside_dir.exists()
+    assert not outside_report.parent.exists()
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_rejects_outside_builder_artifact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = _valid_preflight_summary_path(outside_dir)
+    outside_manifest = outside_dir / "nested" / "handoff_manifest.json"
+    # base-dir 밖 입력 산출물은 containment 단계에서 거부되며 rc==1이다.
+    rc = build_handoff_manifest_main(
+        [
+            "--preflight-summary",
+            str(outside_summary),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(outside_manifest),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ]
+    )
+    error_payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert error_payload["status"] == "error"
+    assert error_payload["stage"] == "validate"
+    assert not outside_manifest.parent.exists()
+
+
+def test_end_to_end_handoff_bundle_cli_round_trip_no_generated_commands_executed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI handoff bundle round-trip must not execute generated commands")
+
+    # subprocess.run을 폭파시켜 in-process CLI 경로가 어떤 명령도 실행하지 않음을 증명한다.
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    bundle_dir = tmp_path / "cli_bundle"
+    round_trip = _run_handoff_bundle_cli_round_trip(bundle_dir, capsys)
+    returncodes = round_trip["returncodes"]
+    assert isinstance(returncodes, dict)
+    assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
 
