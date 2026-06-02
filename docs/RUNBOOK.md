@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2496 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2506 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2496 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2506 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -1003,7 +1003,9 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
 
 **3H19 handoff bundle tamper-detection smoke (test coverage only):** the suite builds a real handoff bundle via the 3H16 API round-trip helper, then mutates indexed artifacts or manifest metadata and asserts `verify_kr_end_to_end_handoff_manifest` / `run_verify_kr_end_to_end_handoff_manifest` reject the bundle (integrity, parse, metadata, containment; verification report not written on failure; error messages body-free). No new operator command is required.
 
-**Deferred next step:** **3H20+** end-to-end hardening (unimplemented).
+**3H20 CLI verifier tamper-rejection smoke (test coverage only):** the suite also tampered 3H16-generated bundles and asserts in-process `verify_handoff_manifest_main([... "--json"])` rejects them safely (`rc == 1`; JSON error payload with exact `mode == "kr-end-to-end-handoff-manifest-verification"`, expected `stage`, non-empty `message`; no traceback; no raw artifact body echo; verification report not written on failure). No subprocess; no new operator command is required.
+
+**Deferred next step:** **3H21+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1244,7 +1246,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2496 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2506 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

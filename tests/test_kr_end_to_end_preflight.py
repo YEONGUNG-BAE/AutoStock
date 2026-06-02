@@ -7613,11 +7613,21 @@ def _refresh_manifest_entry_integrity(manifest_path: Path, role: str) -> None:
     _write_json(manifest_path, payload, indent=2)
 
 
-def _generated_handoff_bundle(tmp_path: Path) -> tuple[Path, Path]:
-    """3H16 API round-trip으로 유효 handoff bundle을 생성한다(이미 검증 완료)."""
+def _generated_handoff_bundle(
+    tmp_path: Path,
+    *,
+    capsys: pytest.CaptureFixture[str] | None = None,
+) -> tuple[Path, Path]:
+    """3H16 API round-trip으로 유효 handoff bundle을 생성한다(이미 검증 완료).
+
+    capsys가 주어지면 round-trip 중 validate_plan_main --json stdout을 비워
+    이후 verifier CLI --json 파싱과 섞이지 않게 한다.
+    """
     bundle_dir = tmp_path / "bundle"
     round_trip = _run_handoff_bundle_round_trip(bundle_dir)
     manifest_path = _handoff_manifest_path(round_trip)
+    if capsys is not None:
+        capsys.readouterr()
     return bundle_dir, manifest_path
 
 
@@ -7745,4 +7755,193 @@ def test_handoff_bundle_tamper_failure_does_not_echo_artifact_body(tmp_path: Pat
         verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
     assert exc_info.value.stage == "validate"
     assert marker not in exc_info.value.message
+
+
+# --- 3H20: CLI verifier tamper-rejection smoke --------------------------------
+#
+# 3H19는 API 경로(verify_kr_end_to_end_handoff_manifest / pytest.raises)만 검증한다.
+# operator-facing verifier CLI main([...])는 rc==1 + --json stdout 페이로드로 동일 거부를
+# 내야 하며, pytest.raises 없이 in-process만 호출한다(subprocess 금지).
+
+
+def _verify_cli_args(manifest_path: Path, bundle_dir: Path, *extra: str) -> list[str]:
+    return [
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        *extra,
+        "--json",
+    ]
+
+
+def _run_verify_cli_main_json(
+    args: list[str], capsys: pytest.CaptureFixture[str]
+) -> tuple[int, dict[str, object], str, str]:
+    rc = verify_handoff_manifest_main(args)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert isinstance(payload, dict)
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    return rc, payload, captured.out, captured.err
+
+
+def _assert_verify_cli_error_payload(payload: dict[str, object], *, stage: str) -> None:
+    assert payload["status"] == "error"
+    assert payload["stage"] == stage
+    assert payload["mode"] == "kr-end-to-end-handoff-manifest-verification"
+    assert isinstance(payload["message"], str)
+    assert payload["message"]
+
+
+def test_handoff_bundle_tamper_cli_modified_artifact_integrity_returns_validate_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + "\n# tampered-appendix\n", encoding="utf-8")
+    rc, payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_deleted_artifact_returns_validate_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    summary_path = _artifact_path_by_role(manifest, "preflight_summary")
+    summary_path.unlink()
+    rc, payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_malformed_json_returns_parse_error_after_integrity_refresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    structured_path = _artifact_path_by_role(manifest, "structured_plan")
+    structured_path.write_text("{not-valid-json", encoding="utf-8")
+    _refresh_manifest_entry_integrity(manifest_path, "structured_plan")
+    rc, payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="parse")
+
+
+def test_handoff_bundle_tamper_cli_structured_plan_mode_drift_returns_validate_error_after_integrity_refresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    structured_path = _artifact_path_by_role(manifest, "structured_plan")
+    structured_payload = _load_json(structured_path)
+    structured_payload["mode"] = "tampered-mode-label"
+    _write_json(structured_path, structured_payload)
+    _refresh_manifest_entry_integrity(manifest_path, "structured_plan")
+    rc, payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_validation_report_status_drift_returns_validate_error_after_integrity_refresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    report_path = _artifact_path_by_role(manifest, "validation_report")
+    report_payload = _load_json(report_path)
+    report_payload["status"] = "tampered"
+    _write_json(report_path, report_payload)
+    _refresh_manifest_entry_integrity(manifest_path, "validation_report")
+    rc, payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_manifest_recorded_sha_mismatch_returns_validate_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["sha256"] = "b" * 64  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    rc, cli_payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(cli_payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_manifest_recorded_size_mismatch_returns_validate_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["size_bytes"] = 1  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    rc, cli_payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(cli_payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_artifact_path_outside_base_returns_validate_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = outside_dir / "outside_summary.json"
+    outside_summary.write_text('{"status": "tampered"}\n', encoding="utf-8")
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["path"] = str(outside_summary)  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    rc, cli_payload, _, _ = _run_verify_cli_main_json(_verify_cli_args(manifest_path, bundle_dir), capsys)
+    assert rc == 1
+    _assert_verify_cli_error_payload(cli_payload, stage="validate")
+
+
+def test_handoff_bundle_tamper_cli_verification_report_not_written_on_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text("# tampered plan body\n", encoding="utf-8")
+    report_out = bundle_dir / "tampered_cli_verification_report.json"
+    rc, payload, _, _ = _run_verify_cli_main_json(
+        _verify_cli_args(
+            manifest_path,
+            bundle_dir,
+            "--verification-report-out",
+            str(report_out),
+            "--force",
+        ),
+        capsys,
+    )
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+    assert not report_out.exists()
+
+
+def test_handoff_bundle_tamper_cli_error_payload_does_not_echo_artifact_body_or_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    marker = "UNIQUE_TAMPER_MARKER_3H20"
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text(f"# plan\n{marker}\n", encoding="utf-8")
+    rc, payload, stdout, stderr = _run_verify_cli_main_json(
+        _verify_cli_args(manifest_path, bundle_dir),
+        capsys,
+    )
+    assert rc == 1
+    _assert_verify_cli_error_payload(payload, stage="validate")
+    message = payload["message"]
+    assert isinstance(message, str)
+    assert marker not in message
+    assert marker not in stdout
+    assert marker not in stderr
 
