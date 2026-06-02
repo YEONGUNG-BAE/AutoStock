@@ -7775,10 +7775,12 @@ def _verify_cli_args(manifest_path: Path, bundle_dir: Path, *extra: str) -> list
     ]
 
 
-def _run_verify_cli_main_json(
-    args: list[str], capsys: pytest.CaptureFixture[str]
+def _run_cli_main_json(
+    main_func,
+    args: list[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> tuple[int, dict[str, object], str, str]:
-    rc = verify_handoff_manifest_main(args)
+    rc = main_func(args)
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert isinstance(payload, dict)
@@ -7787,12 +7789,80 @@ def _run_verify_cli_main_json(
     return rc, payload, captured.out, captured.err
 
 
-def _assert_verify_cli_error_payload(payload: dict[str, object], *, stage: str) -> None:
+def _assert_cli_error_payload(
+    payload: dict[str, object],
+    *,
+    mode: str,
+    stage: str,
+) -> None:
     assert payload["status"] == "error"
     assert payload["stage"] == stage
-    assert payload["mode"] == "kr-end-to-end-handoff-manifest-verification"
+    assert payload["mode"] == mode
     assert isinstance(payload["message"], str)
     assert payload["message"]
+
+
+def _run_verify_cli_main_json(
+    args: list[str], capsys: pytest.CaptureFixture[str]
+) -> tuple[int, dict[str, object], str, str]:
+    return _run_cli_main_json(verify_handoff_manifest_main, args, capsys)
+
+
+def _assert_verify_cli_error_payload(payload: dict[str, object], *, stage: str) -> None:
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage=stage,
+    )
+
+
+def _handoff_bundle_through_validator_cli(
+    bundle_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> dict[str, Path]:
+    """preflight + validator CLI만 실행해 builder/verifier 이전 산출물을 만든다."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+
+    preflight_rc = preflight_main(
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ]
+    )
+    assert preflight_rc == 0
+    capsys.readouterr()
+
+    validator_rc = validate_plan_main(
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ]
+    )
+    assert validator_rc == 0
+    capsys.readouterr()
+
+    return {
+        "preflight_summary": summary_out,
+        "plan_md": plan_out,
+        "structured_plan": structured_plan_out,
+        "validation_report": validation_report_out,
+    }
 
 
 def test_handoff_bundle_tamper_cli_modified_artifact_integrity_returns_validate_error(
@@ -7944,4 +8014,288 @@ def test_handoff_bundle_tamper_cli_error_payload_does_not_echo_artifact_body_or_
     assert marker not in message
     assert marker not in stdout
     assert marker not in stderr
+
+
+# --- 3H21: handoff pipeline failure no-partial-output smoke (in-process CLI) ---
+#
+# happy path(3H16–3H18)와 tamper 거부(3H19–3H20)는 검증했지만, upstream 단계 실패 시
+# downstream 산출물·부모 디렉터리가 남지 않는 fail-closed 계약을 pipeline 관점에서 묶는다.
+
+
+def test_handoff_pipeline_validator_failure_does_not_write_validation_report_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    plan_out = bundle_dir / "plan.md"
+    summary_out = bundle_dir / "preflight_summary.json"
+    preflight_rc = preflight_main(
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ]
+    )
+    assert preflight_rc == 0
+    capsys.readouterr()
+
+    structured_plan_out.write_text("{not-valid-json", encoding="utf-8")
+    report_out = bundle_dir / "validation_report.json"
+    assert not report_out.exists()
+
+    rc, payload, _, _ = _run_cli_main_json(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-preflight-plan-validation",
+        stage="parse",
+    )
+    assert not report_out.exists()
+
+
+def test_handoff_pipeline_builder_failure_does_not_write_handoff_manifest_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    report_payload = _load_json(paths["validation_report"])
+    report_payload["status"] = "tampered"
+    _write_json(paths["validation_report"], report_payload)
+
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    assert not manifest_out.exists()
+
+    rc, payload, _, _ = _run_cli_main_json(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(paths["preflight_summary"]),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-handoff-manifest-build",
+        stage="validate",
+    )
+    assert not manifest_out.exists()
+
+
+def test_handoff_pipeline_verifier_failure_does_not_write_verification_report_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text("# tampered plan body\n", encoding="utf-8")
+    report_out = bundle_dir / "pipeline_failed_verification_report.json"
+    assert not report_out.exists()
+
+    rc, payload, _, _ = _run_cli_main_json(
+        verify_handoff_manifest_main,
+        _verify_cli_args(
+            manifest_path,
+            bundle_dir,
+            "--verification-report-out",
+            str(report_out),
+            "--force",
+        ),
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage="validate",
+    )
+    assert not report_out.exists()
+
+
+def test_handoff_pipeline_builder_base_dir_failure_does_not_create_manifest_parent_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    outside_parent = tmp_path / "outside_parent"
+    manifest_out = outside_parent / "handoff_manifest.json"
+    assert not outside_parent.exists()
+
+    rc, payload, _, _ = _run_cli_main_json(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(paths["preflight_summary"]),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-handoff-manifest-build",
+        stage="validate",
+    )
+    assert not outside_parent.exists()
+
+
+def test_handoff_pipeline_verifier_base_dir_failure_does_not_create_report_parent_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path, capsys=capsys)
+    outside_parent = tmp_path / "outside_parent"
+    report_out = outside_parent / "handoff_manifest_verification_report.json"
+    assert not outside_parent.exists()
+
+    rc, payload, _, _ = _run_cli_main_json(
+        verify_handoff_manifest_main,
+        _verify_cli_args(
+            manifest_path,
+            bundle_dir,
+            "--verification-report-out",
+            str(report_out),
+            "--force",
+        ),
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage="validate",
+    )
+    assert not outside_parent.exists()
+
+
+def test_handoff_pipeline_failed_overwrite_preserves_existing_output_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    report_out = paths["validation_report"]
+    original_bytes = report_out.read_bytes()
+
+    structured_plan_out = paths["structured_plan"]
+    structured_plan_out.write_text("{not-valid-json", encoding="utf-8")
+
+    rc, payload, _, _ = _run_cli_main_json(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-preflight-plan-validation",
+        stage="parse",
+    )
+    assert report_out.read_bytes() == original_bytes
+
+
+def test_handoff_pipeline_failure_payload_does_not_echo_artifact_body_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    plan_out = bundle_dir / "plan.md"
+    summary_out = bundle_dir / "preflight_summary.json"
+    preflight_rc = preflight_main(
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ]
+    )
+    assert preflight_rc == 0
+    capsys.readouterr()
+
+    marker = "UNIQUE_NO_PARTIAL_MARKER_3H21"
+    structured_plan_out.write_text(f"{{not-valid-json {marker}", encoding="utf-8")
+    report_out = bundle_dir / "validation_report.json"
+    assert not report_out.exists()
+
+    rc, payload, stdout, stderr = _run_cli_main_json(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_error_payload(
+        payload,
+        mode="kr-end-to-end-preflight-plan-validation",
+        stage="parse",
+    )
+    message = payload["message"]
+    assert isinstance(message, str)
+    assert marker not in message
+    assert marker not in stdout
+    assert marker not in stderr
+    assert not report_out.exists()
 
