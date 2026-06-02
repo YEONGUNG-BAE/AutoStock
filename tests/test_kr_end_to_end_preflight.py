@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -7361,4 +7362,203 @@ def test_end_to_end_handoff_bundle_cli_round_trip_no_generated_commands_executed
     returncodes = round_trip["returncodes"]
     assert isinstance(returncodes, dict)
     assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
+
+
+# --- 3H18: API/CLI handoff bundle round-trip parity ---------------------------
+#
+# 3H16은 API-only, 3H17은 CLI-main wiring을 각각 검증한다. 두 경로가 같은 artifact
+# 역할/스키마/메타데이터/containment 의미를 내는지는 비교하지 않았으므로, 한쪽만 drift해도
+# 둘 다 "통과"할 수 있다. 3H18은 두 round-trip 산출물을 경로/해시 비의존 의미 요약으로
+# 정규화해 동등성을 단언한다. 절대경로·sha256 값·base_dir 문자열은 bundle마다 다를 수
+# 있으므로 교차 비교하지 않는다(값이 아니라 shape/존재/부호만 비교).
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _normalize_handoff_manifest_for_parity(payload: dict[str, object]) -> dict[str, object]:
+    """handoff manifest를 경로/해시 비의존 의미 요약으로 정규화한다."""
+    artifacts = payload["artifacts"]
+    assert isinstance(artifacts, list)
+    return {
+        "top_keys": sorted(payload.keys()),
+        "version": payload["version"],
+        "mode": payload["mode"],
+        "status": payload["status"],
+        "stage": payload["stage"],
+        "generated_by": payload["generated_by"],
+        "artifacts_count": payload["artifacts_count"],
+        "all_artifacts_present": payload["all_artifacts_present"],
+        "commands_execute_in_builder": payload["commands_execute_in_builder"],
+        "review_only": payload["review_only"],
+        "roles": [entry["role"] for entry in artifacts],
+        "kinds": [entry["kind"] for entry in artifacts],
+        "exists_flags": [entry["exists"] for entry in artifacts],
+        "entry_keys": [sorted(entry.keys()) for entry in artifacts],
+        "json_modes": [entry["json_mode"] for entry in artifacts],
+        "json_statuses": [entry["json_status"] for entry in artifacts],
+        "json_stages": [entry["json_stage"] for entry in artifacts],
+        # 해시는 값이 아니라 64자 소문자 hex shape만, 크기는 양수 여부만 비교한다.
+        "sha256_shape": [bool(_SHA256_RE.match(str(entry["sha256"]))) for entry in artifacts],
+        "size_positive": [int(entry["size_bytes"]) > 0 for entry in artifacts],
+    }
+
+
+def _normalize_verification_report_for_parity(payload: dict[str, object]) -> dict[str, object]:
+    """verification report를 경로/해시 비의존 의미 요약으로 정규화한다."""
+    return {
+        "keys": sorted(payload.keys()),
+        "version": payload["version"],
+        "mode": payload["mode"],
+        "status": payload["status"],
+        "stage": payload["stage"],
+        "generated_by": payload["generated_by"],
+        "path_containment_verified": payload["path_containment_verified"],
+        "artifacts_count": payload["artifacts_count"],
+        "verified_artifacts_count": payload["verified_artifacts_count"],
+        "hashes_verified": payload["hashes_verified"],
+        "metadata_verified": payload["metadata_verified"],
+        "schema_verified": payload["schema_verified"],
+        "commands_execute_in_verifier": payload["commands_execute_in_verifier"],
+        "review_only": payload["review_only"],
+        "artifact_roles": payload["artifact_roles"],
+        # base_dir 문자열은 bundle마다 다르므로 존재 여부만 비교한다.
+        "base_dir_present": payload["base_dir"] is not None,
+    }
+
+
+def _load_api_and_cli_handoff_bundles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> dict[str, object]:
+    """API round-trip과 CLI round-trip을 별도 bundle에 돌리고 산출물을 로드한다."""
+    api_bundle = tmp_path / "api_bundle"
+    cli_bundle = tmp_path / "cli_bundle"
+    api_round_trip = _run_handoff_bundle_round_trip(api_bundle)
+    cli_round_trip = _run_handoff_bundle_cli_round_trip(cli_bundle, capsys)
+
+    api_paths = api_round_trip["paths"]
+    cli_paths = cli_round_trip["paths"]
+    assert isinstance(api_paths, dict)
+    assert isinstance(cli_paths, dict)
+
+    return {
+        "api_bundle": api_bundle,
+        "cli_bundle": cli_bundle,
+        "api_manifest": json.loads(api_paths["handoff_manifest"].read_text(encoding="utf-8")),
+        "cli_manifest": json.loads(cli_paths["handoff_manifest"].read_text(encoding="utf-8")),
+        "api_report": json.loads(api_paths["verification_report"].read_text(encoding="utf-8")),
+        "cli_report": json.loads(cli_paths["verification_report"].read_text(encoding="utf-8")),
+    }
+
+
+def test_end_to_end_handoff_bundle_api_cli_round_trip_manifest_parity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundles = _load_api_and_cli_handoff_bundles(tmp_path, capsys)
+    api_norm = _normalize_handoff_manifest_for_parity(bundles["api_manifest"])  # type: ignore[arg-type]
+    cli_norm = _normalize_handoff_manifest_for_parity(bundles["cli_manifest"])  # type: ignore[arg-type]
+
+    # 두 경로의 의미 요약이 완전히 동일해야 한다(역할/종류/모드/플래그/스키마/해시 shape).
+    assert api_norm == cli_norm
+    assert api_norm["top_keys"] == sorted(_MANIFEST_EXPECTED_TOP_KEYS)
+    assert api_norm["mode"] == "kr-end-to-end-handoff-manifest"
+    assert api_norm["roles"] == list(_ROLE_ORDER)
+    assert api_norm["artifacts_count"] == 4
+    assert api_norm["commands_execute_in_builder"] is False
+    assert api_norm["review_only"] is True
+    assert all(api_norm["sha256_shape"])  # type: ignore[arg-type]
+    assert all(api_norm["size_positive"])  # type: ignore[arg-type]
+    assert all(keys == sorted(_ARTIFACT_ENTRY_KEYS) for keys in api_norm["entry_keys"])  # type: ignore[union-attr]
+
+
+def test_end_to_end_handoff_bundle_api_cli_round_trip_verification_report_parity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundles = _load_api_and_cli_handoff_bundles(tmp_path, capsys)
+    api_norm = _normalize_verification_report_for_parity(bundles["api_report"])  # type: ignore[arg-type]
+    cli_norm = _normalize_verification_report_for_parity(bundles["cli_report"])  # type: ignore[arg-type]
+
+    assert api_norm == cli_norm
+    assert api_norm["keys"] == sorted(_HANDOFF_VERIFY_REPORT_EXPECTED_KEYS)
+    assert api_norm["mode"] == "kr-end-to-end-handoff-manifest-verification-report"
+    assert api_norm["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+    assert api_norm["path_containment_verified"] is True
+    assert api_norm["hashes_verified"] is True
+    assert api_norm["metadata_verified"] is True
+    assert api_norm["schema_verified"] is True
+    assert api_norm["commands_execute_in_verifier"] is False
+    assert api_norm["review_only"] is True
+    assert api_norm["base_dir_present"] is True
+
+
+def test_end_to_end_handoff_bundle_api_cli_round_trip_path_containment_parity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundles = _load_api_and_cli_handoff_bundles(tmp_path, capsys)
+    # containment은 정규화 dict가 아니라 각 bundle별로 따로 단언한다(절대경로 교차 비교 금지).
+    for manifest_key, bundle_key in (
+        ("api_manifest", "api_bundle"),
+        ("cli_manifest", "cli_bundle"),
+    ):
+        manifest = bundles[manifest_key]
+        bundle = bundles[bundle_key]
+        assert isinstance(manifest, dict)
+        assert isinstance(bundle, Path)
+        for entry in manifest["artifacts"]:
+            assert _path_resolves_inside_base(Path(entry["path"]), bundle)
+
+    for report_key, bundle_key in (
+        ("api_report", "api_bundle"),
+        ("cli_report", "cli_bundle"),
+    ):
+        report = bundles[report_key]
+        bundle = bundles[bundle_key]
+        assert isinstance(report, dict)
+        assert isinstance(bundle, Path)
+        assert report["base_dir"] is not None
+        assert _path_resolves_inside_base(Path(report["base_dir"]), bundle)
+
+
+def test_end_to_end_handoff_bundle_api_cli_round_trip_outputs_body_free(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundles = _load_api_and_cli_handoff_bundles(tmp_path, capsys)
+    for manifest_key in ("api_manifest", "cli_manifest"):
+        manifest = bundles[manifest_key]
+        assert isinstance(manifest, dict)
+        assert "steps" not in manifest
+        assert "command" not in manifest
+        assert "commands" not in manifest
+        assert "followup_commands" not in manifest
+        for entry in manifest["artifacts"]:
+            assert "content" not in entry
+            assert "body" not in entry
+            assert "command" not in entry
+            assert "commands" not in entry
+        _walk_forbidden_fields(manifest)
+
+    for report_key in ("api_report", "cli_report"):
+        report = bundles[report_key]
+        assert isinstance(report, dict)
+        assert "artifacts" not in report
+        assert "steps" not in report
+        assert "command" not in report
+        assert "commands" not in report
+        _walk_forbidden_fields(report)
+
+
+def test_end_to_end_handoff_bundle_api_cli_round_trip_no_generated_commands_executed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("API/CLI parity round-trip must not execute generated commands")
+
+    # subprocess.run을 폭파시켜 두 in-process round-trip(신규 헬퍼)만으로 parity가 성립함을
+    # 증명한다. 구형 subprocess 기반 헬퍼(_run_handoff_manifest_cli)는 호출하지 않는다.
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    bundles = _load_api_and_cli_handoff_bundles(tmp_path, capsys)
+    api_norm = _normalize_handoff_manifest_for_parity(bundles["api_manifest"])  # type: ignore[arg-type]
+    cli_norm = _normalize_handoff_manifest_for_parity(bundles["cli_manifest"])  # type: ignore[arg-type]
+    assert api_norm == cli_norm
 
