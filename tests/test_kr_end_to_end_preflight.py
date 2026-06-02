@@ -8940,3 +8940,275 @@ def test_handoff_cli_success_payloads_no_exec_with_subprocess_patched(
     assert isinstance(returncodes, dict)
     assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
 
+
+# --- 3H24: CLI stdout known-error payload contract smoke (in-process, no-exec) ---
+#
+# 3H23은 `--json` 성공 stdout 계약만 고정했다. 3H24는 동일 네 CLI의 known-domain-error
+# 경로에서 compact/safe JSON error payload(mode/stage/status/exact 4-key/message/no traceback/
+# no raw body echo/no partial output/no sensitive key) 계약을 명시적으로 고정한다.
+# preflight conflicting-flags(args stage, mode 없음) 경로는 의도적으로 제외한다.
+
+
+_ERROR_PAYLOAD_KEYS = frozenset({"status", "stage", "message", "mode"})
+
+
+def _assert_cli_known_error_payload(
+    payload: dict[str, object],
+    *,
+    mode: str,
+    stage: str,
+) -> None:
+    assert set(payload.keys()) == _ERROR_PAYLOAD_KEYS
+    assert payload["status"] == "error"
+    assert payload["stage"] == stage
+    assert payload["mode"] == mode
+    assert isinstance(payload["message"], str)
+    assert payload["message"]
+
+
+def _handoff_cli_known_error_cases(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    marker: str | None = None,
+) -> list[dict[str, object]]:
+    """네 handoff CLI known-domain-error 시나리오 입력·기대값·차단 출력 경로를 준비한다."""
+    cases: list[dict[str, object]] = []
+
+    preflight_dir = tmp_path / "preflight_error"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    missing_manifest = preflight_dir / "missing_manifest.toml"
+    summary_out = preflight_dir / "preflight_summary.json"
+    plan_out = preflight_dir / "plan.md"
+    structured_plan_out = preflight_dir / "structured_plan.json"
+    cases.append(
+        {
+            "label": "preflight",
+            "main_func": preflight_main,
+            "args": [
+                "--manifest",
+                str(missing_manifest),
+                "--summary-out",
+                str(summary_out),
+                "--plan-out",
+                str(plan_out),
+                "--structured-plan-out",
+                str(structured_plan_out),
+                "--emit-followup-commands",
+                "--force",
+                "--json",
+            ],
+            "mode": "kr-end-to-end-intake-preflight",
+            "stage": "parse",
+            "blocked_outputs": [summary_out, plan_out, structured_plan_out],
+            "marker_input": None,
+        }
+    )
+
+    validator_dir = tmp_path / "validator_error"
+    validator_dir.mkdir(parents=True, exist_ok=True)
+    malformed_structured = validator_dir / "structured_plan.json"
+    malformed_text = "{not-valid-json"
+    if marker is not None:
+        malformed_text = f"{malformed_text} {marker}"
+    malformed_structured.write_text(malformed_text, encoding="utf-8")
+    validation_report_out = validator_dir / "validation_report.json"
+    cases.append(
+        {
+            "label": "validator",
+            "main_func": validate_plan_main,
+            "args": [
+                "--structured-plan",
+                str(malformed_structured),
+                "--report-out",
+                str(validation_report_out),
+                "--force",
+                "--json",
+            ],
+            "mode": "kr-end-to-end-preflight-plan-validation",
+            "stage": "parse",
+            "blocked_outputs": [validation_report_out],
+            "marker_input": marker,
+        }
+    )
+
+    builder_dir = tmp_path / "builder_error"
+    builder_paths = _handoff_bundle_through_validator_cli(builder_dir, capsys)
+    report_payload = _load_json(builder_paths["validation_report"])
+    report_payload["status"] = "tampered"
+    _write_json(builder_paths["validation_report"], report_payload)
+    if marker is not None:
+        builder_paths["plan_md"].write_text(
+            builder_paths["plan_md"].read_text(encoding="utf-8") + f"\n{marker}\n",
+            encoding="utf-8",
+        )
+    manifest_out = builder_dir / "handoff_manifest.json"
+    cases.append(
+        {
+            "label": "builder",
+            "main_func": build_handoff_manifest_main,
+            "args": [
+                "--preflight-summary",
+                str(builder_paths["preflight_summary"]),
+                "--plan-md",
+                str(builder_paths["plan_md"]),
+                "--structured-plan",
+                str(builder_paths["structured_plan"]),
+                "--validation-report",
+                str(builder_paths["validation_report"]),
+                "--manifest-out",
+                str(manifest_out),
+                "--base-dir",
+                str(builder_dir),
+                "--force",
+                "--json",
+            ],
+            "mode": "kr-end-to-end-handoff-manifest-build",
+            "stage": "validate",
+            "blocked_outputs": [manifest_out],
+            "marker_input": marker,
+        }
+    )
+
+    verify_root = tmp_path / "verifier_error"
+    bundle_dir, manifest_path = _generated_handoff_bundle(verify_root, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    tamper_suffix = f"\n{marker}\n" if marker is not None else "\n# tampered-appendix\n"
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + tamper_suffix, encoding="utf-8")
+    verification_report_out = bundle_dir / "verification_report_error.json"
+    cases.append(
+        {
+            "label": "verifier",
+            "main_func": verify_handoff_manifest_main,
+            "args": _verify_cli_args(
+                manifest_path,
+                bundle_dir,
+                "--verification-report-out",
+                str(verification_report_out),
+                "--force",
+            ),
+            "mode": "kr-end-to-end-handoff-manifest-verification",
+            "stage": "validate",
+            "blocked_outputs": [verification_report_out],
+            "marker_input": marker,
+        }
+    )
+
+    return cases
+
+
+def _run_handoff_cli_known_error_case(
+    case: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, object], str, str]:
+    main_func = case["main_func"]
+    args = case["args"]
+    assert callable(main_func)
+    assert isinstance(args, list)
+    rc, payload, stdout, stderr = _run_cli_main_json(main_func, args, capsys)
+    assert rc == 1
+    _assert_cli_known_error_payload(
+        payload,
+        mode=str(case["mode"]),
+        stage=str(case["stage"]),
+    )
+    return rc, payload, stdout, stderr
+
+
+def test_handoff_cli_error_payloads_have_exact_modes_stages_and_keys(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_bundle", capsys)
+    expected = {
+        "preflight": ("kr-end-to-end-intake-preflight", "parse"),
+        "validator": ("kr-end-to-end-preflight-plan-validation", "parse"),
+        "builder": ("kr-end-to-end-handoff-manifest-build", "validate"),
+        "verifier": ("kr-end-to-end-handoff-manifest-verification", "validate"),
+    }
+    for case in cases:
+        label = str(case["label"])
+        mode, stage = expected[label]
+        assert case["mode"] == mode
+        assert case["stage"] == stage
+        _run_handoff_cli_known_error_case(case, capsys)
+
+
+def test_handoff_cli_error_payloads_do_not_create_downstream_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_no_partial", capsys)
+    for case in cases:
+        blocked_outputs = case["blocked_outputs"]
+        assert isinstance(blocked_outputs, list)
+        for path in blocked_outputs:
+            assert isinstance(path, Path)
+            assert not path.exists()
+        _run_handoff_cli_known_error_case(case, capsys)
+        for path in blocked_outputs:
+            assert not path.exists(), f"partial output created for {case['label']}: {path}"
+
+
+def test_handoff_cli_error_payloads_do_not_echo_raw_input_body(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = "UNIQUE_ERROR_PAYLOAD_MARKER_3H24"
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_body_free", capsys, marker=marker)
+    for case in cases:
+        _, payload, stdout, stderr = _run_handoff_cli_known_error_case(case, capsys)
+        message = payload["message"]
+        assert isinstance(message, str)
+        if case["marker_input"] is not None:
+            assert marker not in message
+            assert marker not in stdout
+            assert marker not in stderr
+
+
+def test_handoff_cli_error_payloads_have_no_traceback_and_stdout_json_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_traceback", capsys)
+    for case in cases:
+        _, payload, stdout, stderr = _run_handoff_cli_known_error_case(case, capsys)
+        assert "Traceback" not in stdout
+        assert "Traceback" not in stderr
+        assert isinstance(payload, dict)
+        assert not stderr.strip() or "Traceback" not in stderr
+
+
+def test_handoff_cli_error_payloads_do_not_contain_sensitive_or_trading_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_sensitive", capsys)
+    forbidden = _SENSITIVE_PAYLOAD_FIELDS | _FORBIDDEN_OUTPUT_FIELDS
+    for case in cases:
+        _, payload, _, _ = _run_handoff_cli_known_error_case(case, capsys)
+        _walk_payload_forbidden_keys(payload, forbidden=forbidden)
+
+
+def test_handoff_cli_error_payloads_known_errors_return_one_not_raise(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI known-error payload sequence must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    cases = _handoff_cli_known_error_cases(tmp_path / "cli_error_return_one", capsys)
+    for case in cases:
+        main_func = case["main_func"]
+        args = case["args"]
+        assert callable(main_func)
+        assert isinstance(args, list)
+        rc = main_func(args)
+        assert rc == 1
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert isinstance(payload, dict)
+        _assert_cli_known_error_payload(
+            payload,
+            mode=str(case["mode"]),
+            stage=str(case["stage"]),
+        )
+
