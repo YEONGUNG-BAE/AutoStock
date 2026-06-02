@@ -9513,3 +9513,274 @@ def test_handoff_cli_json_channel_discipline_no_generated_commands_executed(
         _run_handoff_cli_known_error_channel_case(case, capsys)
         for path in blocked_outputs:
             assert not path.exists(), f"partial output created for {case['label']}: {path}"
+
+
+# --- 3H26: CLI argument-domain failure no-output smoke (in-process, no-exec) ---
+#
+# 3H24/3H25는 known-domain-error·stdout JSON 채널을 고정했다. 3H26은 argparse/SystemExit가
+# 아닌 CLI 자체 args/validate/write 단계 실패(출력 존재·base-dir·blank path)에서 rc==1,
+# exact 4-key error payload, 출력 보존/미생성, traceback 없음을 argument-domain 관점에서 고정한다.
+
+
+_ARG_DOMAIN_FAILURE_SENTINEL = "SENTINEL_3H26_ARG_DOMAIN_FAILURE"
+
+
+def _run_handoff_cli_arg_domain_failure(
+    main_func,
+    args: list[str],
+    capsys: pytest.CaptureFixture[str],
+    *,
+    mode: str,
+    stage: str,
+    sentinel: str | None = None,
+) -> tuple[int, dict[str, object], str, str]:
+    """argument-domain CLI 실패를 in-process로 실행하고 known-error·채널 규율을 검증한다."""
+    rc, payload, stdout, stderr = _run_cli_main_json_channel(main_func, args, capsys)
+    assert rc == 1
+    _assert_cli_known_error_payload(payload, mode=mode, stage=stage)
+    if sentinel is not None:
+        message = payload["message"]
+        assert isinstance(message, str)
+        assert sentinel not in message
+        assert sentinel not in stdout
+        assert sentinel not in stderr
+    return rc, payload, stdout, stderr
+
+
+def test_handoff_cli_arg_failure_validator_output_exists_preserves_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "validator_write_guard"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    report_out = paths["validation_report"]
+    report_out.write_text(f"{_ARG_DOMAIN_FAILURE_SENTINEL}\n", encoding="utf-8")
+    original_bytes = report_out.read_bytes()
+
+    _run_handoff_cli_arg_domain_failure(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--report-out",
+            str(report_out),
+            "--json",
+        ],
+        capsys,
+        mode="kr-end-to-end-preflight-plan-validation",
+        stage="write",
+        sentinel=_ARG_DOMAIN_FAILURE_SENTINEL,
+    )
+    assert report_out.read_bytes() == original_bytes
+
+
+def test_handoff_cli_arg_failure_builder_output_exists_preserves_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "builder_write_guard"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    manifest_out.write_text(f"{_ARG_DOMAIN_FAILURE_SENTINEL}\n", encoding="utf-8")
+    original_bytes = manifest_out.read_bytes()
+
+    _run_handoff_cli_arg_domain_failure(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(paths["preflight_summary"]),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--json",
+        ],
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-build",
+        stage="write",
+        sentinel=_ARG_DOMAIN_FAILURE_SENTINEL,
+    )
+    assert manifest_out.read_bytes() == original_bytes
+
+
+def test_handoff_cli_arg_failure_verifier_report_exists_preserves_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path / "verifier_write_guard", capsys=capsys)
+    report_out = bundle_dir / "verification_report_sentinel.json"
+    report_out.write_text(f"{_ARG_DOMAIN_FAILURE_SENTINEL}\n", encoding="utf-8")
+    original_bytes = report_out.read_bytes()
+
+    _run_handoff_cli_arg_domain_failure(
+        verify_handoff_manifest_main,
+        _verify_cli_args(
+            manifest_path,
+            bundle_dir,
+            "--verification-report-out",
+            str(report_out),
+        ),
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage="write",
+        sentinel=_ARG_DOMAIN_FAILURE_SENTINEL,
+    )
+    assert report_out.read_bytes() == original_bytes
+
+
+def test_handoff_cli_arg_failure_builder_missing_base_dir_creates_no_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "builder_missing_base"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    missing_base = tmp_path / "missing_base_dir"
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    assert not manifest_out.exists()
+
+    _run_handoff_cli_arg_domain_failure(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(paths["preflight_summary"]),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(missing_base),
+            "--json",
+        ],
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-build",
+        stage="validate",
+    )
+    assert not manifest_out.exists()
+
+
+def test_handoff_cli_arg_failure_verifier_missing_base_dir_creates_no_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path / "verifier_missing_base", capsys=capsys)
+    missing_base = tmp_path / "missing_base_dir"
+    report_out = bundle_dir / "new_verification_report.json"
+    assert not report_out.exists()
+
+    _run_handoff_cli_arg_domain_failure(
+        verify_handoff_manifest_main,
+        _verify_cli_args(
+            manifest_path,
+            missing_base,
+            "--verification-report-out",
+            str(report_out),
+        ),
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage="validate",
+    )
+    assert not report_out.exists()
+
+
+def test_handoff_cli_arg_failure_builder_base_dir_file_creates_no_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "builder_file_base"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    base_file = tmp_path / "base_file"
+    base_file.write_text("not a dir\n", encoding="utf-8")
+    manifest_out = bundle_dir / "handoff_manifest.json"
+    assert not manifest_out.exists()
+
+    _run_handoff_cli_arg_domain_failure(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(paths["preflight_summary"]),
+            "--plan-md",
+            str(paths["plan_md"]),
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--validation-report",
+            str(paths["validation_report"]),
+            "--manifest-out",
+            str(manifest_out),
+            "--base-dir",
+            str(base_file),
+            "--json",
+        ],
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-build",
+        stage="validate",
+    )
+    assert not manifest_out.exists()
+
+
+def test_handoff_cli_arg_failure_verifier_base_dir_file_creates_no_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path / "verifier_file_base", capsys=capsys)
+    base_file = tmp_path / "base_file"
+    base_file.write_text("not a dir\n", encoding="utf-8")
+    report_out = bundle_dir / "new_verification_report.json"
+    assert not report_out.exists()
+
+    _run_handoff_cli_arg_domain_failure(
+        verify_handoff_manifest_main,
+        _verify_cli_args(
+            manifest_path,
+            base_file,
+            "--verification-report-out",
+            str(report_out),
+        ),
+        capsys,
+        mode="kr-end-to-end-handoff-manifest-verification",
+        stage="validate",
+    )
+    assert not report_out.exists()
+
+
+@pytest.mark.parametrize(
+    ("main_func", "args", "mode"),
+    [
+        (
+            build_handoff_manifest_main,
+            ["--manifest-out", "", "--json"],
+            "kr-end-to-end-handoff-manifest-build",
+        ),
+        (
+            verify_handoff_manifest_main,
+            [
+                "--manifest",
+                "unused_handoff_manifest.json",
+                "--verification-report-out",
+                "",
+                "--json",
+            ],
+            "kr-end-to-end-handoff-manifest-verification",
+        ),
+        (
+            validate_plan_main,
+            ["--structured-plan", "", "--json"],
+            "kr-end-to-end-preflight-plan-validation",
+        ),
+    ],
+)
+def test_handoff_cli_arg_failure_stable_blank_paths_return_args(
+    main_func,
+    args: list[str],
+    mode: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_handoff_cli_arg_domain_failure(
+        main_func,
+        args,
+        capsys,
+        mode=mode,
+        stage="args",
+    )

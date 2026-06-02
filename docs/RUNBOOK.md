@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2538 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2548 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2538 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2548 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -1015,7 +1015,9 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
 
 **3H25 CLI stdout JSON channel discipline smoke (test coverage only):** the suite runs the four handoff CLIs in-process with `--json` on success and known-domain-error paths and asserts clean machine-readable stdout (exactly one JSON object via `raw_decode` on stripped stdout; no human prefix/suffix; pretty-printed multi-line JSON allowed; no traceback; no JSON payload on stderr; success outputs exist; known-error blocked outputs not created; no generated command execution). No subprocess; no new operator command is required.
 
-**Deferred next step:** **3H26+** end-to-end hardening (unimplemented).
+**3H26 CLI argument-domain failure no-output smoke (test coverage only):** the suite runs validator/builder/verifier handoff CLIs in-process with `--json` on representative argument-domain failures (output exists without `--force` at `write` stage with byte preservation; missing/not-directory `base_dir` at `validate` stage with no downstream output; stable blank path args at `args` stage) and asserts `rc == 1`, exact four-key error payload `{status, stage, message, mode}`, expected `mode`/`stage`, no traceback, no sentinel body echo, and no partial output creation/overwrite. Blank `--base-dir` and validator `--report-out ""` are intentionally excluded (CLI `Path("")` maps to cwd; empty report_out may be treated as omitted). No subprocess; no new operator command is required.
+
+**Deferred next step:** **3H27+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1256,7 +1258,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2538 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2548 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
