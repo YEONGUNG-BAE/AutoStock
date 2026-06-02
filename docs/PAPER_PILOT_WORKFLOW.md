@@ -623,6 +623,7 @@ Controlled Day 1 **PASS** 후 다음 증분은 **Real Research Source Intake v1*
 - **3H17 in-process CLI handoff bundle round-trip smoke implemented** — same chain through in-process `main([...])` calls (preflight/validator/builder/verifier CLI wiring) in `tests/test_kr_end_to_end_preflight.py`; covers both API and CLI no-exec round-trips; no subprocess; no new operator command; no command execution.
 
 - **3H18 API/CLI handoff bundle parity smoke implemented** — API and in-process CLI round-trips run in separate bundles and compared via path/hash-independent semantic normalization (roles/kinds/modes/flags/entry-key sets equal; only sha256 shape + size>0 + base_dir presence; per-bundle containment; body-free; no-exec) in `tests/test_kr_end_to_end_preflight.py`; no subprocess; no new operator command; no command execution.
+- **3H19 handoff bundle tamper-detection smoke implemented** — 3H16-generated bundles tampered post-build; verifier rejects modified/deleted/malformed/drifted artifacts and manifest metadata; report wrapper skips write on failure; body-free errors; in-process only; no new operator command.
 
 - **Controlled Day 1 walk-through** — Foundation 8B~8I ops chain을 **1회** 수동 검증하고 **8I no-write rehearsal에서 종료**. 30거래일 pilot **시작과 동일하지 않다**. runbook: `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through.
 - **Real API fetchers** — Controlled Day 1 **이후** deferred. FRED/DART/yfinance/news HTTP intake는 별도 구현·review 후.

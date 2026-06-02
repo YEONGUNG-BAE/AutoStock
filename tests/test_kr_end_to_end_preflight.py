@@ -7562,3 +7562,187 @@ def test_end_to_end_handoff_bundle_api_cli_round_trip_no_generated_commands_exec
     cli_norm = _normalize_handoff_manifest_for_parity(bundles["cli_manifest"])  # type: ignore[arg-type]
     assert api_norm == cli_norm
 
+
+# --- 3H19: generated handoff bundle tamper-detection smoke -------------------
+
+
+def _handoff_manifest_path(round_trip: dict[str, object]) -> Path:
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    manifest_path = paths["handoff_manifest"]
+    assert isinstance(manifest_path, Path)
+    return manifest_path
+
+
+def _verification_report_path(round_trip: dict[str, object]) -> Path:
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    report_path = paths["verification_report"]
+    assert isinstance(report_path, Path)
+    return report_path
+
+
+def _artifact_path_by_role(manifest: dict[str, object], role: str) -> Path:
+    artifacts = manifest.get("artifacts")
+    assert isinstance(artifacts, list)
+    for entry in artifacts:
+        if isinstance(entry, dict) and entry.get("role") == role:
+            path_text = entry.get("path")
+            assert isinstance(path_text, str)
+            return Path(path_text)
+    raise AssertionError(f"artifact role not found in manifest: {role}")
+
+
+def _load_json(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _write_json(path: Path, payload: dict[str, object], *, indent: int | None = None) -> None:
+    if indent is None:
+        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=indent) + "\n", encoding="utf-8")
+
+
+def _refresh_manifest_entry_integrity(manifest_path: Path, role: str) -> None:
+    """artifact 파일 변경 후 manifest entry size/sha256만 현재 바이트에 맞춘다."""
+    payload = _load_json(manifest_path)
+    _refresh_manifest_integrity_for_role(payload, role)
+    _write_json(manifest_path, payload, indent=2)
+
+
+def _generated_handoff_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    """3H16 API round-trip으로 유효 handoff bundle을 생성한다(이미 검증 완료)."""
+    bundle_dir = tmp_path / "bundle"
+    round_trip = _run_handoff_bundle_round_trip(bundle_dir)
+    manifest_path = _handoff_manifest_path(round_trip)
+    return bundle_dir, manifest_path
+
+
+def test_handoff_bundle_tamper_modified_artifact_integrity_fails_validate(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + "\n# tampered-appendix\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_deleted_artifact_fails_validate(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    summary_path = _artifact_path_by_role(manifest, "preflight_summary")
+    summary_path.unlink()
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_malformed_json_artifact_fails_parse_after_integrity_refresh(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    structured_path = _artifact_path_by_role(manifest, "structured_plan")
+    structured_path.write_text("{not-valid-json", encoding="utf-8")
+    _refresh_manifest_entry_integrity(manifest_path, "structured_plan")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "parse"
+
+
+def test_handoff_bundle_tamper_structured_plan_mode_drift_fails_validate_after_integrity_refresh(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    structured_path = _artifact_path_by_role(manifest, "structured_plan")
+    structured_payload = _load_json(structured_path)
+    structured_payload["mode"] = "tampered-mode-label"
+    _write_json(structured_path, structured_payload)
+    _refresh_manifest_entry_integrity(manifest_path, "structured_plan")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_validation_report_status_drift_fails_validate_after_integrity_refresh(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    report_path = _artifact_path_by_role(manifest, "validation_report")
+    report_payload = _load_json(report_path)
+    report_payload["status"] = "tampered"
+    _write_json(report_path, report_payload)
+    _refresh_manifest_entry_integrity(manifest_path, "validation_report")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_manifest_recorded_sha_mismatch_fails_validate(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["sha256"] = "b" * 64  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_manifest_recorded_size_mismatch_fails_validate(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["size_bytes"] = 1  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+
+
+def test_handoff_bundle_tamper_artifact_path_outside_base_fails_validate(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_summary = outside_dir / "outside_summary.json"
+    outside_summary.write_text('{"status": "tampered"}\n', encoding="utf-8")
+    payload = _load_json(manifest_path)
+    payload["artifacts"][0]["path"] = str(outside_summary)  # type: ignore[index]
+    _write_json(manifest_path, payload, indent=2)
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+    assert "path escapes base directory" in exc_info.value.message
+
+
+def test_handoff_bundle_tamper_verification_report_not_written_on_failure(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text("# tampered plan body\n", encoding="utf-8")
+    report_out = bundle_dir / "tampered_verification_report.json"
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError):
+        run_verify_kr_end_to_end_handoff_manifest(
+            manifest_path,
+            base_dir=bundle_dir,
+            verification_report_out=report_out,
+            force=True,
+        )
+    assert not report_out.exists()
+
+
+def test_handoff_bundle_tamper_failure_does_not_echo_artifact_body(tmp_path: Path) -> None:
+    bundle_dir, manifest_path = _generated_handoff_bundle(tmp_path)
+    manifest = _load_json(manifest_path)
+    marker = "UNIQUE_TAMPER_MARKER_3H19"
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    plan_path.write_text(f"# plan\n{marker}\n", encoding="utf-8")
+    with pytest.raises(KrEndToEndHandoffManifestVerifyError) as exc_info:
+        verify_kr_end_to_end_handoff_manifest(manifest_path, base_dir=bundle_dir)
+    assert exc_info.value.stage == "validate"
+    assert marker not in exc_info.value.message
+
