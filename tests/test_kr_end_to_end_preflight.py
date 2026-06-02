@@ -8299,3 +8299,204 @@ def test_handoff_pipeline_failure_payload_does_not_echo_artifact_body_cli(
     assert marker not in stderr
     assert not report_out.exists()
 
+
+# --- 3H22: handoff bundle reproducibility/determinism smoke (in-process, no-exec) ---
+#
+# 3H16–3H21은 happy path·parity·tamper·fail-closed를 검증했지만, 동일 fixture로 반복 실행 시
+# 의미 계약(역할/종류/모드/플래그/스키마 키 집합)이 안정적인지는 단언하지 않았다. 3H22는 API/CLI
+# round-trip을 각각 별도 bundle에 두 번 돌리고 3H18 정규화 요약으로 A vs B 동등성을 증명한다.
+# 절대경로·sha256 값·size_bytes 값·base_dir 문자열·wall-clock 타임스탬프는 bundle마다 달라질 수
+# 있으므로 교차 비교하지 않는다.
+
+
+def _load_round_trip_contracts(round_trip: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    """round-trip 헬퍼 산출물에서 handoff manifest와 verification report를 로드한다."""
+    paths = round_trip["paths"]
+    assert isinstance(paths, dict)
+    manifest = _load_json(paths["handoff_manifest"])
+    report = _load_json(paths["verification_report"])
+    return manifest, report
+
+
+def _assert_handoff_contract_body_free(
+    manifest: dict[str, object],
+    report: dict[str, object],
+) -> None:
+    """manifest/report가 exact-key·body-free 계약을 만족하는지 단언한다(_walk_forbidden_fields 단독 금지)."""
+    assert set(manifest.keys()) == _MANIFEST_EXPECTED_TOP_KEYS
+    assert "steps" not in manifest
+    assert "command" not in manifest
+    assert "commands" not in manifest
+    assert "followup_commands" not in manifest
+    for entry in manifest["artifacts"]:
+        assert isinstance(entry, dict)
+        assert set(entry.keys()) == _ARTIFACT_ENTRY_KEYS
+        assert "content" not in entry
+        assert "body" not in entry
+        assert "command" not in entry
+        assert "commands" not in entry
+
+    assert set(report.keys()) == _HANDOFF_VERIFY_REPORT_EXPECTED_KEYS
+    assert "artifacts" not in report
+    assert "steps" not in report
+    assert "command" not in report
+    assert "commands" not in report
+
+
+def _assert_handoff_bundle_containment(
+    bundle_dir: Path,
+    manifest: dict[str, object],
+    report: dict[str, object],
+) -> None:
+    """각 run의 bundle_dir 기준으로 artifact path와 report base_dir containment를 단언한다."""
+    for entry in manifest["artifacts"]:
+        assert isinstance(entry, dict)
+        assert _path_resolves_inside_base(Path(entry["path"]), bundle_dir)
+    base_dir = report.get("base_dir")
+    assert base_dir is not None
+    assert _path_resolves_inside_base(Path(str(base_dir)), bundle_dir)
+
+
+def test_handoff_bundle_api_round_trip_reproducible_manifest_contract(tmp_path: Path) -> None:
+    api_bundle_a = tmp_path / "api_a"
+    api_bundle_b = tmp_path / "api_b"
+    manifest_a, _report_a = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_a))
+    manifest_b, _report_b = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_b))
+
+    norm_a = _normalize_handoff_manifest_for_parity(manifest_a)
+    norm_b = _normalize_handoff_manifest_for_parity(manifest_b)
+    assert norm_a == norm_b
+    assert norm_a["top_keys"] == sorted(_MANIFEST_EXPECTED_TOP_KEYS)
+    assert norm_a["roles"] == list(_ROLE_ORDER)
+    assert norm_a["commands_execute_in_builder"] is False
+    assert norm_a["review_only"] is True
+    assert all(norm_a["sha256_shape"])  # type: ignore[arg-type]
+    assert all(norm_a["size_positive"])  # type: ignore[arg-type]
+    assert all(keys == sorted(_ARTIFACT_ENTRY_KEYS) for keys in norm_a["entry_keys"])  # type: ignore[union-attr]
+
+
+def test_handoff_bundle_api_round_trip_reproducible_verification_report_contract(tmp_path: Path) -> None:
+    api_bundle_a = tmp_path / "api_a"
+    api_bundle_b = tmp_path / "api_b"
+    _manifest_a, report_a = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_a))
+    _manifest_b, report_b = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_b))
+
+    norm_a = _normalize_verification_report_for_parity(report_a)
+    norm_b = _normalize_verification_report_for_parity(report_b)
+    assert norm_a == norm_b
+    assert norm_a["keys"] == sorted(_HANDOFF_VERIFY_REPORT_EXPECTED_KEYS)
+    assert norm_a["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+    assert norm_a["path_containment_verified"] is True
+    assert norm_a["hashes_verified"] is True
+    assert norm_a["metadata_verified"] is True
+    assert norm_a["schema_verified"] is True
+    assert norm_a["commands_execute_in_verifier"] is False
+    assert norm_a["review_only"] is True
+    assert norm_a["base_dir_present"] is True
+
+
+def test_handoff_bundle_cli_round_trip_reproducible_manifest_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli_bundle_a = tmp_path / "cli_a"
+    cli_bundle_b = tmp_path / "cli_b"
+    manifest_a, _report_a = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_a, capsys)
+    )
+    manifest_b, _report_b = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_b, capsys)
+    )
+
+    norm_a = _normalize_handoff_manifest_for_parity(manifest_a)
+    norm_b = _normalize_handoff_manifest_for_parity(manifest_b)
+    assert norm_a == norm_b
+    assert norm_a["top_keys"] == sorted(_MANIFEST_EXPECTED_TOP_KEYS)
+    assert norm_a["roles"] == list(_ROLE_ORDER)
+    assert norm_a["commands_execute_in_builder"] is False
+    assert norm_a["review_only"] is True
+
+
+def test_handoff_bundle_cli_round_trip_reproducible_verification_report_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli_bundle_a = tmp_path / "cli_a"
+    cli_bundle_b = tmp_path / "cli_b"
+    _manifest_a, report_a = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_a, capsys)
+    )
+    _manifest_b, report_b = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_b, capsys)
+    )
+
+    norm_a = _normalize_verification_report_for_parity(report_a)
+    norm_b = _normalize_verification_report_for_parity(report_b)
+    assert norm_a == norm_b
+    assert norm_a["keys"] == sorted(_HANDOFF_VERIFY_REPORT_EXPECTED_KEYS)
+    assert norm_a["artifact_roles"] == list(_EXPECTED_ARTIFACT_ROLES)
+    assert norm_a["path_containment_verified"] is True
+    assert norm_a["commands_execute_in_verifier"] is False
+    assert norm_a["review_only"] is True
+    assert norm_a["base_dir_present"] is True
+
+
+def test_handoff_bundle_reproducible_runs_remain_contained_and_body_free(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """API/CLI 각 두 run의 containment·exact-key·body-free 계약을 per-bundle로 재단언한다."""
+    api_bundle_a = tmp_path / "api_a"
+    api_bundle_b = tmp_path / "api_b"
+    api_round_a = _run_handoff_bundle_round_trip(api_bundle_a)
+    api_round_b = _run_handoff_bundle_round_trip(api_bundle_b)
+    cli_bundle_a = tmp_path / "cli_a"
+    cli_bundle_b = tmp_path / "cli_b"
+    cli_round_a = _run_handoff_bundle_cli_round_trip(cli_bundle_a, capsys)
+    cli_round_b = _run_handoff_bundle_cli_round_trip(cli_bundle_b, capsys)
+
+    for bundle_dir, round_trip in (
+        (api_bundle_a, api_round_a),
+        (api_bundle_b, api_round_b),
+        (cli_bundle_a, cli_round_a),
+        (cli_bundle_b, cli_round_b),
+    ):
+        manifest, report = _load_round_trip_contracts(round_trip)
+        _assert_handoff_bundle_containment(bundle_dir, manifest, report)
+        _assert_handoff_contract_body_free(manifest, report)
+        _walk_forbidden_fields(manifest)
+        _walk_forbidden_fields(report)
+
+
+def test_handoff_bundle_reproducible_round_trips_no_generated_commands_executed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("reproducibility round-trip must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    api_bundle_a = tmp_path / "api_a"
+    api_bundle_b = tmp_path / "api_b"
+    manifest_a, report_a = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_a))
+    manifest_b, report_b = _load_round_trip_contracts(_run_handoff_bundle_round_trip(api_bundle_b))
+    assert _normalize_handoff_manifest_for_parity(manifest_a) == _normalize_handoff_manifest_for_parity(
+        manifest_b
+    )
+    assert _normalize_verification_report_for_parity(report_a) == _normalize_verification_report_for_parity(
+        report_b
+    )
+
+    cli_bundle_a = tmp_path / "cli_a"
+    cli_bundle_b = tmp_path / "cli_b"
+    cli_manifest_a, cli_report_a = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_a, capsys)
+    )
+    cli_manifest_b, cli_report_b = _load_round_trip_contracts(
+        _run_handoff_bundle_cli_round_trip(cli_bundle_b, capsys)
+    )
+    assert _normalize_handoff_manifest_for_parity(cli_manifest_a) == _normalize_handoff_manifest_for_parity(
+        cli_manifest_b
+    )
+    assert _normalize_verification_report_for_parity(cli_report_a) == _normalize_verification_report_for_parity(
+        cli_report_b
+    )
+
