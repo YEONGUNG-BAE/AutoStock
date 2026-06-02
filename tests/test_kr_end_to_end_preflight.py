@@ -9212,3 +9212,607 @@ def test_handoff_cli_error_payloads_known_errors_return_one_not_raise(
             stage=str(case["stage"]),
         )
 
+
+# --- 3H25: CLI stdout JSON channel discipline smoke (in-process, no-exec) ---
+#
+# 3H23/3H24은 success/error payload 내용 계약을 고정했다. 3H25는 `--json` stdout이
+# machine-readable 단일 JSON 객체만 담는지(raw_decode 전체 소비, prefix/suffix 없음,
+# traceback 없음, stderr JSON payload 없음) success/known-error 네 CLI 모두에 대해 고정한다.
+
+
+def _parse_single_stdout_json_object(stdout: str) -> dict[str, object]:
+    """stdout이 단일 JSON dict 객체인지 raw_decode로 검증하고 파싱한다."""
+    stripped = stdout.strip()
+    assert stripped
+    decoder = json.JSONDecoder()
+    payload, end = decoder.raw_decode(stripped)
+    assert stripped[end:].strip() == ""
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _assert_json_channel_clean(
+    *,
+    stdout: str,
+    stderr: str,
+) -> dict[str, object]:
+    """`--json` stdout/stderr 채널 규율: 단일 JSON 객체, traceback 없음, stderr JSON 없음."""
+    assert "Traceback" not in stdout
+    assert "Traceback" not in stderr
+    payload = _parse_single_stdout_json_object(stdout)
+    # stderr에 짧은 human 메시지는 허용하되, JSON payload 객체는 금지한다.
+    assert not stderr.lstrip().startswith("{")
+    return payload
+
+
+def _run_cli_main_json_channel(
+    main_func,
+    args: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, object], str, str]:
+    """in-process CLI main 호출 후 stdout JSON 채널 규율을 검증한다."""
+    rc = main_func(args)
+    captured = capsys.readouterr()
+    payload = _assert_json_channel_clean(stdout=captured.out, stderr=captured.err)
+    return rc, payload, captured.out, captured.err
+
+
+def _run_handoff_cli_success_stdout_channel_sequence(
+    bundle_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> list[dict[str, object]]:
+    """3H25 — 네 handoff CLI success `--json` stdout/stderr를 stage별로 수집한다."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    stages: list[dict[str, object]] = []
+
+    preflight_rc, preflight_payload, preflight_stdout, preflight_stderr = _run_cli_main_json_channel(
+        preflight_main,
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "preflight",
+            "rc": preflight_rc,
+            "payload": preflight_payload,
+            "stdout": preflight_stdout,
+            "stderr": preflight_stderr,
+            "mode": "kr-end-to-end-intake-preflight",
+            "outputs": [summary_out, plan_out, structured_plan_out],
+        }
+    )
+
+    validator_rc, validator_payload, validator_stdout, validator_stderr = _run_cli_main_json_channel(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "validator",
+            "rc": validator_rc,
+            "payload": validator_payload,
+            "stdout": validator_stdout,
+            "stderr": validator_stderr,
+            "mode": "kr-end-to-end-preflight-plan-validation",
+            "outputs": [validation_report_out],
+        }
+    )
+
+    build_rc, build_payload, build_stdout, build_stderr = _run_cli_main_json_channel(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(summary_out),
+            "--plan-md",
+            str(plan_out),
+            "--structured-plan",
+            str(structured_plan_out),
+            "--validation-report",
+            str(validation_report_out),
+            "--manifest-out",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "builder",
+            "rc": build_rc,
+            "payload": build_payload,
+            "stdout": build_stdout,
+            "stderr": build_stderr,
+            "mode": "kr-end-to-end-handoff-manifest-build",
+            "outputs": [handoff_manifest_out],
+        }
+    )
+
+    verify_rc, verify_payload, verify_stdout, verify_stderr = _run_cli_main_json_channel(
+        verify_handoff_manifest_main,
+        [
+            "--manifest",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(verification_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "verifier",
+            "rc": verify_rc,
+            "payload": verify_payload,
+            "stdout": verify_stdout,
+            "stderr": verify_stderr,
+            "mode": "kr-end-to-end-handoff-manifest-verification",
+            "outputs": [verification_report_out],
+        }
+    )
+
+    return stages
+
+
+def _run_handoff_cli_known_error_channel_case(
+    case: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, object], str, str]:
+    """known-domain-error CLI 한 건을 stdout JSON 채널 규율과 함께 실행한다."""
+    main_func = case["main_func"]
+    args = case["args"]
+    assert callable(main_func)
+    assert isinstance(args, list)
+    rc, payload, stdout, stderr = _run_cli_main_json_channel(main_func, args, capsys)
+    assert rc == 1
+    _assert_cli_known_error_payload(
+        payload,
+        mode=str(case["mode"]),
+        stage=str(case["stage"]),
+    )
+    return rc, payload, stdout, stderr
+
+
+def test_handoff_cli_json_success_stdout_is_single_object_for_all_clis(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = _run_handoff_cli_success_stdout_channel_sequence(tmp_path / "json_channel_success", capsys)
+    assert len(stages) == 4
+    for stage in stages:
+        assert stage["rc"] == 0
+        payload = stage["payload"]
+        assert isinstance(payload, dict)
+        _assert_cli_success_payload(payload, mode=str(stage["mode"]))
+        stdout = stage["stdout"]
+        assert isinstance(stdout, str)
+        reparsed = _parse_single_stdout_json_object(stdout)
+        assert reparsed == payload
+
+
+def test_handoff_cli_json_error_stdout_is_single_object_for_all_clis(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_error", capsys)
+    assert len(cases) == 4
+    for case in cases:
+        _, payload, stdout, _ = _run_handoff_cli_known_error_channel_case(case, capsys)
+        reparsed = _parse_single_stdout_json_object(stdout)
+        assert reparsed == payload
+
+
+def test_handoff_cli_json_success_stdout_has_no_human_prefix_or_suffix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = _run_handoff_cli_success_stdout_channel_sequence(tmp_path / "json_channel_success_clean", capsys)
+    for stage in stages:
+        stdout = stage["stdout"]
+        assert isinstance(stdout, str)
+        stripped = stdout.strip()
+        assert stripped.startswith("{")
+        assert stripped.endswith("}")
+        decoder = json.JSONDecoder()
+        _, end = decoder.raw_decode(stripped)
+        assert stripped[end:].strip() == ""
+
+
+def test_handoff_cli_json_error_stdout_has_no_human_prefix_or_suffix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_error_clean", capsys)
+    for case in cases:
+        _, _, stdout, _ = _run_handoff_cli_known_error_channel_case(case, capsys)
+        stripped = stdout.strip()
+        assert stripped.startswith("{")
+        assert stripped.endswith("}")
+        decoder = json.JSONDecoder()
+        _, end = decoder.raw_decode(stripped)
+        assert stripped[end:].strip() == ""
+
+
+def test_handoff_cli_json_outputs_have_no_traceback_or_stderr_json_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    success_stages = _run_handoff_cli_success_stdout_channel_sequence(
+        tmp_path / "json_channel_no_traceback_success",
+        capsys,
+    )
+    for stage in success_stages:
+        stdout = stage["stdout"]
+        stderr = stage["stderr"]
+        assert isinstance(stdout, str)
+        assert isinstance(stderr, str)
+        _assert_json_channel_clean(stdout=stdout, stderr=stderr)
+
+    error_cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_no_traceback_error", capsys)
+    for case in error_cases:
+        _, _, stdout, stderr = _run_handoff_cli_known_error_channel_case(case, capsys)
+        _assert_json_channel_clean(stdout=stdout, stderr=stderr)
+
+
+def test_handoff_cli_json_channel_discipline_no_generated_commands_executed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI JSON channel discipline sequence must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+
+    success_stages = _run_handoff_cli_success_stdout_channel_sequence(
+        tmp_path / "json_channel_no_exec_success",
+        capsys,
+    )
+    for stage in success_stages:
+        assert stage["rc"] == 0
+        outputs = stage["outputs"]
+        assert isinstance(outputs, list)
+        for path in outputs:
+            assert isinstance(path, Path)
+            assert path.is_file()
+
+    error_cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_no_exec_error", capsys)
+    for case in error_cases:
+        blocked_outputs = case["blocked_outputs"]
+        assert isinstance(blocked_outputs, list)
+        for path in blocked_outputs:
+            assert isinstance(path, Path)
+            assert not path.exists()
+        _run_handoff_cli_known_error_channel_case(case, capsys)
+        for path in blocked_outputs:
+            assert not path.exists(), f"partial output created for {case['label']}: {path}"
+
+
+# --- 3H25: CLI stdout JSON channel discipline smoke (in-process, no-exec) ---
+#
+# 3H23/3H24은 success/error payload 내용 계약을 고정했다. 3H25는 `--json` stdout이
+# machine-readable 단일 JSON 객체만 담는지(raw_decode 전체 소비, prefix/suffix 없음,
+# traceback 없음, stderr JSON payload 없음) success/known-error 네 CLI 모두에 대해 고정한다.
+
+
+def _parse_single_stdout_json_object(stdout: str) -> dict[str, object]:
+    """stdout이 단일 JSON dict 객체인지 raw_decode로 검증하고 파싱한다."""
+    stripped = stdout.strip()
+    assert stripped
+    decoder = json.JSONDecoder()
+    payload, end = decoder.raw_decode(stripped)
+    assert stripped[end:].strip() == ""
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _assert_json_channel_clean(
+    *,
+    stdout: str,
+    stderr: str,
+) -> dict[str, object]:
+    """`--json` stdout/stderr 채널 규율: 단일 JSON 객체, traceback 없음, stderr JSON 없음."""
+    assert "Traceback" not in stdout
+    assert "Traceback" not in stderr
+    payload = _parse_single_stdout_json_object(stdout)
+    # stderr에 짧은 human 메시지는 허용하되, JSON payload 객체는 금지한다.
+    assert not stderr.lstrip().startswith("{")
+    return payload
+
+
+def _run_cli_main_json_channel(
+    main_func,
+    args: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, object], str, str]:
+    """in-process CLI main 호출 후 stdout JSON 채널 규율을 검증한다."""
+    rc = main_func(args)
+    captured = capsys.readouterr()
+    payload = _assert_json_channel_clean(stdout=captured.out, stderr=captured.err)
+    return rc, payload, captured.out, captured.err
+
+
+def _run_handoff_cli_success_stdout_channel_sequence(
+    bundle_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> list[dict[str, object]]:
+    """3H25 — 네 handoff CLI success `--json` stdout/stderr를 stage별로 수집한다."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    stages: list[dict[str, object]] = []
+
+    preflight_rc, preflight_payload, preflight_stdout, preflight_stderr = _run_cli_main_json_channel(
+        preflight_main,
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "preflight",
+            "rc": preflight_rc,
+            "payload": preflight_payload,
+            "stdout": preflight_stdout,
+            "stderr": preflight_stderr,
+            "mode": "kr-end-to-end-intake-preflight",
+            "outputs": [summary_out, plan_out, structured_plan_out],
+        }
+    )
+
+    validator_rc, validator_payload, validator_stdout, validator_stderr = _run_cli_main_json_channel(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "validator",
+            "rc": validator_rc,
+            "payload": validator_payload,
+            "stdout": validator_stdout,
+            "stderr": validator_stderr,
+            "mode": "kr-end-to-end-preflight-plan-validation",
+            "outputs": [validation_report_out],
+        }
+    )
+
+    build_rc, build_payload, build_stdout, build_stderr = _run_cli_main_json_channel(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(summary_out),
+            "--plan-md",
+            str(plan_out),
+            "--structured-plan",
+            str(structured_plan_out),
+            "--validation-report",
+            str(validation_report_out),
+            "--manifest-out",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "builder",
+            "rc": build_rc,
+            "payload": build_payload,
+            "stdout": build_stdout,
+            "stderr": build_stderr,
+            "mode": "kr-end-to-end-handoff-manifest-build",
+            "outputs": [handoff_manifest_out],
+        }
+    )
+
+    verify_rc, verify_payload, verify_stdout, verify_stderr = _run_cli_main_json_channel(
+        verify_handoff_manifest_main,
+        [
+            "--manifest",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(verification_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    stages.append(
+        {
+            "label": "verifier",
+            "rc": verify_rc,
+            "payload": verify_payload,
+            "stdout": verify_stdout,
+            "stderr": verify_stderr,
+            "mode": "kr-end-to-end-handoff-manifest-verification",
+            "outputs": [verification_report_out],
+        }
+    )
+
+    return stages
+
+
+def _run_handoff_cli_known_error_channel_case(
+    case: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, object], str, str]:
+    """known-domain-error CLI 한 건을 stdout JSON 채널 규율과 함께 실행한다."""
+    main_func = case["main_func"]
+    args = case["args"]
+    assert callable(main_func)
+    assert isinstance(args, list)
+    rc, payload, stdout, stderr = _run_cli_main_json_channel(main_func, args, capsys)
+    assert rc == 1
+    _assert_cli_known_error_payload(
+        payload,
+        mode=str(case["mode"]),
+        stage=str(case["stage"]),
+    )
+    return rc, payload, stdout, stderr
+
+
+def test_handoff_cli_json_success_stdout_is_single_object_for_all_clis(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = _run_handoff_cli_success_stdout_channel_sequence(tmp_path / "json_channel_success", capsys)
+    assert len(stages) == 4
+    for stage in stages:
+        assert stage["rc"] == 0
+        payload = stage["payload"]
+        assert isinstance(payload, dict)
+        _assert_cli_success_payload(payload, mode=str(stage["mode"]))
+        stdout = stage["stdout"]
+        assert isinstance(stdout, str)
+        reparsed = _parse_single_stdout_json_object(stdout)
+        assert reparsed == payload
+
+
+def test_handoff_cli_json_error_stdout_is_single_object_for_all_clis(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_error", capsys)
+    assert len(cases) == 4
+    for case in cases:
+        _, payload, stdout, _ = _run_handoff_cli_known_error_channel_case(case, capsys)
+        reparsed = _parse_single_stdout_json_object(stdout)
+        assert reparsed == payload
+
+
+def test_handoff_cli_json_success_stdout_has_no_human_prefix_or_suffix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = _run_handoff_cli_success_stdout_channel_sequence(tmp_path / "json_channel_success_clean", capsys)
+    for stage in stages:
+        stdout = stage["stdout"]
+        assert isinstance(stdout, str)
+        stripped = stdout.strip()
+        assert stripped.startswith("{")
+        assert stripped.endswith("}")
+        decoder = json.JSONDecoder()
+        _, end = decoder.raw_decode(stripped)
+        assert stripped[end:].strip() == ""
+
+
+def test_handoff_cli_json_error_stdout_has_no_human_prefix_or_suffix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_error_clean", capsys)
+    for case in cases:
+        _, _, stdout, _ = _run_handoff_cli_known_error_channel_case(case, capsys)
+        stripped = stdout.strip()
+        assert stripped.startswith("{")
+        assert stripped.endswith("}")
+        decoder = json.JSONDecoder()
+        _, end = decoder.raw_decode(stripped)
+        assert stripped[end:].strip() == ""
+
+
+def test_handoff_cli_json_outputs_have_no_traceback_or_stderr_json_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    success_stages = _run_handoff_cli_success_stdout_channel_sequence(
+        tmp_path / "json_channel_no_traceback_success",
+        capsys,
+    )
+    for stage in success_stages:
+        stdout = stage["stdout"]
+        stderr = stage["stderr"]
+        assert isinstance(stdout, str)
+        assert isinstance(stderr, str)
+        _assert_json_channel_clean(stdout=stdout, stderr=stderr)
+
+    error_cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_no_traceback_error", capsys)
+    for case in error_cases:
+        _, _, stdout, stderr = _run_handoff_cli_known_error_channel_case(case, capsys)
+        _assert_json_channel_clean(stdout=stdout, stderr=stderr)
+
+
+def test_handoff_cli_json_channel_discipline_no_generated_commands_executed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI JSON channel discipline sequence must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+
+    success_stages = _run_handoff_cli_success_stdout_channel_sequence(
+        tmp_path / "json_channel_no_exec_success",
+        capsys,
+    )
+    for stage in success_stages:
+        assert stage["rc"] == 0
+        outputs = stage["outputs"]
+        assert isinstance(outputs, list)
+        for path in outputs:
+            assert isinstance(path, Path)
+            assert path.is_file()
+
+    error_cases = _handoff_cli_known_error_cases(tmp_path / "json_channel_no_exec_error", capsys)
+    for case in error_cases:
+        blocked_outputs = case["blocked_outputs"]
+        assert isinstance(blocked_outputs, list)
+        for path in blocked_outputs:
+            assert isinstance(path, Path)
+            assert not path.exists()
+        _run_handoff_cli_known_error_channel_case(case, capsys)
+        for path in blocked_outputs:
+            assert not path.exists(), f"partial output created for {case['label']}: {path}"
+
