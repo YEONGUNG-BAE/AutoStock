@@ -8500,3 +8500,443 @@ def test_handoff_bundle_reproducible_round_trips_no_generated_commands_executed(
         cli_report_b
     )
 
+
+# --- 3H23: CLI stdout success payload contract smoke (in-process, no-exec) ---
+#
+# 3H16–3H22는 artifact round-trip·parity·tamper·fail-closed·reproducibility를 검증했지만,
+# operator-facing `--json` 성공 stdout 페이로드의 mode/stage/exact-key/body-free/sensitive-field
+# 계약을 네 CLI에 대해 명시적으로 고정하지는 않았다.
+
+
+_PREFLIGHT_CLI_SUCCESS_KEYS = frozenset(
+    {
+        "status",
+        "stage",
+        "mode",
+        "manifest",
+        "name",
+        "artifacts",
+        "provider_mapping_validation",
+        "optional_artifact_checks",
+        "settings",
+        "warnings",
+        "followup_commands",
+        "structured_plan_out",
+        "structured_plan_steps_count",
+        "structured_plan_generated",
+        "summary_out",
+        "plan_out",
+    }
+)
+_VALIDATOR_CLI_SUCCESS_KEYS = frozenset(
+    {
+        "status",
+        "stage",
+        "mode",
+        "structured_plan",
+        "steps_count",
+        "scripts_count",
+        "review_only",
+        "commands_execute_in_validator",
+        "report_out",
+        "report_written",
+    }
+)
+_BUILDER_CLI_SUCCESS_KEYS = frozenset(
+    {
+        "status",
+        "stage",
+        "mode",
+        "manifest_out",
+        "artifacts_count",
+        "all_artifacts_present",
+        "commands_execute_in_builder",
+        "review_only",
+    }
+)
+_CLI_BODY_FREE_FORBIDDEN_KEYS = frozenset(
+    {
+        "content",
+        "body",
+        "steps",
+        "payload",
+        "manifest_body",
+        "artifact_body",
+        "report_body",
+        "plan_body",
+    }
+)
+_SENSITIVE_PAYLOAD_FIELDS = frozenset(
+    {
+        "endpoint_url",
+        "api_key",
+        "secret",
+        "token",
+        "env",
+        "broker",
+        "order",
+        "action",
+        "allocation",
+        "target_weight",
+        "target_allocation",
+        "quantity",
+        "side",
+        "buy",
+        "sell",
+        "hold",
+    }
+)
+
+
+def _assert_cli_success_payload(
+    payload: dict[str, object],
+    *,
+    mode: str,
+) -> None:
+    assert payload["status"] == "ok"
+    assert payload["stage"] == "complete"
+    assert payload["mode"] == mode
+
+
+def _assert_cli_success_payload_exact_keys(
+    payload: dict[str, object],
+    expected_keys: frozenset[str],
+) -> None:
+    assert set(payload.keys()) == expected_keys
+
+
+def _walk_payload_forbidden_keys(value: object, *, forbidden: frozenset[str]) -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            assert key not in forbidden, f"forbidden key in CLI success payload: {key}"
+            _walk_payload_forbidden_keys(nested, forbidden=forbidden)
+    elif isinstance(value, list):
+        for nested in value:
+            _walk_payload_forbidden_keys(nested, forbidden=forbidden)
+
+
+def _assert_cli_success_payload_body_free(
+    payload: dict[str, object],
+    *,
+    allow_artifacts: bool = False,
+    allow_followup_commands: bool = False,
+) -> None:
+    for key in payload:
+        if key == "artifacts" and allow_artifacts:
+            continue
+        if key == "followup_commands" and allow_followup_commands:
+            continue
+        assert key not in _CLI_BODY_FREE_FORBIDDEN_KEYS, f"body-like top-level key: {key}"
+    _walk_payload_forbidden_keys(payload, forbidden=_CLI_BODY_FREE_FORBIDDEN_KEYS)
+
+
+def _assert_preflight_cli_artifacts_compact(artifacts: object) -> None:
+    assert isinstance(artifacts, dict)
+    for key, value in artifacts.items():
+        assert isinstance(key, str)
+        assert value is None or isinstance(value, str), f"artifacts[{key}] must be path string or null"
+
+
+def _assert_preflight_cli_followup_commands_safe(commands: object) -> None:
+    assert isinstance(commands, list)
+    assert commands
+    assert all(isinstance(cmd, str) for cmd in commands)
+    joined = "\n".join(commands).lower()
+    for token in _FORBIDDEN_STATIC_TOKENS:
+        assert token not in joined
+    broker_token = "run_" + "kis"
+    assert broker_token not in joined
+    assert "paperbroker" not in joined
+    assert "paperlooprunner" not in joined
+    assert "run_paper_once" not in joined
+    sensitive = "submit_" + "order"
+    assert sensitive not in joined
+    scripts = _extract_followup_command_scripts(commands)
+    for script in scripts:
+        assert script in _FOLLOWUP_COMMAND_ALLOWLIST
+
+
+def _run_handoff_cli_success_payload_sequence(
+    bundle_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> dict[str, object]:
+    """3H23 — 네 handoff CLI main([...]) --json 성공 페이로드를 in-process로 수집한다."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    preflight_rc, preflight_payload, _, preflight_stderr = _run_cli_main_json(
+        preflight_main,
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    validator_rc, validator_payload, _, validator_stderr = _run_cli_main_json(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    build_rc, build_payload, _, build_stderr = _run_cli_main_json(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(summary_out),
+            "--plan-md",
+            str(plan_out),
+            "--structured-plan",
+            str(structured_plan_out),
+            "--validation-report",
+            str(validation_report_out),
+            "--manifest-out",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+    verify_rc, verify_payload, _, verify_stderr = _run_cli_main_json(
+        verify_handoff_manifest_main,
+        [
+            "--manifest",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(verification_report_out),
+            "--force",
+            "--json",
+        ],
+        capsys,
+    )
+
+    return {
+        "bundle_dir": bundle_dir,
+        "paths": {
+            "preflight_summary": summary_out,
+            "plan_md": plan_out,
+            "structured_plan": structured_plan_out,
+            "validation_report": validation_report_out,
+            "handoff_manifest": handoff_manifest_out,
+            "verification_report": verification_report_out,
+        },
+        "payloads": {
+            "preflight": preflight_payload,
+            "validator": validator_payload,
+            "build": build_payload,
+            "verify": verify_payload,
+        },
+        "returncodes": {
+            "preflight": preflight_rc,
+            "validator": validator_rc,
+            "build": build_rc,
+            "verify": verify_rc,
+        },
+        "stderr": {
+            "preflight": preflight_stderr,
+            "validator": validator_stderr,
+            "build": build_stderr,
+            "verify": verify_stderr,
+        },
+    }
+
+
+def test_handoff_cli_success_payloads_have_expected_modes_and_stages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    returncodes = sequence["returncodes"]
+    assert isinstance(returncodes, dict)
+    assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
+
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+    _assert_cli_success_payload(
+        payloads["preflight"],  # type: ignore[arg-type]
+        mode="kr-end-to-end-intake-preflight",
+    )
+    _assert_cli_success_payload(
+        payloads["validator"],  # type: ignore[arg-type]
+        mode="kr-end-to-end-preflight-plan-validation",
+    )
+    _assert_cli_success_payload(
+        payloads["build"],  # type: ignore[arg-type]
+        mode="kr-end-to-end-handoff-manifest-build",
+    )
+    _assert_cli_success_payload(
+        payloads["verify"],  # type: ignore[arg-type]
+        mode="kr-end-to-end-handoff-manifest-verification",
+    )
+
+
+def test_handoff_cli_success_payloads_have_compact_exact_key_sets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+    _assert_cli_success_payload_exact_keys(payloads["preflight"], _PREFLIGHT_CLI_SUCCESS_KEYS)  # type: ignore[arg-type]
+    _assert_cli_success_payload_exact_keys(payloads["validator"], _VALIDATOR_CLI_SUCCESS_KEYS)  # type: ignore[arg-type]
+    _assert_cli_success_payload_exact_keys(payloads["build"], _BUILDER_CLI_SUCCESS_KEYS)  # type: ignore[arg-type]
+    _assert_cli_success_payload_exact_keys(
+        payloads["verify"],  # type: ignore[arg-type]
+        _VERIFY_SUCCESS_KEYS_WITH_CONTAINMENT_AND_REPORT,
+    )
+
+
+def test_handoff_cli_success_payloads_do_not_embed_artifact_bodies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+
+    preflight_payload = payloads["preflight"]
+    assert isinstance(preflight_payload, dict)
+    _assert_cli_success_payload_body_free(
+        preflight_payload,
+        allow_artifacts=True,
+        allow_followup_commands=True,
+    )
+    _assert_preflight_cli_artifacts_compact(preflight_payload["artifacts"])
+
+    validator_payload = payloads["validator"]
+    assert isinstance(validator_payload, dict)
+    _assert_cli_success_payload_body_free(validator_payload)
+    assert "artifacts" not in validator_payload
+    assert "followup_commands" not in validator_payload
+
+    build_payload = payloads["build"]
+    assert isinstance(build_payload, dict)
+    _assert_cli_success_payload_body_free(build_payload)
+    assert "artifacts" not in build_payload
+    assert "followup_commands" not in build_payload
+
+    verify_payload = payloads["verify"]
+    assert isinstance(verify_payload, dict)
+    _assert_cli_success_payload_body_free(verify_payload)
+    assert "artifacts" not in verify_payload
+    assert "followup_commands" not in verify_payload
+
+
+def test_handoff_cli_success_payloads_do_not_execute_or_expose_unexpected_commands(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+
+    preflight_payload = payloads["preflight"]
+    assert isinstance(preflight_payload, dict)
+    _assert_preflight_cli_followup_commands_safe(preflight_payload["followup_commands"])
+
+    validator_payload = payloads["validator"]
+    assert isinstance(validator_payload, dict)
+    assert "followup_commands" not in validator_payload
+    assert validator_payload["commands_execute_in_validator"] is False
+
+    build_payload = payloads["build"]
+    assert isinstance(build_payload, dict)
+    assert "followup_commands" not in build_payload
+    assert build_payload["commands_execute_in_builder"] is False
+
+    verify_payload = payloads["verify"]
+    assert isinstance(verify_payload, dict)
+    assert "followup_commands" not in verify_payload
+    assert verify_payload["commands_execute_in_verifier"] is False
+
+
+def test_handoff_cli_success_payloads_do_not_contain_sensitive_or_trading_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+
+    forbidden = _SENSITIVE_PAYLOAD_FIELDS | _FORBIDDEN_OUTPUT_FIELDS
+    for payload in payloads.values():
+        assert isinstance(payload, dict)
+        _walk_payload_forbidden_keys(payload, forbidden=forbidden)
+        dumped = json.dumps(payload).lower()
+        assert "https://" not in dumped
+        assert "http://" not in dumped
+        assert "fred_api_key" not in dumped
+        assert "dart_api_key" not in dumped
+
+
+def test_handoff_cli_success_payloads_no_traceback_and_outputs_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "cli_success_bundle"
+    sequence = _run_handoff_cli_success_payload_sequence(bundle_dir, capsys)
+    paths = sequence["paths"]
+    stderr = sequence["stderr"]
+    assert isinstance(paths, dict)
+    assert isinstance(stderr, dict)
+
+    for stage, err in stderr.items():
+        assert "Traceback" not in err, f"stderr traceback in {stage}"
+
+    for name, path in paths.items():
+        assert isinstance(path, Path)
+        assert path.is_file(), f"missing CLI success-payload output: {name}"
+        assert _path_resolves_inside_base(path, bundle_dir)
+
+    payloads = sequence["payloads"]
+    assert isinstance(payloads, dict)
+    preflight_payload = payloads["preflight"]
+    assert isinstance(preflight_payload, dict)
+    for field in ("summary_out", "plan_out", "structured_plan_out"):
+        assert _path_resolves_inside_base(Path(str(preflight_payload[field])), bundle_dir)
+
+    validator_payload = payloads["validator"]
+    assert isinstance(validator_payload, dict)
+    assert _path_resolves_inside_base(Path(str(validator_payload["report_out"])), bundle_dir)
+
+    build_payload = payloads["build"]
+    assert isinstance(build_payload, dict)
+    assert _path_resolves_inside_base(Path(str(build_payload["manifest_out"])), bundle_dir)
+
+    verify_payload = payloads["verify"]
+    assert isinstance(verify_payload, dict)
+    assert _path_resolves_inside_base(Path(str(verify_payload["base_dir"])), bundle_dir)
+    assert _path_resolves_inside_base(Path(str(verify_payload["verification_report_out"])), bundle_dir)
+
+
+def test_handoff_cli_success_payloads_no_exec_with_subprocess_patched(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI success payload sequence must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    sequence = _run_handoff_cli_success_payload_sequence(tmp_path / "cli_success_bundle", capsys)
+    returncodes = sequence["returncodes"]
+    assert isinstance(returncodes, dict)
+    assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
+

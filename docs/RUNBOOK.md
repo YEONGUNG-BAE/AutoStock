@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2519 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2526 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2519 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2526 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -1009,7 +1009,9 @@ PYTHONPATH=src uv run python ops/verify_kr_end_to_end_handoff_manifest.py \
 
 **3H22 normalized handoff bundle reproducibility smoke (test coverage only):** the suite runs repeated API and in-process CLI handoff bundle round-trips in separate temp bundles and asserts semantically equivalent normalized manifest and verification report contracts (role order, artifact kinds, JSON metadata modes/statuses/stages, schema key sets, verification flags, review-only/no-exec flags; sha256 shape, `size_bytes > 0`, and `base_dir` presence only — never absolute paths, sha256 values, size_bytes values, or base_dir strings across bundles). Per-bundle containment, exact-key body-free, and no-exec are re-asserted. No subprocess; no new operator command is required.
 
-**Deferred next step:** **3H23+** end-to-end hardening (unimplemented).
+**3H23 CLI stdout success payload contract smoke (test coverage only):** the suite runs the four handoff CLIs in-process with `--json` on the fixture no-exec path and asserts compact/safe success payloads (exact `mode`, `status == "ok"`, `stage == "complete"`, exact key sets per invocation, no embedded artifact bodies, no sensitive/trading fields, advisory-only preflight `followup_commands`, output path containment). No subprocess; no new operator command is required.
+
+**Deferred next step:** **3H24+** end-to-end hardening (unimplemented).
 
 **3G3-4A live-shaped fake-transport fetcher (test-only; raw snapshot output only):**
 
@@ -1250,7 +1252,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2519 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2526 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh
