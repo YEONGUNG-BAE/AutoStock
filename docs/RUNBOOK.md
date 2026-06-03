@@ -1631,6 +1631,8 @@ Post-Day1 frontier clarification: after the Controlled Day 1 PASS, the next deci
 
 R1–R4 plus R1b no-network replay readiness closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). This closes replay-only readiness for FRED, PRICE, DART, the combined store/Date.md path, and same-DAY Date.md re-export idempotence, but does not authorize live-smoke, 8D Scout progression, pilot, KIS, broker, or write-mode planning.
 
+L1-FRED live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) for the FRED MACRO path only; L1-PRICE, L1-DART, 8D Scout progression, pilot, KIS, broker, and write-mode planning remain separate decisions.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 
