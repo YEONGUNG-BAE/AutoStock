@@ -1245,6 +1245,8 @@ sed -n '1,180p' runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal
 
 Foundation 8B–8I 구현이 **CLOSED**된 뒤, operator가 **1회** 수행하는 end-to-end manual walk-through다. post-Foundation runtime smoke(8G prompt-hardening → 8G validator → 8H assembler → 8I no-write rehearsal)가 통과한 상태에서, 동일 도구 chain을 **운영 절차**로 문서화한 것이다.
 
+**Operator checklist (pre-walk-through):** 실행 전 비실행 계획·abort 기준·증거 수집은 [`docs/CONTROLLED_DAY1_OPERATOR_CHECKLIST.md`](CONTROLLED_DAY1_OPERATOR_CHECKLIST.md)를 참조한다. 이 문서는 0A readiness-contract를 대체하지 않으며, canonical shell command flow는 본 섹션의 Step-by-step command flow만 따른다.
+
 ### Purpose
 
 - Foundation 8B–8I ops entrypoint가 실제 runtime artifact와 연결되는지 **수동으로 1회** 검증한다.
