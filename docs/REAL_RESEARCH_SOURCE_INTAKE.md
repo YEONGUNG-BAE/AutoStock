@@ -6,6 +6,24 @@
 
 ---
 
+## Post-Day1 repeatability checkpoint
+
+Controlled Day 1 no-write walk-through is closed, but that does not start a live pilot, KIS read-only run, write-mode paper loop, or broker path. This document remains a **research intake** design reference, not a trading or pilot runbook.
+
+The next post-Day1 decision is a **repeatability/readiness decision** for the read-only Real Research Source Intake path: choose one already documented intake lane, run it as an operator-controlled snapshot/replay or live-smoke where explicitly supported, and verify that it still hands off through `DateIdSourceRecord` → 8B → Date.md / store without changing the 8C–8I no-write boundary. Scope stays **real external research data → existing Foundation 8B intake path**; Scout/Allocator/Analysis LLM agents, trading, broker, KIS, and write mode remain out of scope.
+
+**Candidate lanes (examples only — use existing ops/docs; do not invent new commands):**
+
+- FRED / PRICE / DART replay or live-smoke lanes (§1A–3B2, 2A–2B)
+- KR real-sample PRICE / DART / combined context lanes (§3E1–3E4)
+- 3G / 3H operator-local handoff and preflight lanes (§3G1–3G3-6, §3H0–3H29)
+
+This checkpoint must **not** be interpreted as a new automatic 3H micro-smoke extension. The 3H line remains closed at **3H29** unless a separate hardening task is explicitly opened and justified; **3H30+** end-to-end hardening stays **deferred**.
+
+Any new source integration, live endpoint hardening, factor/discovery hardening, pilot planning, KIS read-only planning, or write-mode planning requires a separate task, separate validation, and the same guards: snapshot/replay first, no checked-in runtime artifacts, no automatic config promotion, no broker, no KIS, no write-mode paper loop, and no trading actions or allocation outputs.
+
+---
+
 ## 1. Purpose
 
 Foundation **8B–8I** and Controlled Day 1 no-write walk-through are **CLOSED**. Today, research evidence enters the system only through **operator-prepared JSONL** (`runtime/research/${DAY}/research_sources.jsonl`) consumed by `ops/research_source_intake.py`.

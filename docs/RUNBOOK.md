@@ -1625,6 +1625,8 @@ Controlled Day 1 PASS 후에도 **아래는 자동으로 진행하지 않는다*
 4. write-mode `ops/run_paper_once.py` / `PaperLoopRunner.run()`
 5. broker order submission, ledger/decision DB writes, fills, NAV snapshots, daily summary, postmortem
 
+Post-Day1 frontier clarification: after the Controlled Day 1 PASS, the next decision is a **Real Research Source Intake repeatability/readiness decision**, not pilot launch or write-mode authorization. Before any pilot, KIS read-only, or write-mode planning, the operator must select an already documented read-only intake lane and verify that it remains repeatable through the snapshot/replay → `DateIdSourceRecord` → 8B path while preserving the unchanged 8C–8I no-write boundary. Any new live source, fetcher, endpoint hardening, or intake hardening work remains a separate task/PR and must preserve the same no-runtime-commit, no-broker, no-KIS, and no-write-mode guards.
+
 다음 단계는 **Real Research Source Intake v1 구현** (FRED first) → repeatable intake 검증 → 별도 readiness decision → pilot/KIS read-only planning.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
