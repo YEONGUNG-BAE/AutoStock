@@ -10015,3 +10015,405 @@ def test_handoff_cli_help_usage_omits_forbidden_compound_operational_tokens(
     capsys.readouterr()
     out, err = _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
     _assert_help_usage_omits_forbidden_compound_tokens(f"{out}\n{err}")
+
+
+# --- 3H29: CLI non-JSON human output smoke (in-process, no-exec) ---
+#
+# 3H23–3H28은 `--json` 성공/오류 페이로드·채널·argparse help/usage를 고정했다.
+# 3H29는 `--json` 생략 시 운영자용 짧은 human 출력(rc, traceback 없음, JSON 아님,
+# 산출물 생성/미생성, raw body·generated command 미에코)을 in-process로 고정한다.
+# preflight conflicting-flags 경로는 의도적으로 제외한다(JSON stderr 가능).
+
+
+_HUMAN_OUTPUT_EXISTS_SENTINEL = "SENTINEL_3H29_HUMAN_OUTPUT_EXISTS"
+_HUMAN_RAW_BODY_MARKER = "UNIQUE_HUMAN_OUTPUT_MARKER_3H29"
+
+
+def _run_cli_main_human(
+    main_func,
+    args: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, str, str]:
+    """in-process CLI main 호출 후 non-JSON human stdout/stderr 규율을 검증한다."""
+    rc = main_func(args)
+    captured = capsys.readouterr()
+    stdout = captured.out
+    stderr = captured.err
+    assert "Traceback" not in stdout
+    assert "Traceback" not in stderr
+    assert not stdout.lstrip().startswith("{")
+    assert not stderr.lstrip().startswith("{")
+    return rc, stdout, stderr
+
+
+def _assert_cli_human_success_channels(stdout: str, stderr: str) -> None:
+    """success human 경로: 짧은 성공 메시지는 stdout에, JSON/traceback 없음."""
+    if stdout.strip():
+        assert stderr.strip() == "" or "Traceback" not in stderr
+
+
+def _assert_cli_human_error_channels(stdout: str, stderr: str) -> None:
+    """known-domain error human 경로: 짧은 오류 메시지는 stderr에, JSON/traceback 없음."""
+    if stderr.strip():
+        assert not stdout.lstrip().startswith("{")
+
+
+def _verify_cli_args_human(manifest_path: Path, bundle_dir: Path, *extra: str) -> list[str]:
+    return [
+        "--manifest",
+        str(manifest_path),
+        "--base-dir",
+        str(bundle_dir),
+        *extra,
+    ]
+
+
+def _handoff_cli_human_known_error_cases(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    marker: str | None = None,
+) -> list[dict[str, object]]:
+    """네 handoff CLI known-domain-error 시나리오를 `--json` 없이 human 출력 검증용으로 준비한다."""
+    cases: list[dict[str, object]] = []
+
+    preflight_dir = tmp_path / "preflight_error"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    missing_manifest = preflight_dir / "missing_manifest.toml"
+    summary_out = preflight_dir / "preflight_summary.json"
+    plan_out = preflight_dir / "plan.md"
+    structured_plan_out = preflight_dir / "structured_plan.json"
+    cases.append(
+        {
+            "label": "preflight",
+            "main_func": preflight_main,
+            "args": [
+                "--manifest",
+                str(missing_manifest),
+                "--summary-out",
+                str(summary_out),
+                "--plan-out",
+                str(plan_out),
+                "--structured-plan-out",
+                str(structured_plan_out),
+                "--emit-followup-commands",
+                "--force",
+            ],
+            "blocked_outputs": [summary_out, plan_out, structured_plan_out],
+            "marker_input": None,
+        }
+    )
+
+    validator_dir = tmp_path / "validator_error"
+    validator_dir.mkdir(parents=True, exist_ok=True)
+    malformed_structured = validator_dir / "structured_plan.json"
+    malformed_text = "{not-valid-json"
+    if marker is not None:
+        malformed_text = f"{malformed_text} {marker}"
+    malformed_structured.write_text(malformed_text, encoding="utf-8")
+    validation_report_out = validator_dir / "validation_report.json"
+    cases.append(
+        {
+            "label": "validator",
+            "main_func": validate_plan_main,
+            "args": [
+                "--structured-plan",
+                str(malformed_structured),
+                "--report-out",
+                str(validation_report_out),
+                "--force",
+            ],
+            "blocked_outputs": [validation_report_out],
+            "marker_input": marker,
+        }
+    )
+
+    builder_dir = tmp_path / "builder_error"
+    builder_paths = _handoff_bundle_through_validator_cli(builder_dir, capsys)
+    report_payload = _load_json(builder_paths["validation_report"])
+    report_payload["status"] = "tampered"
+    _write_json(builder_paths["validation_report"], report_payload)
+    if marker is not None:
+        builder_paths["plan_md"].write_text(
+            builder_paths["plan_md"].read_text(encoding="utf-8") + f"\n{marker}\n",
+            encoding="utf-8",
+        )
+    manifest_out = builder_dir / "handoff_manifest.json"
+    cases.append(
+        {
+            "label": "builder",
+            "main_func": build_handoff_manifest_main,
+            "args": [
+                "--preflight-summary",
+                str(builder_paths["preflight_summary"]),
+                "--plan-md",
+                str(builder_paths["plan_md"]),
+                "--structured-plan",
+                str(builder_paths["structured_plan"]),
+                "--validation-report",
+                str(builder_paths["validation_report"]),
+                "--manifest-out",
+                str(manifest_out),
+                "--base-dir",
+                str(builder_dir),
+                "--force",
+            ],
+            "blocked_outputs": [manifest_out],
+            "marker_input": marker,
+        }
+    )
+
+    verify_root = tmp_path / "verifier_error"
+    bundle_dir, manifest_path = _generated_handoff_bundle(verify_root, capsys=capsys)
+    manifest = _load_json(manifest_path)
+    plan_path = _artifact_path_by_role(manifest, "plan_md")
+    tamper_suffix = f"\n{marker}\n" if marker is not None else "\n# tampered-appendix\n"
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + tamper_suffix, encoding="utf-8")
+    verification_report_out = bundle_dir / "verification_report_error.json"
+    cases.append(
+        {
+            "label": "verifier",
+            "main_func": verify_handoff_manifest_main,
+            "args": _verify_cli_args_human(
+                manifest_path,
+                bundle_dir,
+                "--verification-report-out",
+                str(verification_report_out),
+                "--force",
+            ),
+            "blocked_outputs": [verification_report_out],
+            "marker_input": marker,
+        }
+    )
+
+    return cases
+
+
+def _run_handoff_cli_human_success_sequence(
+    bundle_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> dict[str, object]:
+    """3H29 — 네 handoff CLI main([...]) human 성공 경로를 in-process로 수집한다."""
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_out = bundle_dir / "preflight_summary.json"
+    plan_out = bundle_dir / "plan.md"
+    structured_plan_out = bundle_dir / "structured_plan.json"
+    validation_report_out = bundle_dir / "validation_report.json"
+    handoff_manifest_out = bundle_dir / "handoff_manifest.json"
+    verification_report_out = bundle_dir / "handoff_manifest_verification_report.json"
+
+    preflight_rc, preflight_stdout, preflight_stderr = _run_cli_main_human(
+        preflight_main,
+        [
+            "--manifest",
+            str(MANIFEST_FIXTURE),
+            "--summary-out",
+            str(summary_out),
+            "--plan-out",
+            str(plan_out),
+            "--structured-plan-out",
+            str(structured_plan_out),
+            "--emit-followup-commands",
+            "--force",
+        ],
+        capsys,
+    )
+    assert preflight_rc == 0
+    _assert_cli_human_success_channels(preflight_stdout, preflight_stderr)
+    assert summary_out.is_file() and plan_out.is_file() and structured_plan_out.is_file()
+
+    validator_rc, validator_stdout, validator_stderr = _run_cli_main_human(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(structured_plan_out),
+            "--report-out",
+            str(validation_report_out),
+            "--force",
+        ],
+        capsys,
+    )
+    assert validator_rc == 0
+    _assert_cli_human_success_channels(validator_stdout, validator_stderr)
+    assert validation_report_out.is_file()
+
+    build_rc, build_stdout, build_stderr = _run_cli_main_human(
+        build_handoff_manifest_main,
+        [
+            "--preflight-summary",
+            str(summary_out),
+            "--plan-md",
+            str(plan_out),
+            "--structured-plan",
+            str(structured_plan_out),
+            "--validation-report",
+            str(validation_report_out),
+            "--manifest-out",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--force",
+        ],
+        capsys,
+    )
+    assert build_rc == 0
+    _assert_cli_human_success_channels(build_stdout, build_stderr)
+    assert handoff_manifest_out.is_file()
+
+    verify_rc, verify_stdout, verify_stderr = _run_cli_main_human(
+        verify_handoff_manifest_main,
+        [
+            "--manifest",
+            str(handoff_manifest_out),
+            "--base-dir",
+            str(bundle_dir),
+            "--verification-report-out",
+            str(verification_report_out),
+            "--force",
+        ],
+        capsys,
+    )
+    assert verify_rc == 0
+    _assert_cli_human_success_channels(verify_stdout, verify_stderr)
+    assert verification_report_out.is_file()
+
+    return {
+        "bundle_dir": bundle_dir,
+        "paths": {
+            "preflight_summary": summary_out,
+            "plan_md": plan_out,
+            "structured_plan": structured_plan_out,
+            "validation_report": validation_report_out,
+            "handoff_manifest": handoff_manifest_out,
+            "verification_report": verification_report_out,
+        },
+        "stdout": {
+            "preflight": preflight_stdout,
+            "validator": validator_stdout,
+            "build": build_stdout,
+            "verify": verify_stdout,
+        },
+        "stderr": {
+            "preflight": preflight_stderr,
+            "validator": validator_stderr,
+            "build": build_stderr,
+            "verify": verify_stderr,
+        },
+        "returncodes": {
+            "preflight": preflight_rc,
+            "validator": validator_rc,
+            "build": build_rc,
+            "verify": verify_rc,
+        },
+    }
+
+
+def _run_handoff_cli_human_known_error_case(
+    case: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, str, str]:
+    main_func = case["main_func"]
+    args = case["args"]
+    assert callable(main_func)
+    assert isinstance(args, list)
+    assert "--json" not in args
+    rc, stdout, stderr = _run_cli_main_human(main_func, args, capsys)
+    assert rc == 1
+    _assert_cli_human_error_channels(stdout, stderr)
+    return rc, stdout, stderr
+
+
+def test_handoff_cli_human_success_outputs_are_non_json_and_write_expected_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = _run_handoff_cli_human_success_sequence(tmp_path / "cli_human_success", capsys)
+    paths = sequence["paths"]
+    assert isinstance(paths, dict)
+    for name, path in paths.items():
+        assert isinstance(path, Path)
+        assert path.is_file(), f"missing CLI human success output: {name}"
+        assert _path_resolves_inside_base(path, sequence["bundle_dir"])
+
+
+def test_handoff_cli_human_known_errors_are_non_json_and_return_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_human_known_error_cases(tmp_path / "cli_human_error", capsys)
+    for case in cases:
+        _run_handoff_cli_human_known_error_case(case, capsys)
+
+
+def test_handoff_cli_human_known_errors_do_not_create_downstream_outputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_human_known_error_cases(tmp_path / "cli_human_no_partial", capsys)
+    for case in cases:
+        blocked_outputs = case["blocked_outputs"]
+        assert isinstance(blocked_outputs, list)
+        for path in blocked_outputs:
+            assert isinstance(path, Path)
+            assert not path.exists()
+        _run_handoff_cli_human_known_error_case(case, capsys)
+        for path in blocked_outputs:
+            assert not path.exists(), f"partial output created for {case['label']}: {path}"
+
+
+def test_handoff_cli_human_output_exists_preserves_existing_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle_dir = tmp_path / "validator_human_write_guard"
+    paths = _handoff_bundle_through_validator_cli(bundle_dir, capsys)
+    report_out = paths["validation_report"]
+    report_out.write_text(f"{_HUMAN_OUTPUT_EXISTS_SENTINEL}\n", encoding="utf-8")
+    original_bytes = report_out.read_bytes()
+
+    rc, stdout, stderr = _run_cli_main_human(
+        validate_plan_main,
+        [
+            "--structured-plan",
+            str(paths["structured_plan"]),
+            "--report-out",
+            str(report_out),
+        ],
+        capsys,
+    )
+    assert rc == 1
+    _assert_cli_human_error_channels(stdout, stderr)
+    assert _HUMAN_OUTPUT_EXISTS_SENTINEL not in stdout
+    assert _HUMAN_OUTPUT_EXISTS_SENTINEL not in stderr
+    assert report_out.read_bytes() == original_bytes
+
+
+def test_handoff_cli_human_outputs_do_not_echo_raw_bodies_or_tracebacks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = _handoff_cli_human_known_error_cases(
+        tmp_path / "cli_human_body_free",
+        capsys,
+        marker=_HUMAN_RAW_BODY_MARKER,
+    )
+    for case in cases:
+        _, stdout, stderr = _run_handoff_cli_human_known_error_case(case, capsys)
+        if case["marker_input"] is not None:
+            assert _HUMAN_RAW_BODY_MARKER not in stdout
+            assert _HUMAN_RAW_BODY_MARKER not in stderr
+
+
+def test_handoff_cli_human_paths_do_not_execute_generated_commands(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("CLI human output sequence must not execute generated commands")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+
+    sequence = _run_handoff_cli_human_success_sequence(tmp_path / "cli_human_no_exec", capsys)
+    returncodes = sequence["returncodes"]
+    assert isinstance(returncodes, dict)
+    assert returncodes == {"preflight": 0, "validator": 0, "build": 0, "verify": 0}
+
+    cases = _handoff_cli_human_known_error_cases(tmp_path / "cli_human_error_no_exec", capsys)
+    for case in cases:
+        _run_handoff_cli_human_known_error_case(case, capsys)
