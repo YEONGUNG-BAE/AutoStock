@@ -1627,7 +1627,7 @@ Controlled Day 1 PASS 후에도 **아래는 자동으로 진행하지 않는다*
 
 Post-Day1 frontier clarification: after the Controlled Day 1 PASS, the next decision is a **Real Research Source Intake repeatability/readiness decision**, not pilot launch or write-mode authorization. Before any pilot, KIS read-only, or write-mode planning, the operator must select an already documented read-only intake lane and verify that it remains repeatable through the snapshot/replay → `DateIdSourceRecord` → 8B path while preserving the unchanged 8C–8I no-write boundary. Any new live source, fetcher, endpoint hardening, or intake hardening work remains a separate task/PR and must preserve the same no-runtime-commit, no-broker, no-KIS, and no-write-mode guards.
 
-다음 단계는 **Real Research Source Intake v1 구현** (FRED first) → repeatable intake 검증 → 별도 readiness decision → pilot/KIS read-only planning.
+다음 단계는 신규 구현 착수가 아니라, 기존 문서화된 Real Research Source Intake lane 중 하나를 선택해 repeatability/readiness를 검증하는 별도 결정이다. 새 live source, fetcher, endpoint hardening, intake hardening, pilot, KIS read-only, write-mode 계획은 각각 별도 task/PR과 별도 검증 후에만 다룬다.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
