@@ -44,7 +44,7 @@ This closure is no-network replay readiness only. It does not authorize live-smo
 
 **Next choices (separate decisions — not authorized by this closure):**
 
-- L1-FRED is closed; L1-PRICE and L1-DART still require a separate precheck because they introduce distinct provider/env/network boundaries.
+- L1-FRED and L1-PRICE are closed; L1-DART still requires a separate precheck because it introduces DART_API_KEY/corp-code/provider boundary checks.
 - R1b same-day idempotence is closed.
 - 8D Scout, pilot, KIS, broker, and write-mode remain unauthorized.
 
@@ -57,6 +57,12 @@ L1-FRED live-smoke is closed for the FRED MACRO path. The operator-authorized ru
 This was the first operator-authorized live-smoke with actual network and env/API key boundary use. Secret handling remained value-hidden: the API key value was not written to stdout/stderr, JSONL, snapshot, Date.md, or store; snapshot metadata records only the env var name and boolean presence, not key values. Runtime artifacts remain local-only and must not be committed.
 
 This closure is limited to L1-FRED and does not authorize L1-PRICE, L1-DART, 8D Scout progression, pilot, KIS, broker, write-mode paper loop, `PaperLoopRunner.run()`, or `ops/run_paper_once.py`.
+
+### Live-smoke closure — L1-PRICE
+
+L1-PRICE live-smoke is closed for the yfinance PRICE path. The operator-authorized run used a fresh runtime workspace and performed the live yfinance fetch through the documented unofficial-provider boundary, then staged an immutable raw snapshot and DateIdSourceRecord JSONL under runtime/research. The staged PRICE JSONL passed 8B validate-only, then 8B normal and 8C smoke with --require-symbol-coverage. The provider symbol 005930.KS was staged as internal symbol SYNTH-KR-0001 / KR, and final 8C coverage passed with missing_symbols == [].
+
+PRICE uses no API key/env var in this lane. yfinance is an unofficial external provider; provider/network boundary must be treated explicitly in operator planning. Runtime artifacts remain local-only and must not be committed. The observed price payload is research evidence only and must not be interpreted as buy/sell/hold/allocation/order/action output. This closure is limited to L1-PRICE and does not authorize L1-DART, 8D Scout progression, pilot, KIS, broker, write-mode paper loop, PaperLoopRunner.run(), or ops/run_paper_once.py.
 
 ## 1. Purpose
 
