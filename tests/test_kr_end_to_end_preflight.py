@@ -9892,3 +9892,126 @@ def test_handoff_cli_help_usage_does_not_execute_generated_commands(
             capsys.readouterr()
             _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
             assert list(tmp_path.rglob("*")) == []
+
+
+# --- 3H28: CLI help/usage wording contract smoke (in-process, no-exec) ---
+#
+# 3H27은 help/usage 경로의 부작용 없음을 고정한다. 3H28은 운영자가 argparse 출력만으로
+# 핵심 플래그를 발견할 수 있는지(플래그 토큰 존재, usage 참조, 금지 복합 토큰 부재)를
+# 최소 단위로 검증한다. 전체 help 스냅샷·prog·usage 한 줄 정확 일치는 의도적으로 제외한다.
+
+
+_HANDOFF_CLI_FORBIDDEN_COMPOUND_TOKENS = (
+    "submit_" + "order",
+    "paper" + "broker",
+    "paper" + "loop" + "runner",
+    "run_" + "kis",
+    "urllib" + ".request",
+    "urllib" + ".parse",
+    "urllib" + ".error",
+    "requests",
+    "httpx",
+    "aiohttp",
+)
+
+
+def _assert_help_usage_omits_forbidden_compound_tokens(combined: str) -> None:
+    """help/usage 결합 출력에 금지 복합 운영 토큰이 없음을 검증한다 (bare kis 제외)."""
+    lower = combined.lower()
+    for token in _HANDOFF_CLI_FORBIDDEN_COMPOUND_TOKENS:
+        assert token not in lower
+
+
+_HANDOFF_CLI_HELP_FLAG_CONTRACTS = (
+    pytest.param(
+        preflight_main,
+        (
+            "--manifest",
+            "--summary-out",
+            "--plan-out",
+            "--structured-plan-out",
+            "--emit-followup-commands",
+            "--force",
+            "--json",
+        ),
+        id="preflight",
+    ),
+    pytest.param(
+        validate_plan_main,
+        (
+            "--structured-plan",
+            "--report-out",
+            "--force",
+            "--json",
+        ),
+        id="validator",
+    ),
+    pytest.param(
+        build_handoff_manifest_main,
+        (
+            "--preflight-summary",
+            "--plan-md",
+            "--structured-plan",
+            "--validation-report",
+            "--manifest-out",
+            "--base-dir",
+            "--force",
+            "--json",
+        ),
+        id="builder",
+    ),
+    pytest.param(
+        verify_handoff_manifest_main,
+        (
+            "--manifest",
+            "--base-dir",
+            "--verification-report-out",
+            "--force",
+            "--json",
+        ),
+        id="verifier",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "main_func,expected_flags",
+    _HANDOFF_CLI_HELP_FLAG_CONTRACTS,
+)
+def test_handoff_cli_help_lists_operator_critical_flags(
+    main_func,
+    expected_flags: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--help 출력에 운영자 필수 플래그 토큰이 노출되는지 검증한다."""
+    out, err = _assert_cli_help_exits_cleanly_without_outputs(main_func, capsys)
+    combined = f"{out}\n{err}"
+    for flag in expected_flags:
+        assert flag in combined
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_usage_errors_include_usage_without_json_or_traceback(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """main([]) usage error가 usage를 참조하고 traceback/JSON이 아님을 검증한다."""
+    out, err = _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
+    combined = f"{out}\n{err}"
+    assert "usage:" in combined.lower()
+    assert "traceback" not in combined.lower()
+    assert not out.lstrip().startswith("{")
+    assert not err.lstrip().startswith("{")
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_help_usage_omits_forbidden_compound_operational_tokens(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """help·usage error 결합 출력에 금지 복합 운영 토큰이 없음을 검증한다."""
+    out, err = _assert_cli_help_exits_cleanly_without_outputs(main_func, capsys)
+    _assert_help_usage_omits_forbidden_compound_tokens(f"{out}\n{err}")
+    capsys.readouterr()
+    out, err = _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
+    _assert_help_usage_omits_forbidden_compound_tokens(f"{out}\n{err}")
