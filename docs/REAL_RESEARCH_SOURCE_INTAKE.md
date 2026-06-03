@@ -44,7 +44,7 @@ This closure is no-network replay readiness only. It does not authorize live-smo
 
 **Next choices (separate decisions — not authorized by this closure):**
 
-- L1-FRED and L1-PRICE are closed; L1-DART still requires a separate precheck because it introduces DART_API_KEY/corp-code/provider boundary checks.
+- L1-FRED, L1-PRICE, and L1-DART are closed for their respective live-smoke lanes.
 - R1b same-day idempotence is closed.
 - 8D Scout, pilot, KIS, broker, and write-mode remain unauthorized.
 
@@ -63,6 +63,14 @@ This closure is limited to L1-FRED and does not authorize L1-PRICE, L1-DART, 8D 
 L1-PRICE live-smoke is closed for the yfinance PRICE path. The operator-authorized run used a fresh runtime workspace and performed the live yfinance fetch through the documented unofficial-provider boundary, then staged an immutable raw snapshot and DateIdSourceRecord JSONL under runtime/research. The staged PRICE JSONL passed 8B validate-only, then 8B normal and 8C smoke with --require-symbol-coverage. The provider symbol 005930.KS was staged as internal symbol SYNTH-KR-0001 / KR, and final 8C coverage passed with missing_symbols == [].
 
 PRICE uses no API key/env var in this lane. yfinance is an unofficial external provider; provider/network boundary must be treated explicitly in operator planning. Runtime artifacts remain local-only and must not be committed. The observed price payload is research evidence only and must not be interpreted as buy/sell/hold/allocation/order/action output. This closure is limited to L1-PRICE and does not authorize L1-DART, 8D Scout progression, pilot, KIS, broker, write-mode paper loop, PaperLoopRunner.run(), or ops/run_paper_once.py.
+
+### Live-smoke closure — L1-DART
+
+L1-DART live-smoke is closed for the OpenDART DISCLOSURE context-only path. The operator-authorized run used a fresh runtime workspace and performed the live OpenDART fetch through the documented DART_API_KEY env/network boundary, then staged an immutable raw snapshot and DateIdSourceRecord JSONL under runtime/research. The staged DART JSONL passed 8B validate-only with 21/21 valid records, then 8B normal and 8C context-only smoke.
+
+OpenDART is an external disclosure provider. The run used corp-code `00126380` and `bgn-de` `20260501` (`end-de` omitted); internal symbol was `SYNTH-KR-0001`. DART live-smoke does not use `--date-id`. It uses `--store` for Date-ID allocation, while record persistence remains the 8B normal responsibility. In this run, fetch-time store rows remained empty before 8B normal, and 8B normal saved/exported 21 disclosure records. DART disclosure Date-IDs may follow disclosure source timestamps rather than the runtime DAY; this is expected. DART-only 8C was run without `--require-symbol-coverage`, and a non-empty `missing_symbols` list (e.g. `["KR:SYNTH-KR-0001"]`) remains acceptable for this context-only lane because DART DISCLOSURE records are context-only and do not satisfy PRICE symbol coverage.
+
+Secret handling remained value-hidden: the DART_API_KEY value was not written to stdout/stderr, snapshot, JSONL, Date.md, or store. Runtime artifacts remain local-only and must not be committed. The observed disclosure payload is research evidence only and must not be interpreted as buy/sell/hold/allocation/order/action output. This closure is limited to L1-DART and does not authorize 8D Scout progression, pilot, KIS, broker, write-mode paper loop, `PaperLoopRunner.run()`, or `ops/run_paper_once.py`.
 
 ## 1. Purpose
 

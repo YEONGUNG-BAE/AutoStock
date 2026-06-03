@@ -1635,6 +1635,8 @@ L1-FRED live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`
 
 L1-PRICE live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) for the yfinance PRICE path only; L1-DART, 8D Scout progression, pilot, KIS, broker, and write-mode planning remain separate decisions.
 
+L1-DART live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) for the OpenDART DISCLOSURE context-only path only; 8D Scout progression, pilot, KIS, broker, and write-mode planning remain separate decisions.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 
