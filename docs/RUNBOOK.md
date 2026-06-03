@@ -1563,6 +1563,27 @@ Controlled Day 1 성공 조건:
 - `git ls-files runtime` empty
 - external API / KIS / broker / write-mode paper loop **미사용**
 
+### Completion note — Controlled Day 1
+
+Controlled Day 1 was completed on `2026-06-03` as a Claude-assisted,
+operator-authorized manual walk-through. The run used a fresh
+`DAY=2026-06-03` runtime directory and replayed the previously
+operator-prepared 2026-05-29 input set, including the previously saved
+Scout/Allocator/Analysis raw LLM outputs. This was a replay, not a fresh
+manual-LLM session; it did not synthesize new research and did not invoke
+automatic LLM orchestration.
+
+The chain ended at 8I no-write rehearsal with
+`run_paper_once_status == "VALIDATION_ONLY"`. Ledger and decision DBs were
+absent or unchanged before vs after, `git ls-files runtime` remained empty,
+and external API / KIS / broker / write-mode paper loop paths were not used.
+
+Runtime artifacts and detailed stdout/log/hash evidence remain local-only
+and must not be committed. This completion does not start the
+30-trading-day pilot and does not authorize KIS read-only, write-mode
+`ops/run_paper_once.py`, `PaperLoopRunner.run()`, broker orders, ledger
+writes, fills, NAV snapshots, daily summary, or postmortem automation.
+
 ### Artifacts generated (local only)
 
 | Area | Examples |
