@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2583 passed` (acceptance check 내부 Check 1)
+**pytest baseline:** `2591 passed` (acceptance check 내부 Check 1)
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2583 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2591 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
 
 ---
 
@@ -1241,6 +1241,8 @@ sed -n '1,180p' runtime/paper/YYYY-MM-DD/rehearsal/paper_loop_no_write_rehearsal
 
 ## Controlled Day 1 paper walk-through
 
+**Readiness contract (0A):** `tests/test_controlled_day1_readiness.py`가 이 섹션의 no-write boundary, 8B–8I step-flow 참조, ops entrypoint 존재, git safety, after-Day-1 non-auto-progression을 **정적으로** 검증한다. operator 추가 command 없음 — actual Controlled Day 1 manual walk-through는 별도 1회 human action이다.
+
 Foundation 8B–8I 구현이 **CLOSED**된 뒤, operator가 **1회** 수행하는 end-to-end manual walk-through다. post-Foundation runtime smoke(8G prompt-hardening → 8G validator → 8H assembler → 8I no-write rehearsal)가 통과한 상태에서, 동일 도구 chain을 **운영 절차**로 문서화한 것이다.
 
 ### Purpose
@@ -1264,7 +1266,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2583 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2591 passed`, `11 PASS, 0 WARN, 0 FAIL`):
 
 ```bash
 ./ops/acceptance_check.sh

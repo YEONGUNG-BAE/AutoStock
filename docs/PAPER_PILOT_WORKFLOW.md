@@ -392,6 +392,8 @@ memory/postmortem/monthly/YYYY-MM.KR.md
 
 **8B·8C·8D·8E·8F·8G·8H·8I (Foundation)는 CLOSED.** 다음 운영 단계는 **Controlled Day 1 paper walk-through** — 8B~8I를 순서대로 **1회** 수동 실행하고 8I no-write rehearsal에서 종료한다. 절차는 `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through 참조.
 
+**Controlled Day 1 Readiness 0A:** runbook contract / no-write boundary는 `tests/test_controlled_day1_readiness.py`로 정적 검증된다. actual Controlled Day 1 manual walk-through는 operator 1회 human action으로 남는다.
+
 ### Universe v0 convention (Foundation 8C)
 
 | Path | 용도 |

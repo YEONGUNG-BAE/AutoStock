@@ -39,6 +39,7 @@
 - ~~Foundation 8G: Analysis Once (per-symbol).~~ Done: `ops/build_analysis_manual_packet.py`, `ops/validate_analysis_raw_json.py`.
 - ~~Foundation 8H: Production PaperLoopInput Assembler (per-symbol).~~ Done: `ops/assemble_paper_loop_input.py`, `docs/examples/paper_loop_context.paper.example.json`.
 - ~~Foundation 8I: End-to-End no-write rehearsal.~~ Done: `ops/rehearse_paper_loop_no_write.py`.
+- ~~Controlled Day 1 Readiness 0A — runbook contract / no-write boundary smoke.~~ Done: `tests/test_controlled_day1_readiness.py` (static docs-contract only; no 8B–8I execution). **Next human/operator action:** actual Controlled Day 1 manual walk-through per `docs/RUNBOOK.md` § Controlled Day 1 paper walk-through (stops at 8I no-write; broker/PaperLoop/KIS/write-mode out of scope).
 - **Evidence-based follow-ups (not pre-implemented):**
   - DailySummary writer helper — trigger: template omission ≥ 2 times per week
   - Postmortem weekly template helper — trigger: tag summary format errors ≥ 2 times
