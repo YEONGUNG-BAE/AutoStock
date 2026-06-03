@@ -22,6 +22,29 @@ This checkpoint must **not** be interpreted as a new automatic 3H micro-smoke ex
 
 Any new source integration, live endpoint hardening, factor/discovery hardening, pilot planning, KIS read-only planning, or write-mode planning requires a separate task, separate validation, and the same guards: snapshot/replay first, no checked-in runtime artifacts, no automatic config promotion, no broker, no KIS, no write-mode paper loop, and no trading actions or allocation outputs.
 
+### No-network replay closure — R1–R4
+
+R1–R4 no-network replay readiness is closed. FRED replay, PRICE replay with symbol coverage, DART DISCLOSURE context-only replay, and the combined FRED+PRICE+DART replay all passed as operator-controlled runtime checks. The combined run produced one shared store/Date.md with four records total: FRED 1, PRICE 1, and DART 2. Final 8C symbol coverage passed with `missing_symbols == []`, and DART `market=None` disclosure records did not break PRICE coverage.
+
+In the combined flow, 8B normal re-exported Date.md from the full store. After the first source creates Date.md, later source normalizations use the documented `--force-date-md` path to regenerate Date.md from the accumulated store. This is a documented overwrite/re-export path, not hand-editing and not a new command.
+
+This closure is no-network replay readiness only. It does not authorize live-smoke, external API fetch, env/API key use, KIS, broker, write-mode paper loop, `PaperLoopRunner.run()`, 8D Scout progression, or pilot planning. Runtime artifacts and detailed evidence remain local-only and must not be committed.
+
+**Lane summary (operator-controlled, fixture read-only, no env/API key, no broker/KIS/write-mode):**
+
+| Lane | Result |
+|---|---|
+| R1 — FRED replay clean-workspace repeatability | PASS |
+| R2 — PRICE replay + 8C symbol coverage | PASS |
+| R3 — DART DISCLOSURE replay context-only | PASS |
+| R4 — combined FRED+PRICE+DART shared store/Date.md | PASS (FRED 1 + PRICE 1 + DART 2 = 4 records; 8C `--require-symbol-coverage` exit 0) |
+
+**Next choices (separate decisions — not authorized by this closure):**
+
+- Live-smoke lane L1 requires a separate precheck because it introduces env/network.
+- R1b same-day idempotence remains optional.
+- 8D Scout, pilot, KIS, broker, and write-mode remain unauthorized.
+
 ---
 
 ## 1. Purpose
