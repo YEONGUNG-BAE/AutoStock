@@ -9784,3 +9784,111 @@ def test_handoff_cli_arg_failure_stable_blank_paths_return_args(
         mode=mode,
         stage="args",
     )
+
+
+# --- 3H27: CLI help/usage argparse side-effect smoke (in-process, no-exec) ---
+#
+# 3H24–3H26는 known-domain-error·argument-domain 실패만 다루고 argparse SystemExit 경로는
+# 의도적으로 제외했다. 3H27은 `--help`·`main([])` usage error가 부작용 없이 종료하는지
+# (출력 파일/부모 디렉터리/runtime 미생성, traceback/JSON 없음, generated command 미실행) 고정한다.
+
+
+_HANDOFF_CLI_MAIN_FUNCS = (
+    preflight_main,
+    validate_plan_main,
+    build_handoff_manifest_main,
+    verify_handoff_manifest_main,
+)
+
+
+def _assert_cli_help_exits_cleanly_without_outputs(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[str, str]:
+    """argparse --help: SystemExit(0), usage 텍스트, traceback/JSON 없음."""
+    with pytest.raises(SystemExit) as exc_info:
+        main_func(["--help"])
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "usage:" in combined.lower()
+    assert "traceback" not in combined.lower()
+    assert not captured.out.lstrip().startswith("{")
+    assert not captured.err.lstrip().startswith("{")
+    return captured.out, captured.err
+
+
+def _assert_cli_usage_error_exits_nonzero_without_outputs(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[str, str]:
+    """argparse usage error(main([])): non-zero SystemExit, usage 텍스트, traceback/JSON 없음."""
+    with pytest.raises(SystemExit) as exc_info:
+        main_func([])
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    combined = f"{captured.out}\n{captured.err}"
+    assert "usage:" in combined.lower()
+    assert "traceback" not in combined.lower()
+    assert not captured.out.lstrip().startswith("{")
+    assert not captured.err.lstrip().startswith("{")
+    return captured.out, captured.err
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_help_exits_zero_and_has_no_side_effects(
+    main_func,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _assert_cli_help_exits_cleanly_without_outputs(main_func, capsys)
+    assert list(tmp_path.rglob("*")) == []
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_usage_error_exits_nonzero_and_has_no_side_effects(
+    main_func,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
+    assert list(tmp_path.rglob("*")) == []
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_help_does_not_emit_json_payload(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdout, stderr = _assert_cli_help_exits_cleanly_without_outputs(main_func, capsys)
+    assert not stdout.lstrip().startswith("{")
+    assert not stderr.lstrip().startswith("{")
+
+
+@pytest.mark.parametrize("main_func", _HANDOFF_CLI_MAIN_FUNCS)
+def test_handoff_cli_usage_error_does_not_emit_json_payload(
+    main_func,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdout, stderr = _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
+    assert not stdout.lstrip().startswith("{")
+    assert not stderr.lstrip().startswith("{")
+
+
+def test_handoff_cli_help_usage_does_not_execute_generated_commands(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """help/usage 경로에서 subprocess.run이 호출되지 않음을 증명한다."""
+
+    def _fail_subprocess(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("subprocess.run must not be called on help/usage paths")
+
+    with patch("subprocess.run", side_effect=_fail_subprocess):
+        for main_func in _HANDOFF_CLI_MAIN_FUNCS:
+            capsys.readouterr()
+            _assert_cli_help_exits_cleanly_without_outputs(main_func, capsys)
+            assert list(tmp_path.rglob("*")) == []
+            capsys.readouterr()
+            _assert_cli_usage_error_exits_nonzero_without_outputs(main_func, capsys)
+            assert list(tmp_path.rglob("*")) == []
