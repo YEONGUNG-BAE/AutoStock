@@ -1629,7 +1629,7 @@ Post-Day1 frontier clarification: after the Controlled Day 1 PASS, the next deci
 
 다음 단계는 신규 구현 착수가 아니라, 기존 문서화된 Real Research Source Intake lane 중 하나를 선택해 repeatability/readiness를 검증하는 별도 결정이다. 새 live source, fetcher, endpoint hardening, intake hardening, pilot, KIS read-only, write-mode 계획은 각각 별도 task/PR과 별도 검증 후에만 다룬다.
 
-R1–R4 no-network replay readiness closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). This closes replay-only readiness for FRED, PRICE, DART, and the combined store/Date.md path, but does not authorize live-smoke, 8D Scout progression, pilot, KIS, broker, or write-mode planning.
+R1–R4 plus R1b no-network replay readiness closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). This closes replay-only readiness for FRED, PRICE, DART, the combined store/Date.md path, and same-DAY Date.md re-export idempotence, but does not authorize live-smoke, 8D Scout progression, pilot, KIS, broker, or write-mode planning.
 
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
