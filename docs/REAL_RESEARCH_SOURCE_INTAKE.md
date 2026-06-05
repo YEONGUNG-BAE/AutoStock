@@ -46,7 +46,7 @@ This closure is no-network replay readiness only. It does not authorize live-smo
 
 - L1-FRED, L1-PRICE, and L1-DART are closed for their respective live-smoke lanes.
 - R1b same-day idempotence is closed.
-- 8D Scout, pilot, KIS, broker, and write-mode remain unauthorized.
+- 8D–8I operator-controlled no-write chain is closed under separate explicit approvals; pilot, KIS, broker, and write-mode remain unauthorized.
 
 ---
 
@@ -71,6 +71,73 @@ L1-DART live-smoke is closed for the OpenDART DISCLOSURE context-only path. The 
 OpenDART is an external disclosure provider. The run used corp-code `00126380` and `bgn-de` `20260501` (`end-de` omitted); internal symbol was `SYNTH-KR-0001`. DART live-smoke does not use `--date-id`. It uses `--store` for Date-ID allocation, while record persistence remains the 8B normal responsibility. In this run, fetch-time store rows remained empty before 8B normal, and 8B normal saved/exported 21 disclosure records. DART disclosure Date-IDs may follow disclosure source timestamps rather than the runtime DAY; this is expected. DART-only 8C was run without `--require-symbol-coverage`, and a non-empty `missing_symbols` list (e.g. `["KR:SYNTH-KR-0001"]`) remains acceptable for this context-only lane because DART DISCLOSURE records are context-only and do not satisfy PRICE symbol coverage.
 
 Secret handling remained value-hidden: the DART_API_KEY value was not written to stdout/stderr, snapshot, JSONL, Date.md, or store. Runtime artifacts remain local-only and must not be committed. The observed disclosure payload is research evidence only and must not be interpreted as buy/sell/hold/allocation/order/action output. This closure is limited to L1-DART and does not authorize 8D Scout progression, pilot, KIS, broker, write-mode paper loop, `PaperLoopRunner.run()`, or `ops/run_paper_once.py`.
+
+### Post-intake no-write chain closure — 8D–8I
+
+This section records operator-controlled downstream handoff observations completed under separate explicit approvals. It does **not** expand the source-intake scope of this document; Scout/Allocator/Analysis orchestration, trading, broker, KIS, and write mode remain outside source-intake implementation scope.
+
+**8D / 8E Scout**
+
+- Scout packet build completed using DART-only `DISCLOSURE` context.
+- 21 disclosure records/date_ids were used as packet input.
+- The packet builder produced input/prompt/summary only; it did not generate raw LLM output.
+- The operator invoked a local LLM directly and saved the raw JSON.
+- 8E validation: **PASS**.
+- Validated Scout universe: `paper-v0`.
+- Validated Scout cited Date-ID count: 10.
+- Raw/validated/runtime evidence remains local-only.
+
+**8F Allocator**
+
+- Used an approved synthetic paper portfolio state; the portfolio state is a synthetic replay, not the current measured portfolio.
+- Allocator target weights: KR 80, US 0, GOLD 20; cash target: 20.
+- The operator saved local LLM raw output directly.
+- Allocator validation: **PASS**.
+- Cited Date-ID count: 1.
+- Allocator output is allocation intent metadata, not executable trading.
+
+**8G Analysis**
+
+- Target market: KR; target symbol: `SYNTH-KR-0001`.
+- Allocator tolerance context was intentionally omitted.
+- Allocator KR=80 market allocation was **not** converted to per-symbol target 80.
+- Final validated Analysis: action `sell`, `target_weight_percent` 25, `risk_manager.max_weight_percent` 25; cited Date-ID count: 4.
+- Action/target are paper-pilot analysis intent metadata, not orders.
+
+**8H PaperLoopInput**
+
+- `run_id`: `paper-run-260611-1`; `broker_account_role`: PAPER; risk mode: rebalancing.
+- Synthetic current symbol weight: 80; validated Analysis target: 25.
+- `allocator_symbol_target_weight`: null; `allocator_tolerance_percent`: model default 5.
+- Because `allocator_symbol_target_weight` is null, allocator tolerance comparison was not applied.
+- PaperLoopInput model validation: **PASS**.
+- Execution, order generation, broker, and KIS were not run.
+
+**8I no-write rehearsal**
+
+- Only the documented no-write rehearsal path was executed.
+- Internally invoked `ops/run_paper_once.py` as a subprocess with `--validated-input` (PaperLoopInput), `--ledger-db`, `--decision-db`, `--no-write`, and `--json`.
+- Outcome: **PASS**; status: `VALIDATION_ONLY`.
+- Cited Date-ID union count: 10.
+- Ledger DB: absent-before == absent-after; decision DB: absent-before == absent-after.
+- `PaperLoopRunner.run()`, `PaperBroker`, and KIS were not called.
+- Order generation, ledger writes, decision snapshot writes, and execution artifacts were not run or created.
+- Only three rehearsal evidence artifacts (JSON/TXT/summary) were generated runtime-local.
+
+The 8I rehearsal invoked `ops/run_paper_once.py` only through its documented `--no-write --json` validation-only subprocess path. It did not enter the write-mode branch, DB-open path, runner path, or broker path.
+
+**Closure boundary**
+
+- This closure closes only the 8D–8I operator-controlled no-write chain.
+- It does **not** start the 30-trading-day pilot.
+- It does **not** authorize KIS read-only.
+- It does **not** authorize broker order submission.
+- It does **not** authorize write-mode `ops/run_paper_once.py`.
+- It does **not** authorize `PaperLoopRunner.run()`.
+- It does **not** authorize ledger/decision DB writes, fills, NAV snapshots, daily summary, or postmortem automation.
+- Runtime artifacts and detailed stdout/hash/log evidence remain local-only and must not be committed.
+
+Runtime grouping DAY was `2026-06-11`. Portfolio and market-price snapshot used the approved `2026-05-28` synthetic paper replay — not a live account state or real-time market state on `2026-06-11`. This is not investment advice, live-trading intent, or order instruction.
 
 ## 1. Purpose
 

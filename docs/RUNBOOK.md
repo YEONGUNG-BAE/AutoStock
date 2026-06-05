@@ -1637,6 +1637,8 @@ L1-PRICE live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md
 
 L1-DART live-smoke closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md) for the OpenDART DISCLOSURE context-only path only; 8D Scout progression, pilot, KIS, broker, and write-mode planning remain separate decisions.
 
+Operator-controlled 8D–8I downstream no-write closure is recorded in [`docs/REAL_RESEARCH_SOURCE_INTAKE.md`](REAL_RESEARCH_SOURCE_INTAKE.md). The documented 8I rehearsal invoked `ops/run_paper_once.py` only through its `--no-write` validation-only path; pilot, KIS, broker submission, write-mode execution, `PaperLoopRunner.run()`, and ledger/decision DB writes remain separate and unauthorized decisions.
+
 - Date-ID stale validation은 **Python validation layer**가 담당한다.
 - Date-ID가 없는 LLM 판단은 **부분 채택하지 않는다** — Allocator/Analysis 출력 전체를 폐기하고 `previous_targets` 또는 안전 상태를 유지한다.
 
