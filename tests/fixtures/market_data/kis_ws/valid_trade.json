@@ -1,0 +1,17 @@
+{
+  "provider_contract": "kis-ws-fixture-v1",
+  "provider": "kis",
+  "type": "trade",
+  "channel": "H0STCNT0|005930",
+  "sequence": 1,
+  "received_at": "2026-06-08T00:05:00.250000+00:00",
+  "payload": {
+    "symbol": "005930",
+    "market": "KR",
+    "currency": "KRW",
+    "price": "70000",
+    "quantity": "10",
+    "trade_at": "2026-06-08T00:05:00.200000+00:00",
+    "cumulative_volume": "123456"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "provider_contract": "kis-ws-fixture-v1",
+  "provider": "kis",
+  "type": "heartbeat",
+  "channel": "PINGPONG",
+  "received_at": "2026-06-08T00:05:05.000000+00:00",
+  "payload": {
+    "sent_at": "2026-06-08T00:05:04.980000+00:00"
+  }
+}

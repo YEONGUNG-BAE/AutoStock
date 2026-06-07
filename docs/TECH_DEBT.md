@@ -9,6 +9,11 @@
 - `broker.kis_read_only.enabled=true` is not an automatic trigger. Read-only smoke must remain explicit/manual.
 - Tiny-live actual order submission remains intentionally unimplemented. Do not add `submit_tiny_live_order()` / `place_tiny_live_order()` before a separate manual rehearsal.
 
+### KIS real-time market monitor (fast loop — GitHub Issue #1)
+- ~~RTM-1: fixture-first market-event domain + transport contract.~~ Done: `src/market_data/models.py` (normalized trade/quote/heartbeat + provider sequence, discriminated union), `src/market_data/protocols.py` (read-only async `MarketEventSource`), `src/market_data/kis_ws_parser.py` (parses only `provider_contract="kis-ws-fixture-v1"`; fail-closed; per-channel sequence dup/decrease/gap detection; no raw-frame/credential leak). Network-free, broker-free, ledger-free, scheduler-free.
+  - **Official KIS WebSocket transport and field mapping remain UNVERIFIED and are deferred to RTM-6.** The `kis-ws-fixture-v1` envelope is a declared fixture contract, NOT a claim about real KIS frame layout / field positions. Do not build a real WS client against guessed offsets before RTM-6 verifies the official contract.
+  - RTM-2..RTM-8 (latest-state store, monitor daemon, condition engine, paper execution bridge, KIS WS live read-only smoke, 4x/day decision refresh, 1-day unattended paper pilot) are sequenced in Issue #1; each opens only on a separate explicit manual gate.
+
 ### AccountRole / legacy runtime data
 - If old runtime SQLite databases contain legacy `account_role` values (`ISA`, `GENERAL`, `CMA`), add an explicit migration script or discard those runtime DBs. Current semantic values are `KR_TAX_ADVANTAGED`, `US_REGULAR`, `CASH_BUFFER`, `PAPER`.
 

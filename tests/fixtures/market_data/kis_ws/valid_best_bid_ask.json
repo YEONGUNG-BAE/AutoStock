@@ -1,0 +1,18 @@
+{
+  "provider_contract": "kis-ws-fixture-v1",
+  "provider": "kis",
+  "type": "best_bid_ask",
+  "channel": "H0STASP0|005930",
+  "sequence": 1,
+  "received_at": "2026-06-08T00:05:01.100000+00:00",
+  "payload": {
+    "symbol": "005930",
+    "market": "KR",
+    "currency": "KRW",
+    "bid_price": "69900",
+    "ask_price": "70000",
+    "bid_quantity": "120",
+    "ask_quantity": "80",
+    "quote_at": "2026-06-08T00:05:01.050000+00:00"
+  }
+}
