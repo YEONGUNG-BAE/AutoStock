@@ -1364,6 +1364,34 @@ PYTHONPATH=src uv run python ops/run_date_md_smoke.py \
 
 **Gate:** exit 0, stdout JSON parseable.
 
+#### C2. Manual Ollama JSON invocation contract (Scout/Allocator/Analysis manual LLM calls)
+
+Scout · Allocator · Analysis 단계(아래 D/E/F의 manual LLM call)는 ops script가 자동 호출하지 않는다. operator가 직접 Ollama `/api/generate`를 호출할 때 아래 envelope를 **반드시** 사용한다.
+
+```text
+- model: operator-approved model
+- temperature: 0          (mandatory; JsonRunnerOptions가 타 값 거부)
+- seed: 42
+- think: false
+- stream: false
+- format: json
+- keep_alive: 24h
+- num_ctx: model manifest value
+    - qwen3.6:35b smoke profile: 32768
+    - JsonRunnerOptions global default: 4096
+```
+
+Safety:
+
+```text
+- zsh 예약변수 PROMPT를 변수명으로 쓰지 않는다 (PROMPT_PATH 사용)
+- Ollama HTTP response 전체의 .error 와 빈 .response 를 먼저 검사한다
+- final raw path 로 직접 redirect 하지 않는다 (먼저 candidate 파일로 받는다)
+- candidate JSON 을 syntax/schema/semantic 검사한 뒤 atomic mv 한다
+- raw LLM output 은 수동 편집하지 않는다
+- temperature 미지정으로 생성된 현재 작업 산출물은 canonical evidence 로 쓰지 않고 재생성한다
+```
+
 #### D. 8D — Scout manual packet → manual LLM → 8E validation
 
 **8D packet build** (LLM 호출 없음):
