@@ -185,6 +185,23 @@ class LatestMarketStateStore:
             self._liveness[key] = event
             return ApplyResult(ApplyStatus.APPLIED, MarketEventType.HEARTBEAT)
 
+    def reset_stream(self, provider: str, channel: str) -> None:
+        """확인된 재접속 후 monitor가 명시 호출하는 stream epoch reset.
+
+        해당 (provider, channel) stream identity를 가진 trade/quote slot과
+        동일 키의 heartbeat liveness를 제거한다. 첫 새 event 전까지 해당 slot은
+        Missing 상태가 되며, 자동 sequence reset은 하지 않는다(공격적 fail-open 방지).
+        """
+        target = (provider, channel)
+        with self._lock:
+            trade_keys = [k for k, v in self._trade.items() if _stream_identity(v) == target]
+            for key in trade_keys:
+                del self._trade[key]
+            quote_keys = [k for k, v in self._quote.items() if _stream_identity(v) == target]
+            for key in quote_keys:
+                del self._quote[key]
+            self._liveness.pop(target, None)
+
     def peek(self, market: Market, symbol: str, *, now: datetime) -> LatestMarketStateSnapshot:
         aware_now = require_timezone_aware_datetime(now, field_name="now")
         key = (market, symbol)

@@ -20,7 +20,16 @@ from market_data.models import (
     NormalizedTradeTick,
     ProviderSequence,
 )
+from market_data.monitor import (
+    MarketMonitor,
+    MonitorEvidence,
+    MonitorExhaustedError,
+    MonitorState,
+    MonitorSummary,
+    ReconnectPolicy,
+)
 from market_data.protocols import MarketEventSource
+from market_data.replay_source import ReplayMarketEventSource
 
 __all__ = [
     "ApplyResult",
@@ -33,11 +42,18 @@ __all__ = [
     "MarketEventSource",
     "MarketEventType",
     "MarketHeartbeat",
+    "MarketMonitor",
     "MarketStateError",
     "MarketStateFreshnessPolicy",
     "MissingMarketStateError",
+    "MonitorEvidence",
+    "MonitorExhaustedError",
+    "MonitorState",
+    "MonitorSummary",
     "NormalizedBestBidAsk",
     "NormalizedTradeTick",
     "ProviderSequence",
+    "ReconnectPolicy",
+    "ReplayMarketEventSource",
     "StaleMarketStateError",
 ]

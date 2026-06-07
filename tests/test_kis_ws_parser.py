@@ -250,28 +250,43 @@ def test_contract_constant_is_stable() -> None:
     assert PROVIDER_CONTRACT == "kis-ws-fixture-v1"
 
 
+# market_data 패키지 전역에서 금지되는 import root. RTM-6 전까지 network/broker/ledger
+# /trigger/secret 경로는 어떤 파일에서도 들어와서는 안 된다.
+_FORBIDDEN_ROOTS = {
+    "broker",
+    "ledger",
+    "decision",
+    "paper_loop",
+    "llm",
+    "os",
+    "socket",
+    "ssl",
+    "subprocess",
+    "http",
+    "urllib",
+    "requests",
+    "aiohttp",
+    "websocket",
+    "websockets",
+    "asyncio",
+    "threading",
+    "yfinance",
+}
+
+# 파일별 예외 allowlist. 가드를 삭제·전면 완화하지 않고 계약을 파일 단위로 좁힌다.
+# monitor.py만 asyncio 오케스트레이션을 허용하고, latest_state.py만 threading.Lock을
+# 허용한다. socket/websocket/broker/ledger 등은 두 파일에서도 여전히 금지된다.
+_ALLOWED_IMPORTS_BY_FILE = {
+    "monitor.py": {"asyncio"},
+    "latest_state.py": {"threading"},
+}
+
+
 def test_market_data_modules_have_no_forbidden_imports() -> None:
-    forbidden_roots = {
-        "broker",
-        "ledger",
-        "decision",
-        "paper_loop",
-        "llm",
-        "os",
-        "socket",
-        "ssl",
-        "subprocess",
-        "http",
-        "urllib",
-        "requests",
-        "aiohttp",
-        "websocket",
-        "websockets",
-        "asyncio",
-        "yfinance",
-    }
     offenders: list[str] = []
     for path in sorted(MARKET_DATA_SRC.glob("*.py")):
+        allowed = _ALLOWED_IMPORTS_BY_FILE.get(path.name, set())
+        effective_forbidden = _FORBIDDEN_ROOTS - allowed
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names: list[str] = []
@@ -281,6 +296,22 @@ def test_market_data_modules_have_no_forbidden_imports() -> None:
                 names = [node.module or ""]
             for name in names:
                 root = name.split(".")[0]
-                if root in forbidden_roots:
+                if root in effective_forbidden:
                     offenders.append(f"{path.name}: {name}")
     assert offenders == []
+
+
+def test_asyncio_remains_forbidden_outside_monitor() -> None:
+    # asyncio는 monitor.py에서만 허용된다. 다른 어떤 파일에서도 새어들면 안 된다.
+    for path in sorted(MARKET_DATA_SRC.glob("*.py")):
+        if path.name == "monitor.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            for name in names:
+                assert name.split(".")[0] != "asyncio", f"{path.name} imports asyncio"
