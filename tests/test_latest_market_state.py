@@ -188,6 +188,34 @@ def test_future_event_rejected() -> None:
         store.apply(_trade(sequence=1, trade_at=_now(10)), now=_now(5))
 
 
+def test_future_received_at_rejected_and_state_unchanged() -> None:
+    store = LatestMarketStateStore()
+    store.apply(_trade(sequence=1, trade_at=_BASE, received_at=_BASE), now=_now(1))
+    before = store.peek(Market.KR, "005930", now=_now(2))
+    # event_time is in the past, but received_at is in the future -> fail-closed
+    with pytest.raises(FutureMarketEventError):
+        store.apply(
+            _trade(sequence=2, trade_at=_now(1), received_at=_now(10)), now=_now(5)
+        )
+    assert store.peek(Market.KR, "005930", now=_now(2)) == before
+
+
+def test_quote_future_received_at_rejected() -> None:
+    store = LatestMarketStateStore()
+    with pytest.raises(FutureMarketEventError):
+        store.apply(
+            _quote(sequence=1, quote_at=_now(1), received_at=_now(10)), now=_now(5)
+        )
+
+
+def test_received_at_equal_now_allowed() -> None:
+    store = LatestMarketStateStore()
+    result = store.apply(
+        _trade(sequence=1, trade_at=_now(5), received_at=_now(5)), now=_now(5)
+    )
+    assert result.status is ApplyStatus.APPLIED
+
+
 def test_naive_now_rejected_everywhere() -> None:
     store = LatestMarketStateStore()
     naive = datetime(2026, 6, 8, 0, 5, 0)
@@ -229,6 +257,25 @@ def test_require_fresh_both_fails_when_one_stale() -> None:
     store.apply(_quote(sequence=1, quote_at=_now(20), received_at=_now(20)), now=_now(20))
     with pytest.raises(StaleMarketStateError):
         store.require_fresh(Market.KR, "005930", now=_now(25))  # default required = trade+quote
+
+
+def test_require_fresh_empty_required_rejected() -> None:
+    store = LatestMarketStateStore()
+    store.apply(_trade(sequence=1), now=_now(1))
+    with pytest.raises(ValueError):
+        store.require_fresh(Market.KR, "005930", now=_now(2), required=frozenset())
+
+
+def test_require_fresh_heartbeat_in_required_rejected() -> None:
+    store = LatestMarketStateStore()
+    store.apply(_trade(sequence=1), now=_now(1))
+    with pytest.raises(ValueError):
+        store.require_fresh(
+            Market.KR,
+            "005930",
+            now=_now(2),
+            required=frozenset({MarketEventType.HEARTBEAT}),
+        )
 
 
 def test_require_fresh_missing_slot_raises() -> None:

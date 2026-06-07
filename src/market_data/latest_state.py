@@ -142,6 +142,8 @@ class LatestMarketStateStore:
         event_time = _event_time(event)
         if event_time > now:
             raise FutureMarketEventError(f"{event_type.value} event time is in the future.")
+        if event.received_at > now:
+            raise FutureMarketEventError(f"{event_type.value} received_at is in the future.")
 
         key = (event.market, event.symbol)
         incoming_stream = _stream_identity(event)
@@ -208,14 +210,17 @@ class LatestMarketStateStore:
         now: datetime,
         required: frozenset[MarketEventType] = DEFAULT_REQUIRED,
     ) -> LatestMarketStateSnapshot:
+        if not required:
+            raise ValueError("require_fresh requires at least one market event type.")
+        for event_type in required:
+            if event_type not in (MarketEventType.TRADE, MarketEventType.BEST_BID_ASK):
+                raise ValueError("require_fresh only supports TRADE and BEST_BID_ASK event types.")
         snapshot = self.peek(market, symbol, now=now)
         for event_type in required:
             if event_type is MarketEventType.TRADE:
                 self._require_slot(snapshot.trade, snapshot.trade_fresh, market, symbol, "trade")
-            elif event_type is MarketEventType.BEST_BID_ASK:
-                self._require_slot(snapshot.quote, snapshot.quote_fresh, market, symbol, "quote")
             else:
-                raise ValueError("require_fresh only supports TRADE and BEST_BID_ASK event types.")
+                self._require_slot(snapshot.quote, snapshot.quote_fresh, market, symbol, "quote")
         return snapshot
 
     @staticmethod
