@@ -47,8 +47,35 @@ def _trade(*, sequence: int, trade_at: datetime = _BASE, price: str = "70000") -
     )
 
 
+def _heartbeat(*, received_at: datetime) -> MarketHeartbeat:
+    return MarketHeartbeat(
+        provider="kis", channel="PINGPONG", sent_at=received_at, received_at=received_at
+    )
+
+
 def _fixed_clock(now: datetime) -> Callable[[], datetime]:
     return lambda: now
+
+
+class _HeartbeatThenDrop:
+    """heartbeat 하나를 흘린 뒤 transport 단절을 모사한다."""
+
+    def __init__(self, beat: MarketHeartbeat) -> None:
+        self._beat = beat
+
+    async def events(self) -> AsyncIterator[MarketEvent]:
+        yield self._beat
+        raise RuntimeError("simulated transport drop")
+
+
+class _HeartbeatThenEof:
+    """healthy source: fresh heartbeat 하나를 흘린 뒤 정상 EOF."""
+
+    def __init__(self, beat: MarketHeartbeat) -> None:
+        self._beat = beat
+
+    async def events(self) -> AsyncIterator[MarketEvent]:
+        yield self._beat
 
 
 class _RecordingSleep:
@@ -495,3 +522,86 @@ def test_monitor_rejects_invalid_budget_args(kwargs: dict[str, object]) -> None:
             session_id="hard-5",
             **kwargs,  # type: ignore[arg-type]
         )
+
+
+# --- follow-up hardening: heartbeat reconnect / runtime reason / sink errors -
+
+
+def test_reconnect_recovers_after_heartbeat_stale() -> None:
+    """heartbeat stale drop 후, backoff로 clock이 옛 deadline을 지났더라도 healthy
+    source가 새 heartbeat를 낼 기회를 얻어 정상 복구해야 한다.
+
+    regression: 재접속 중 deadline을 이전 epoch heartbeat로 잡으면 wait_for(...,0)으로
+    새 source 첫 이벤트도 못 받고 stale drop→재접속을 반복해 exhausted된다."""
+    store = LatestMarketStateStore()
+    sources: list[MarketEventSource] = [
+        _HeartbeatThenDrop(_heartbeat(received_at=_BASE)),
+        _HeartbeatThenEof(_heartbeat(received_at=_BASE + timedelta(seconds=29))),
+    ]
+    # clock이 backoff 동안 옛 deadline(_BASE+10)을 지나 _BASE+30에 있다고 가정.
+    clock = _fixed_clock(_BASE + timedelta(seconds=30))
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: sources.pop(0),
+        clock=clock,
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=4),
+        sleep=_RecordingSleep(),
+        session_id="hard-6",
+        heartbeat_watch=("kis", "PINGPONG"),
+        heartbeat_timeout_seconds=10.0,
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
+    assert summary.connection_attempts == 2  # recovered on second attempt, not exhausted
+    assert summary.applied == 2  # both heartbeats applied (old + fresh)
+
+
+def test_runtime_timeout_fixed_clock_not_misclassified() -> None:
+    """max_runtime_seconds만 설정하고 injected clock이 고정돼 있어도 runtime timeout이
+    heartbeat_stale로 오분류되지 않고 깔끔히 budget 종료(STOPPED)해야 한다.
+
+    regression: timeout 원인을 사후에 clock으로 추정하면 고정 clock에서 runtime을
+    heartbeat_stale로 오판해 재접속 루프에 빠진다."""
+    store = LatestMarketStateStore()
+    started = asyncio.Event()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _BlockingSource(started),
+        clock=_fixed_clock(_BASE),  # never ticks
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=3),
+        sleep=_RecordingSleep(),
+        session_id="hard-7",
+        max_runtime_seconds=0.03,
+        on_evidence=evidence.append,
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
+    assert summary.connection_attempts == 1  # no reconnect loop
+    stops = [e for e in evidence if e.kind == "stop"]
+    assert stops and all(e.reason_code == "runtime_timeout" for e in stops)
+    assert not any(e.kind == "drop" for e in evidence)
+
+
+def test_evidence_sink_failure_is_internal_error() -> None:
+    """evidence sink 결함은 MonitorInternalError로 fail-closed 전파된다(계약 일치).
+    transport drop으로 오인해 backoff·reconnect하지 않는다."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+
+    def boom(_evidence: MonitorEvidence) -> None:
+        raise RuntimeError("disk full")
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: ReplayMarketEventSource([_trade(sequence=1)]),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, max_attempts=5),
+        sleep=sleep,
+        session_id="hard-8",
+        on_evidence=boom,
+    )
+    with pytest.raises(MonitorInternalError):
+        _run(monitor)
+    assert sleep.calls == []
+    assert monitor.state is MonitorState.STOPPED

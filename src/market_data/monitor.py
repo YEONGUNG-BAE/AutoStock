@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -275,14 +276,14 @@ class MarketMonitor:
             iterator = self._source_factory().events().__aiter__()
         except asyncio.CancelledError:
             self._state = MonitorState.STOPPED
-            self._emit("cancelled", attempt)
+            self._emit_cancelled(attempt)
             raise
         except Exception:
             self._emit("drop", attempt, reason_code="source_error")
             return "drop"
 
         while True:
-            timeout = self._next_event_timeout()
+            timeout, timeout_reason = self._next_event_timeout()
             try:
                 if timeout is None:
                     event = await iterator.__anext__()
@@ -294,10 +295,11 @@ class MarketMonitor:
                 return "eof"
             except asyncio.CancelledError:
                 self._state = MonitorState.STOPPED
-                self._emit("cancelled", attempt)
+                self._emit_cancelled(attempt)
                 raise
             except (asyncio.TimeoutError, TimeoutError):
-                if self._runtime_exhausted():
+                # 원인은 wait_for 직전에 고른 deadline(timeout_reason) 그대로 쓴다.
+                if timeout_reason == "runtime":
                     self._state = MonitorState.STOPPED
                     self._emit("stop", attempt, reason_code="runtime_timeout")
                     return "budget"
@@ -365,33 +367,48 @@ class MarketMonitor:
             meta=meta,
         )
 
-    def _next_event_timeout(self) -> float | None:
-        """다음 이벤트를 기다릴 최대 시간(초). heartbeat watchdog/runtime budget이
-        없으면 None(무한 대기). 주입 clock 기준 가장 가까운 deadline까지의 잔여시간을
-        실제 wait_for timeout으로 사용한다(silent source도 종료 가능)."""
+    def _next_event_timeout(self) -> tuple[float | None, str | None]:
+        """다음 이벤트를 기다릴 최대 시간(초)과 그 deadline의 원인을 함께 반환한다.
+
+        heartbeat watchdog/runtime budget이 없으면 (None, None)=무한 대기. 둘 다 있으면
+        가장 가까운 deadline을 택하되 동률이면 종료성(runtime)을 우선한다. timeout이
+        실제로 터졌을 때 clock을 다시 읽어 원인을 추정하지 않고 여기서 정한 reason을
+        그대로 쓴다 — fixed/non-ticking clock에서도 runtime timeout이 heartbeat_stale로
+        오분류돼 재접속 루프에 빠지지 않게 하기 위함이다."""
         now = self._clock()
-        deadlines: list[datetime] = []
+        candidates: list[tuple[datetime, str]] = []
         if self._heartbeat_watch is not None and self._heartbeat_timeout_seconds is not None:
-            deadlines.append(self._heartbeat_deadline(now))
+            candidates.append((self._heartbeat_deadline(now), "heartbeat"))
         if self._max_runtime_seconds is not None and self._started_at is not None:
-            deadlines.append(
-                self._started_at + timedelta(seconds=self._max_runtime_seconds)
+            candidates.append(
+                (self._started_at + timedelta(seconds=self._max_runtime_seconds), "runtime")
             )
-        if not deadlines:
-            return None
-        remaining = (min(deadlines) - now).total_seconds()
-        return max(remaining, 0.0)
+        if not candidates:
+            return None, None
+        deadline, reason = min(
+            candidates, key=lambda c: (c[0], 0 if c[1] == "runtime" else 1)
+        )
+        remaining = (deadline - now).total_seconds()
+        return max(remaining, 0.0), reason
 
     def _heartbeat_deadline(self, now: datetime) -> datetime:
         assert self._heartbeat_watch is not None
         assert self._heartbeat_timeout_seconds is not None
-        provider, channel = self._heartbeat_watch
-        snapshot = self._store.peek_liveness(provider, channel, now=now)
-        base = (
-            snapshot.heartbeat.received_at
-            if snapshot.heartbeat is not None
-            else (self._epoch_started_at or now)
-        )
+        watch = self._heartbeat_watch
+        # 재접속 직후(이 stream의 첫 새 이벤트 수신 전, 즉 reset 대기 중)에는 이전 epoch의
+        # heartbeat를 liveness 기준으로 쓰지 않는다. backoff 동안 wall-clock이 전진해
+        # 옛 deadline이 이미 지났을 수 있고, 그러면 새 source가 첫 heartbeat를 낼 기회조차
+        # 없이 wait_for(...,0)이 즉시 stale drop→재접속을 반복해 정상 연결도 exhausted된다.
+        # 따라서 reset 대기 중에는 새 epoch 시작 시각을 기준으로 deadline을 잡는다.
+        if watch in self._pending_reset:
+            base = self._epoch_started_at or now
+        else:
+            snapshot = self._store.peek_liveness(*watch, now=now)
+            base = (
+                snapshot.heartbeat.received_at
+                if snapshot.heartbeat is not None
+                else (self._epoch_started_at or now)
+            )
         return base + timedelta(seconds=self._heartbeat_timeout_seconds)
 
     def _runtime_exhausted(self) -> bool:
@@ -452,4 +469,17 @@ class MarketMonitor:
             reason_code=reason_code,
             backoff_seconds=backoff_seconds,
         )
-        self._on_evidence(evidence)
+        # evidence sink 결함(disk full, broken pipe, callback bug)은 transport 단절이
+        # 아니라 monitor 내부 계약 위반이므로 MonitorInternalError로 fail-closed 전파한다.
+        try:
+            self._on_evidence(evidence)
+        except MonitorInternalError:
+            raise
+        except Exception as exc:
+            raise MonitorInternalError("evidence sink failed") from exc
+
+    def _emit_cancelled(self, attempt: int) -> None:
+        """취소 경로 전용 best-effort emit. sink가 터져도 CancelledError 전파를
+        가리지 않도록 예외를 삼킨다(구조적 취소 의미 보존)."""
+        with contextlib.suppress(Exception):
+            self._emit("cancelled", attempt)
