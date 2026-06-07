@@ -21,6 +21,7 @@ from market_data.monitor import (
     MarketMonitor,
     MonitorEvidence,
     MonitorExhaustedError,
+    MonitorInternalError,
     MonitorState,
     ReconnectPolicy,
 )
@@ -56,6 +57,31 @@ class _RecordingSleep:
 
     async def __call__(self, seconds: float) -> None:
         self.calls.append(seconds)
+
+
+class _SteppingClock:
+    """첫 호출은 start, 이후 호출은 start+step. wait_for의 deadline 계산을 음수로
+    만들어 실제 대기 없이 timeout 분기를 결정론적으로 태운다."""
+
+    def __init__(self, start: datetime, step: timedelta) -> None:
+        self._start = start
+        self._step = step
+        self._calls = 0
+
+    def __call__(self) -> datetime:
+        self._calls += 1
+        return self._start if self._calls == 1 else self._start + self._step
+
+
+class _ApplyRaisingStore:
+    """store.apply가 generic 예외를 던지는 스텁. 내부 결함이 transport drop으로
+    오인되지 않고 MonitorInternalError로 전파되는지 검증하는 데 쓴다."""
+
+    def apply(self, event: MarketEvent, *, now: datetime) -> object:
+        raise RuntimeError("internal store defect")
+
+    def reset_stream(self, provider: str, channel: str) -> None:  # pragma: no cover
+        pass
 
 
 class _FaultySource:
@@ -297,3 +323,175 @@ def test_require_fresh_missing_after_reset() -> None:
     store.reset_stream("kis", "H0STCNT0|005930")
     with pytest.raises(MissingMarketStateError):
         store.require_fresh(Market.KR, "005930", now=_BASE + timedelta(seconds=2))
+
+
+# --- hardening item 1: reset is deferred to the new epoch's first event -----
+
+
+def test_reconnect_without_new_event_preserves_old_state() -> None:
+    """새 source가 첫 이벤트도 못 내고 EOF면 reset이 일어나지 않아 기존 state가 보존된다.
+    reset이 '재접속 시작'이 아니라 '새 stream 첫 이벤트 수신 직후'에만 일어남을 못박는다."""
+    store = LatestMarketStateStore()
+    clock = _fixed_clock(_BASE + timedelta(seconds=5))
+    first = _FaultySource([_trade(sequence=5, price="70000")], yields_before=1)
+    second = ReplayMarketEventSource([])  # immediate EOF, no events
+    sources: list[MarketEventSource] = [first, second]
+    evidence: list[MonitorEvidence] = []
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: sources.pop(0),
+        clock=clock,
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, max_attempts=5),
+        sleep=_RecordingSleep(),
+        session_id="hard-1",
+        on_evidence=evidence.append,
+    )
+    summary = _run(monitor)
+
+    assert summary.final_state is MonitorState.STOPPED
+    assert summary.connection_attempts == 2
+    # no reset evidence: the second epoch never delivered an event to trigger it
+    assert not any(e.kind == "reset" for e in evidence)
+    # old state from the first epoch survives untouched
+    snap = store.peek(Market.KR, "005930", now=_BASE + timedelta(seconds=5))
+    assert snap.trade is not None
+    assert snap.trade.provider_sequence.sequence == 5
+    assert str(snap.trade.price) == "70000"
+
+
+# --- hardening item 2: heartbeat stale watchdog reconnects -------------------
+
+
+def test_heartbeat_watchdog_drops_on_silence() -> None:
+    """heartbeat_watch가 설정되면 다음 이벤트를 timeout 안에 못 받을 때 half-dead
+    연결로 보고 drop·reconnect한다."""
+    store = LatestMarketStateStore()
+    started = asyncio.Event()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _BlockingSource(started),
+        clock=_fixed_clock(_BASE),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="hard-2",
+        heartbeat_watch=("kis", "PINGPONG"),
+        heartbeat_timeout_seconds=0.05,
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError) as excinfo:
+        _run(monitor)
+    assert excinfo.value.summary.final_state is MonitorState.EXHAUSTED
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert drops and all(e.reason_code == "heartbeat_stale" for e in drops)
+
+
+# --- hardening item 3: runtime timeout fires even on a silent source ---------
+
+
+def test_runtime_timeout_stops_silent_source() -> None:
+    """silent source(이벤트 무한 대기)에도 max_runtime_seconds가 작동해 budget 종료한다.
+    stepping clock으로 deadline을 음수화해 실제 대기 없이 timeout 분기를 태운다."""
+    store = LatestMarketStateStore()
+    started = asyncio.Event()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _BlockingSource(started),
+        clock=_SteppingClock(_BASE, timedelta(seconds=100)),
+        session_id="hard-3",
+        max_runtime_seconds=0.05,
+        on_evidence=evidence.append,
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
+    assert summary.connection_attempts == 1
+    stops = [e for e in evidence if e.kind == "stop"]
+    assert stops and all(e.reason_code == "runtime_timeout" for e in stops)
+
+
+# --- hardening item 4: internal vs transport error boundary ------------------
+
+
+def test_internal_store_error_propagates_not_reconnect() -> None:
+    """store.apply 내부 결함은 MonitorInternalError로 즉시 전파되고, transport drop으로
+    오인해 backoff·reconnect하지 않는다."""
+    sleep = _RecordingSleep()
+    monitor = MarketMonitor(
+        store=_ApplyRaisingStore(),  # type: ignore[arg-type]
+        source_factory=lambda: ReplayMarketEventSource([_trade(sequence=1)]),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, max_attempts=5),
+        sleep=sleep,
+        session_id="hard-4a",
+    )
+    with pytest.raises(MonitorInternalError):
+        _run(monitor)
+    assert sleep.calls == []  # never backed off
+    assert monitor.state is MonitorState.STOPPED
+
+
+def test_factory_error_triggers_backoff_not_death() -> None:
+    """source_factory 자체 오류는 transport drop으로 분류돼 backoff·reconnect한다."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def factory() -> MarketEventSource:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connect failed")
+        return ReplayMarketEventSource([_trade(sequence=1, price="80000")])
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=factory,
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, max_attempts=5),
+        sleep=sleep,
+        session_id="hard-4b",
+    )
+    summary = _run(monitor)
+    assert summary.applied == 1
+    assert summary.connection_attempts == 2
+    assert sleep.calls == [1.0]
+    assert summary.final_state is MonitorState.STOPPED
+
+
+# --- hardening item 5: policy + budget argument validation -------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_attempts": 0},
+        {"multiplier": 0.0},
+        {"initial_delay_seconds": -1.0},
+        {"initial_delay_seconds": 1.0, "max_delay_seconds": 0.5},
+    ],
+)
+def test_reconnect_policy_rejects_invalid_args(kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        ReconnectPolicy(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_events": 0},
+        {"max_runtime_seconds": 0.0},
+        {"heartbeat_watch": ("kis", "PINGPONG")},  # timeout missing
+        {"heartbeat_timeout_seconds": 1.0},  # watch missing
+        {"heartbeat_watch": ("kis", "PINGPONG"), "heartbeat_timeout_seconds": 0.0},
+    ],
+)
+def test_monitor_rejects_invalid_budget_args(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        MarketMonitor(
+            store=LatestMarketStateStore(),
+            source_factory=lambda: ReplayMarketEventSource([]),
+            clock=_fixed_clock(_BASE),
+            session_id="hard-5",
+            **kwargs,  # type: ignore[arg-type]
+        )
