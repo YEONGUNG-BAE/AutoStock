@@ -1,0 +1,23 @@
+{
+  "plan_id": "plan-260522-001",
+  "decision_id": "analysis-260522-001",
+  "created_at": "2026-05-22T08:00:00+00:00",
+  "valid_from": "2026-05-22T08:00:00+00:00",
+  "expires_at": "2026-05-22T20:00:00+00:00",
+  "universe": "KR_LARGE",
+  "market": "KR",
+  "symbol": "005930",
+  "action": "buy",
+  "rules": [
+    {"metric": "last_trade_price", "comparator": "lte", "threshold": "70000"},
+    {"metric": "spread_bps", "comparator": "lte", "threshold": "25"}
+  ],
+  "reset_rules": [
+    {"metric": "last_trade_price", "comparator": "gte", "threshold": "71000"}
+  ],
+  "debounce_events": 2,
+  "debounce_seconds": "1.5",
+  "reset_events": 1,
+  "cooldown_seconds": "30",
+  "max_fires_per_decision": 1
+}

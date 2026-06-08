@@ -279,6 +279,7 @@ _FORBIDDEN_ROOTS = {
 _ALLOWED_IMPORTS_BY_FILE = {
     "monitor.py": {"asyncio"},
     "latest_state.py": {"threading"},
+    "trigger_engine.py": {"threading"},
 }
 
 

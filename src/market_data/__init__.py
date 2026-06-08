@@ -29,12 +29,41 @@ from market_data.monitor import (
     MonitorSummary,
     ReconnectPolicy,
 )
+from market_data.conditions import (
+    Comparator,
+    ConditionClause,
+    Metric,
+    evaluate_all,
+    evaluate_clause,
+    metric_value,
+    rule_required_slots,
+)
+from market_data.decision_loader import DecisionLoadError, load_decision_bundle
 from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
+from market_data.trigger_engine import (
+    ConditionObservation,
+    DecisionTriggerBundle,
+    ReplaceResult,
+    ReplaceStatus,
+    TradingPermission,
+    TriggerEngine,
+    TriggerEvaluation,
+    TriggerPlan,
+    TriggerReason,
+    TriggerSignal,
+    TriggerState,
+    TriggerStatus,
+)
 
 __all__ = [
     "ApplyResult",
     "ApplyStatus",
+    "Comparator",
+    "ConditionClause",
+    "ConditionObservation",
+    "DecisionLoadError",
+    "DecisionTriggerBundle",
     "FutureMarketEventError",
     "LatestMarketStateSnapshot",
     "LatestMarketStateStore",
@@ -46,6 +75,7 @@ __all__ = [
     "MarketMonitor",
     "MarketStateError",
     "MarketStateFreshnessPolicy",
+    "Metric",
     "MissingMarketStateError",
     "MonitorEvidence",
     "MonitorExhaustedError",
@@ -56,6 +86,21 @@ __all__ = [
     "NormalizedTradeTick",
     "ProviderSequence",
     "ReconnectPolicy",
+    "ReplaceResult",
+    "ReplaceStatus",
     "ReplayMarketEventSource",
     "StaleMarketStateError",
+    "TradingPermission",
+    "TriggerEngine",
+    "TriggerEvaluation",
+    "TriggerPlan",
+    "TriggerReason",
+    "TriggerSignal",
+    "TriggerState",
+    "TriggerStatus",
+    "evaluate_all",
+    "evaluate_clause",
+    "load_decision_bundle",
+    "metric_value",
+    "rule_required_slots",
 ]
