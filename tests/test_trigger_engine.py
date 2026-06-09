@@ -29,6 +29,7 @@ from market_data.models import (
 )
 from market_data.trigger_engine import (
     DecisionTriggerBundle,
+    ReplaceStatus,
     TradingPermission,
     TriggerEngine,
     TriggerPlan,
@@ -130,12 +131,16 @@ def _bundle(
 
 
 def _permission(
-    *, allowed: bool = True, market: Market = Market.KR, valid_until: datetime | None = None
+    *,
+    allowed: bool = True,
+    market: Market = Market.KR,
+    checked_at: datetime = NOW,
+    valid_until: datetime | None = None,
 ) -> TradingPermission:
     return TradingPermission(
         market=market,
         allowed=allowed,
-        checked_at=NOW,
+        checked_at=checked_at,
         valid_until=valid_until if valid_until is not None else NOW + DAY,
         reason_code="open",
     )
@@ -278,9 +283,8 @@ def test_permission_not_allowed() -> None:
 
 def test_stale_permission() -> None:
     engine = _armed_engine()
-    result = engine.evaluate(
-        _fireable_snap(), _permission(valid_until=NOW - timedelta(seconds=1)), now=NOW
-    )
+    expired = _permission(checked_at=NOW - 2 * DAY, valid_until=NOW - timedelta(seconds=1))
+    result = engine.evaluate(_fireable_snap(), expired, now=NOW)
     assert result.reason is TriggerReason.STALE_PERMISSION
 
 
@@ -505,6 +509,158 @@ def test_plan_loads_from_json_fixture() -> None:
     assert plan.debounce_events == 2
     assert plan.debounce_seconds == Decimal("1.5")
     assert plan.cooldown_seconds == Decimal("30")
+
+
+# --------------------------------------------------------------------------- #
+# hardening: snapshot identity gate (#1)
+# --------------------------------------------------------------------------- #
+def _other_snap(*, market: Market, symbol: str, price: str = "100") -> LatestMarketStateSnapshot:
+    quote = NormalizedBestBidAsk(
+        provider="kis", symbol=symbol, market=market, currency=Currency.KRW,
+        bid_price="99", ask_price="101", bid_quantity="10", ask_quantity="10",
+        quote_at=NOW, received_at=NOW,
+        provider_sequence=ProviderSequence(provider="kis", channel="q", sequence=1, received_at=NOW),
+    )
+    trade = NormalizedTradeTick(
+        provider="kis", symbol=symbol, market=market, currency=Currency.KRW,
+        price=price, quantity="1", trade_at=NOW, received_at=NOW,
+        provider_sequence=ProviderSequence(provider="kis", channel="t", sequence=1, received_at=NOW),
+    )
+    return LatestMarketStateSnapshot(
+        market=market, symbol=symbol, trade=trade, quote=quote, trade_fresh=True, quote_fresh=True
+    )
+
+
+def test_wrong_symbol_snapshot_is_suppressed_no_state_change() -> None:
+    engine = _armed_engine()
+    snap = _other_snap(market=Market.KR, symbol="000660")
+    result = engine.evaluate(snap, _permission(), now=NOW)
+    assert result.status is TriggerStatus.SUPPRESSED
+    assert result.reason is TriggerReason.SNAPSHOT_SYMBOL_MISMATCH
+    assert engine.state is TriggerState.ARMED  # never advanced to DEBOUNCING/LOCKED
+    # the correct instrument still fires afterwards
+    ok = engine.evaluate(_fireable_snap(), _permission(), now=NOW)
+    assert ok.status is TriggerStatus.TRIGGERED
+
+
+def test_wrong_market_snapshot_is_suppressed() -> None:
+    engine = _armed_engine()
+    snap = _other_snap(market=Market.US, symbol="005930")
+    result = engine.evaluate(snap, _permission(), now=NOW)
+    assert result.reason is TriggerReason.SNAPSHOT_MARKET_MISMATCH
+
+
+def test_snapshot_key_matches_but_inner_quote_belongs_to_other_symbol() -> None:
+    engine = _armed_engine()
+    # snapshot key says 005930 but the quote slot carries a foreign symbol
+    foreign_quote = NormalizedBestBidAsk(
+        provider="kis", symbol="000660", market=Market.KR, currency=Currency.KRW,
+        bid_price="99", ask_price="101", bid_quantity="10", ask_quantity="10",
+        quote_at=NOW, received_at=NOW,
+        provider_sequence=ProviderSequence(provider="kis", channel="q", sequence=1, received_at=NOW),
+    )
+    snap = _snap(trade=_trade(), quote=foreign_quote)
+    result = engine.evaluate(snap, _permission(), now=NOW)
+    assert result.status is TriggerStatus.SUPPRESSED
+    assert result.reason is TriggerReason.SNAPSHOT_SYMBOL_MISMATCH
+
+
+# --------------------------------------------------------------------------- #
+# hardening: bundle conflict under same identity (#2)
+# --------------------------------------------------------------------------- #
+def test_same_identity_different_plan_is_conflict_not_unchanged() -> None:
+    engine = TriggerEngine()
+    p1 = _plan(rules=(_clause(Metric.LAST_TRADE_PRICE, Comparator.LTE, "70000"),))
+    p2 = _plan(rules=(_clause(Metric.LAST_TRADE_PRICE, Comparator.LTE, "65000"),))
+    engine.replace_bundle(_bundle(plan=p1), now=NOW)
+    result = engine.replace_bundle(_bundle(plan=p2), now=NOW)
+    assert result.status is ReplaceStatus.REJECTED_CONFLICT
+
+
+def test_same_identity_identical_content_is_unchanged() -> None:
+    engine = TriggerEngine()
+    engine.replace_bundle(_bundle(), now=NOW)
+    result = engine.replace_bundle(_bundle(), now=NOW)
+    assert result.status is ReplaceStatus.UNCHANGED
+
+
+def test_same_created_at_different_id_is_conflict() -> None:
+    engine = TriggerEngine()
+    engine.replace_bundle(_bundle(decision_id="analysis-260522-001", created_at=NOW), now=NOW)
+    result = engine.replace_bundle(
+        _bundle(decision_id="analysis-260522-999", created_at=NOW), now=NOW
+    )
+    assert result.status is ReplaceStatus.REJECTED_CONFLICT
+
+
+# --------------------------------------------------------------------------- #
+# hardening: permission time window (#3)
+# --------------------------------------------------------------------------- #
+def test_future_permission_not_yet_valid() -> None:
+    engine = _armed_engine()
+    future = _permission(checked_at=NOW + DAY, valid_until=NOW + 2 * DAY)
+    result = engine.evaluate(_fireable_snap(), future, now=NOW)
+    assert result.status is TriggerStatus.SUPPRESSED
+    assert result.reason is TriggerReason.PERMISSION_NOT_YET_VALID
+
+
+def test_permission_checked_after_valid_until_rejected() -> None:
+    with pytest.raises(ValidationError):
+        TradingPermission(
+            market=Market.KR, allowed=True,
+            checked_at=NOW + 2 * DAY, valid_until=NOW + DAY, reason_code="x",
+        )
+
+
+def test_permission_boundary_now_equals_checked_at_and_valid_until() -> None:
+    engine = _armed_engine()
+    at_open = _permission(checked_at=NOW, valid_until=NOW)
+    result = engine.evaluate(_fireable_snap(), at_open, now=NOW)
+    assert result.status is TriggerStatus.TRIGGERED
+
+
+# --------------------------------------------------------------------------- #
+# hardening: cooldown reset continuity across suppression (#5)
+# --------------------------------------------------------------------------- #
+def test_suppression_gap_resets_cooldown_reset_counter() -> None:
+    engine = _armed_engine(max_fires_per_decision=2, cooldown_seconds="0", reset_events=2)
+    engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)  # fire1 → COOLDOWN
+    engine.evaluate(_fireable_snap(price="101"), _permission(), now=NOW)  # reset-true #1
+    # a data gap (stale quote) must break the consecutive-reset streak
+    stale = _snap(trade=_trade(), quote=_quote(), quote_fresh=False)
+    gap = engine.evaluate(stale, _permission(), now=NOW)
+    assert gap.status is TriggerStatus.SUPPRESSED
+    # one reset-true after the gap is NOT enough (counter restarted): still cooling
+    after = engine.evaluate(_fireable_snap(price="101"), _permission(), now=NOW)
+    assert after.status is TriggerStatus.COOLDOWN
+    assert after.state is TriggerState.COOLDOWN
+
+
+# --------------------------------------------------------------------------- #
+# hardening: plan/decision time binding (#6)
+# --------------------------------------------------------------------------- #
+def test_plan_predating_decision_rejected() -> None:
+    decision_created = NOW
+    early_plan = _plan(
+        created_at=NOW - DAY, valid_from=NOW - DAY, expires_at=NOW + DAY
+    )
+    with pytest.raises(ValidationError):
+        DecisionTriggerBundle(decision=_decision(created_at=decision_created), plan=early_plan)
+
+
+# --------------------------------------------------------------------------- #
+# refuted (#4): non-finite Decimal already rejected by pydantic core
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_threshold_rejected(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        ConditionClause(metric=Metric.LAST_TRADE_PRICE, comparator=Comparator.LTE, threshold=bad)
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity"])
+def test_non_finite_seconds_rejected(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        _plan(debounce_seconds=bad)
 
 
 # --------------------------------------------------------------------------- #

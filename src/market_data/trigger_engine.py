@@ -150,6 +150,12 @@ class TradingPermission(BaseModel):
     def _parse_times(cls, value: object, info: object) -> datetime:
         return parse_timezone_aware_datetime(value, field_name=info.field_name)  # type: ignore[attr-defined]
 
+    @model_validator(mode="after")
+    def _validate_window(self) -> Self:
+        if self.checked_at > self.valid_until:
+            raise ValueError("checked_at must be <= valid_until.")
+        return self
+
 
 class ConditionObservation(BaseModel):
     """trigger 시점에 각 rule metric이 가졌던 값. evidence/감사용이며 raw payload가 아니다."""
@@ -210,6 +216,11 @@ class DecisionTriggerBundle(BaseModel):
             raise ValueError("plan.universe must equal decision.universe.")
         if plan.action != action:
             raise ValueError("plan.action must equal decision.fund_manager.action.")
+        # a plan cannot predate the decision it executes (time binding).
+        if plan.created_at < self.decision.created_at:
+            raise ValueError("plan.created_at must be >= decision.created_at.")
+        if plan.valid_from < self.decision.created_at:
+            raise ValueError("plan.valid_from must be >= decision.created_at.")
         return self
 
 
@@ -238,7 +249,10 @@ class TriggerReason(StrEnum):
     STALE_DECISION = "stale_decision"
     TRADING_NOT_ALLOWED = "trading_not_allowed"
     STALE_PERMISSION = "stale_permission"
+    PERMISSION_NOT_YET_VALID = "permission_not_yet_valid"
     PERMISSION_MARKET_MISMATCH = "permission_market_mismatch"
+    SNAPSHOT_MARKET_MISMATCH = "snapshot_market_mismatch"
+    SNAPSHOT_SYMBOL_MISMATCH = "snapshot_symbol_mismatch"
     MISSING_TRADE = "missing_trade"
     STALE_TRADE = "stale_trade"
     MISSING_QUOTE = "missing_quote"
@@ -261,6 +275,7 @@ class ReplaceStatus(StrEnum):
     REPLACED = "replaced"
     UNCHANGED = "unchanged"
     REJECTED_OLDER = "rejected_older"
+    REJECTED_CONFLICT = "rejected_conflict"
 
 
 @dataclass(frozen=True)
@@ -281,6 +296,17 @@ def _rule_set_id(plan: TriggerPlan) -> str:
     payload = {
         "rules": [_canonical_rule(c) for c in plan.rules],
         "reset_rules": [_canonical_rule(c) for c in plan.reset_rules],
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _bundle_fingerprint(bundle: DecisionTriggerBundle) -> str:
+    """decision + plan의 canonical 내용 해시. 동일 identity(decision_id+created_at)인데
+    내용이 다른 교체를 silent UNCHANGED로 삼키지 않고 충돌로 감지하기 위함이다."""
+    payload = {
+        "decision": bundle.decision.model_dump(mode="json"),
+        "plan": bundle.plan.model_dump(mode="json") if bundle.plan is not None else None,
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -322,6 +348,7 @@ class TriggerEngine:
         self._active: DecisionTriggerBundle | None = None
         self._state = TriggerState.DISARMED
         self._rule_set_id = ""
+        self._fingerprint = ""
         self._activation_epoch = 0
         self._debounce_count = 0
         self._first_true_at: datetime | None = None
@@ -337,27 +364,36 @@ class TriggerEngine:
     def replace_bundle(self, bundle: DecisionTriggerBundle, *, now: datetime) -> ReplaceResult:
         """active decision을 원자적으로 교체한다.
 
-        규칙: older decision(created_at <) 거부, 동일 decision_id+created_at은 unchanged,
-        newer는 atomic replace. HOLD는 DISARMED, BUY/SELL은 ARMED로 두고 debounce/cooldown/
+        규칙(fail-closed): 동일 decision_id+created_at이면 내용 fingerprint가 같을 때만
+        UNCHANGED, 다르면 REJECTED_CONFLICT(같은 정체성에 다른 plan/payload를 silent로
+        삼키지 않는다). created_at이 같은데 decision_id가 다르면 newer/older 판단이
+        불가능하므로 REJECTED_CONFLICT. older(created_at <)는 REJECTED_OLDER. newer만
+        atomic replace한다. HOLD는 DISARMED, BUY/SELL은 ARMED로 두고 debounce/cooldown/
         reset/fires 상태를 모두 초기화한다(reader가 혼합 상태를 보지 않게 lock 안에서 수행)."""
         require_timezone_aware_datetime(now, field_name="now")
+        incoming_fingerprint = _bundle_fingerprint(bundle)
         with self._lock:
             current = self._active
             incoming = bundle.decision
             if current is not None:
                 existing = current.decision
-                if (
-                    incoming.decision_id == existing.decision_id
-                    and incoming.created_at == existing.created_at
-                ):
-                    return ReplaceResult(ReplaceStatus.UNCHANGED, self._state)
+                same_id = incoming.decision_id == existing.decision_id
+                same_time = incoming.created_at == existing.created_at
+                if same_id and same_time:
+                    if incoming_fingerprint == self._fingerprint:
+                        return ReplaceResult(ReplaceStatus.UNCHANGED, self._state)
+                    return ReplaceResult(ReplaceStatus.REJECTED_CONFLICT, self._state)
+                if same_time and not same_id:
+                    # 동일 시각의 서로 다른 결정 — 순서를 정할 수 없어 fail-closed 거부.
+                    return ReplaceResult(ReplaceStatus.REJECTED_CONFLICT, self._state)
                 if incoming.created_at < existing.created_at:
                     return ReplaceResult(ReplaceStatus.REJECTED_OLDER, self._state)
-            self._install(bundle)
+            self._install(bundle, incoming_fingerprint)
             return ReplaceResult(ReplaceStatus.REPLACED, self._state)
 
-    def _install(self, bundle: DecisionTriggerBundle) -> None:
+    def _install(self, bundle: DecisionTriggerBundle, fingerprint: str) -> None:
         self._active = bundle
+        self._fingerprint = fingerprint
         self._activation_epoch += 1
         self._debounce_count = 0
         self._first_true_at = None
@@ -413,6 +449,12 @@ class TriggerEngine:
         if now > plan.expires_at:
             return self._suppress_break(TriggerReason.STALE_DECISION)
 
+        # --- snapshot identity gate: never evaluate another instrument's prices ---
+        if snapshot.market != plan.market:
+            return self._suppress_break(TriggerReason.SNAPSHOT_MARKET_MISMATCH)
+        if snapshot.symbol != plan.symbol:
+            return self._suppress_break(TriggerReason.SNAPSHOT_SYMBOL_MISMATCH)
+
         # --- trading permission (default deny) ---
         if permission is None:
             return self._suppress_break(TriggerReason.TRADING_NOT_ALLOWED)
@@ -420,6 +462,8 @@ class TriggerEngine:
             return self._suppress_break(TriggerReason.PERMISSION_MARKET_MISMATCH)
         if not permission.allowed:
             return self._suppress_break(TriggerReason.TRADING_NOT_ALLOWED)
+        if now < permission.checked_at:
+            return self._suppress_break(TriggerReason.PERMISSION_NOT_YET_VALID)
         if now > permission.valid_until:
             return self._suppress_break(TriggerReason.STALE_PERMISSION)
 
@@ -427,11 +471,16 @@ class TriggerEngine:
         needs_trade, _ = rule_required_slots(plan.rules)
         if snapshot.quote is None:
             return self._suppress_break(TriggerReason.MISSING_QUOTE)
+        # inner-slot identity: the quote/trade must belong to the planned instrument.
+        if snapshot.quote.market != plan.market or snapshot.quote.symbol != plan.symbol:
+            return self._suppress_break(TriggerReason.SNAPSHOT_SYMBOL_MISMATCH)
         if not snapshot.quote_fresh:
             return self._suppress_break(TriggerReason.STALE_QUOTE)
         if needs_trade:
             if snapshot.trade is None:
                 return self._suppress_break(TriggerReason.MISSING_TRADE)
+            if snapshot.trade.market != plan.market or snapshot.trade.symbol != plan.symbol:
+                return self._suppress_break(TriggerReason.SNAPSHOT_SYMBOL_MISMATCH)
             if not snapshot.trade_fresh:
                 return self._suppress_break(TriggerReason.STALE_TRADE)
 
@@ -546,12 +595,16 @@ class TriggerEngine:
         return TriggerEvaluation(TriggerStatus.SUPPRESSED, self._state, reason)
 
     def _suppress_break(self, reason: TriggerReason) -> TriggerEvaluation:
-        """조건 스트림이 끊긴 suppress(stale/missing/permission/not-yet-valid). debounce
-        진행 중이었다면 counter를 리셋하고 ARMED로 되돌린다(§9). cooldown/locked는 유지."""
+        """조건/데이터 스트림이 끊긴 suppress(stale/missing/permission/identity/not-yet-valid).
+        debounce 진행 중이었다면 counter를 리셋하고 ARMED로 되돌린다(§9). COOLDOWN 중이면
+        rearm은 '연속' reset event를 요구하므로 끊긴 동안 누적된 reset_count도 0으로 리셋한다
+        (스트림 단절을 사이에 두고 비연속 reset이 연속으로 오인되지 않게). locked는 유지."""
         if self._state is TriggerState.DEBOUNCING:
             self._state = TriggerState.ARMED
             self._debounce_count = 0
             self._first_true_at = None
+        elif self._state is TriggerState.COOLDOWN:
+            self._reset_count = 0
         return TriggerEvaluation(TriggerStatus.SUPPRESSED, self._state, reason)
 
 
