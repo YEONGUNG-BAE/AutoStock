@@ -84,6 +84,29 @@ def test_retention_rejects_non_decimal_age() -> None:
         RollingRetentionPolicy(hard_max_events=10, hard_max_age_seconds=10)  # type: ignore[arg-type]
 
 
+def test_retention_rejects_sub_microsecond_age() -> None:
+    # microsecond보다 미세한 해상도는 float 변환 손실을 유발하므로 거부한다.
+    with pytest.raises(ValueError):
+        RollingRetentionPolicy(hard_max_events=10, hard_max_age_seconds=Decimal("0.0000001"))
+
+
+def test_retention_accepts_microsecond_precision_age() -> None:
+    policy = RollingRetentionPolicy(hard_max_events=10, hard_max_age_seconds=Decimal("1.5"))
+    assert policy.hard_max_age == timedelta(seconds=1, microseconds=500_000)
+
+
+def test_snapshot_exposes_retention_policy() -> None:
+    store = _store(max_events=7, max_age_seconds="42")
+    store.observe(_trade(sequence=1), now=NOW)
+    snap = store.peek_history(Market.KR, "005930", now=NOW)
+    assert snap.retention.hard_max_events == 7
+    assert snap.retention.hard_max_age_seconds == Decimal("42")
+    # MISSING 경로에서도 retention이 노출되어 4b.1b가 lookback>cap을 판정할 수 있다.
+    missing = _store(max_events=3, max_age_seconds="9").peek_history(Market.KR, "999999", now=NOW)
+    assert missing.retention.hard_max_events == 3
+    assert missing.retention.hard_max_age_seconds == Decimal("9")
+
+
 # --- peek before observe ---
 
 
@@ -302,3 +325,43 @@ def test_concurrent_observe_is_consistent() -> None:
     assert seqs_kept == sorted(seqs_kept)
     assert len(set(seqs_kept)) == len(seqs_kept)  # 중복 없음
     assert snap.latest_sequence == seqs_kept[-1]
+    # 최댓값 sequence(=n)는 도달 시점에 항상 stored보다 크므로 반드시 수용되어 최종이 된다.
+    assert snap.latest_sequence == n
+    assert snap.latest_event_time == snap.samples[-1].trade_at
+
+
+def test_concurrent_observe_and_peek_never_sees_partial_state() -> None:
+    store = _store(max_events=10_000)
+    n = 200
+    barrier = threading.Barrier(9)  # 8 writers + 1 reader
+    seqs = list(range(1, n + 1))
+    chunks = [seqs[i::8] for i in range(8)]
+    bad: list[str] = []
+
+    def writer(my: list[int]) -> None:
+        barrier.wait()
+        for s in my:
+            store.observe(
+                _trade(sequence=s, trade_at=NOW + s * SEC, received_at=NOW + s * SEC),
+                now=NOW + (n + 1) * SEC,
+            )
+
+    def reader() -> None:
+        barrier.wait()
+        for _ in range(400):
+            snap = store.peek_history(Market.KR, "005930", now=NOW + (n + 1) * SEC)
+            kept = [s.sequence for s in snap.samples]
+            if kept != sorted(kept) or len(set(kept)) != len(kept):
+                bad.append("corrupt ordering/dup")
+            if snap.samples and snap.latest_sequence != snap.samples[-1].sequence:
+                bad.append("latest_sequence mismatch")
+            if snap.samples and snap.latest_event_time != snap.samples[-1].trade_at:
+                bad.append("latest_event_time mismatch")
+
+    threads = [threading.Thread(target=writer, args=(c,)) for c in chunks]
+    threads.append(threading.Thread(target=reader))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert bad == []

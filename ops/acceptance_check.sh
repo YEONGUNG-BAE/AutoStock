@@ -35,10 +35,10 @@ check_pytest() {
         fail "pytest: command failed (exit $exit_code)"
         return
     fi
-        if echo "$output" | grep -q "2795 passed"; then
-        pass "pytest: 2795 passed"
+        if echo "$output" | grep -q "2799 passed"; then
+        pass "pytest: 2799 passed"
     else
-        warn "pytest: exit 0 but baseline '2795 passed' not found"
+        warn "pytest: exit 0 but baseline '2799 passed' not found"
     fi
 }
 

@@ -86,10 +86,20 @@ class RollingRetentionPolicy:
             raise TypeError("hard_max_age_seconds must be a Decimal.")
         if not self.hard_max_age_seconds.is_finite() or self.hard_max_age_seconds <= 0:
             raise ValueError("hard_max_age_seconds must be a finite Decimal > 0.")
+        # Decimal→float 변환은 정밀도를 잃고 큰 값에서 overflow하므로, microsecond 정수로
+        # 정확히 표현 가능한 범위만 허용하고 그 결과를 결정론적으로 timedelta로 만든다.
+        micros = self.hard_max_age_seconds * Decimal(1_000_000)
+        if micros != micros.to_integral_value():
+            raise ValueError("hard_max_age_seconds must be representable in whole microseconds.")
+        try:
+            timedelta(microseconds=int(micros))
+        except (OverflowError, ValueError) as exc:
+            raise ValueError("hard_max_age_seconds is out of timedelta range.") from exc
 
     @property
     def hard_max_age(self) -> timedelta:
-        return timedelta(seconds=float(self.hard_max_age_seconds))
+        micros = int((self.hard_max_age_seconds * Decimal(1_000_000)).to_integral_value())
+        return timedelta(microseconds=micros)
 
 
 @dataclass(frozen=True)
@@ -114,6 +124,7 @@ class TradeHistorySnapshot:
     market: Market
     symbol: str
     samples: tuple[TradeSample, ...]
+    retention: RollingRetentionPolicy
     provider: str | None
     channel: str | None
     was_ever_observed: bool
@@ -158,6 +169,10 @@ class RollingTradeHistoryStore:
         self._states: dict[tuple[Market, str], _SymbolState] = {}
 
     def observe(self, tick: NormalizedTradeTick, *, now: datetime) -> RollingObserveResult:
+        # 정상 monitor 경로에서는 LatestMarketStateStore.apply()가 미래 이벤트를
+        # FutureMarketEventError로 먼저 차단하므로 future tick은 여기 도달하지 않는다.
+        # direct API 오용에 대한 방어로, RTM-2와 달리 예외 대신 OUT_OF_ORDER typed result로
+        # fail-closed 거부한다(observe는 예외 없는 typed 계약을 유지).
         aware_now = require_timezone_aware_datetime(now, field_name="now")
         if tick.trade_at > aware_now or tick.received_at > aware_now:
             return RollingObserveResult(RollingObserveStatus.OUT_OF_ORDER, "future event")
@@ -234,6 +249,7 @@ class RollingTradeHistoryStore:
                     market=market,
                     symbol=symbol,
                     samples=(),
+                    retention=self._retention,
                     provider=None,
                     channel=None,
                     was_ever_observed=False,
@@ -253,6 +269,7 @@ class RollingTradeHistoryStore:
                 market=market,
                 symbol=symbol,
                 samples=samples,
+                retention=self._retention,
                 provider=state.provider,
                 channel=state.channel,
                 was_ever_observed=state.was_ever_observed,
