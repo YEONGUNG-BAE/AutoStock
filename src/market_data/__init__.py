@@ -41,6 +41,15 @@ from market_data.conditions import (
 from market_data.decision_loader import DecisionLoadError, load_decision_bundle
 from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
+from market_data.rolling_window import (
+    EpochStartReason,
+    RollingObserveResult,
+    RollingObserveStatus,
+    RollingRetentionPolicy,
+    RollingTradeHistoryStore,
+    TradeHistorySnapshot,
+    TradeSample,
+)
 from market_data.trigger_engine import (
     ConditionObservation,
     DecisionTriggerBundle,
@@ -64,6 +73,7 @@ __all__ = [
     "ConditionObservation",
     "DecisionLoadError",
     "DecisionTriggerBundle",
+    "EpochStartReason",
     "FutureMarketEventError",
     "LatestMarketStateSnapshot",
     "LatestMarketStateStore",
@@ -89,7 +99,13 @@ __all__ = [
     "ReplaceResult",
     "ReplaceStatus",
     "ReplayMarketEventSource",
+    "RollingObserveResult",
+    "RollingObserveStatus",
+    "RollingRetentionPolicy",
+    "RollingTradeHistoryStore",
     "StaleMarketStateError",
+    "TradeHistorySnapshot",
+    "TradeSample",
     "TradingPermission",
     "TriggerEngine",
     "TriggerEvaluation",

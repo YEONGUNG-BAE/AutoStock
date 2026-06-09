@@ -280,6 +280,7 @@ _ALLOWED_IMPORTS_BY_FILE = {
     "monitor.py": {"asyncio"},
     "latest_state.py": {"threading"},
     "trigger_engine.py": {"threading"},
+    "rolling_window.py": {"threading"},
 }
 
 
