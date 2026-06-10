@@ -14,6 +14,7 @@ from market_data.latest_state import LatestMarketStateStore, MissingMarketStateE
 from market_data.models import (
     MarketEvent,
     MarketHeartbeat,
+    NormalizedBestBidAsk,
     NormalizedTradeTick,
     ProviderSequence,
 )
@@ -43,6 +44,24 @@ def _trade(*, sequence: int, trade_at: datetime = _BASE, price: str = "70000") -
         received_at=trade_at,
         provider_sequence=ProviderSequence(
             provider="kis", channel="H0STCNT0|005930", sequence=sequence, received_at=trade_at
+        ),
+    )
+
+
+def _quote(*, sequence: int, quote_at: datetime = _BASE) -> NormalizedBestBidAsk:
+    return NormalizedBestBidAsk(
+        provider="kis",
+        symbol="005930",
+        market=Market.KR,
+        currency=Currency.KRW,
+        bid_price=Decimal("69900"),
+        ask_price=Decimal("70100"),
+        bid_quantity=Decimal("10"),
+        ask_quantity=Decimal("10"),
+        quote_at=quote_at,
+        received_at=quote_at,
+        provider_sequence=ProviderSequence(
+            provider="kis", channel="H0STASP0|005930", sequence=sequence, received_at=quote_at
         ),
     )
 
@@ -371,6 +390,89 @@ def test_duplicate_only_connection_is_not_healthy() -> None:
     assert summary.duplicate == 1
     assert summary.consecutive_failures == 1
     assert summary.final_state is MonitorState.EXHAUSTED
+
+
+def test_heartbeat_only_connection_is_not_healthy() -> None:
+    """heartbeat만 APPLIED되고 시장 데이터(trade/quote)가 없던 접속은 healthy가 아니다.
+    heartbeat-only drop이 반복되면 consecutive_failures가 누적돼 max_attempts에서
+    EXHAUSTED한다(heartbeat APPLIED를 healthy로 오판하던 결함 차단)."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _HeartbeatThenDrop(_heartbeat(received_at=_BASE)),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, multiplier=2.0, max_attempts=3),
+        sleep=sleep,
+        session_id="f3-hb-1",
+    )
+    with pytest.raises(MonitorExhaustedError) as excinfo:
+        _run(monitor)
+    summary = excinfo.value.summary
+    assert summary.final_state is MonitorState.EXHAUSTED
+    assert summary.consecutive_failures == 3
+    assert summary.connection_attempts == 3
+    assert sleep.calls == [1.0, 2.0]  # 실패 1·2 후만 backoff
+
+
+def test_heartbeat_then_trade_connection_is_healthy() -> None:
+    """heartbeat에 이어 trade가 APPLIED된 접속은 healthy다 → consecutive_failures 0."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+    max_attempts = 3
+
+    def factory() -> MarketEventSource:
+        calls["n"] += 1
+        if calls["n"] > max_attempts + 2:
+            return ReplayMarketEventSource([])
+        return _FaultySource(
+            [_heartbeat(received_at=_BASE), _trade(sequence=1)], yields_before=2
+        )
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=factory,
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, multiplier=2.0, max_attempts=max_attempts),
+        sleep=sleep,
+        session_id="f3-hb-2",
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED  # NOT exhausted
+    assert summary.consecutive_failures == 0
+    assert sleep.calls == [1.0] * (max_attempts + 2)  # healthy drop마다 initial로 재시작
+
+
+def test_heartbeat_then_quote_connection_is_healthy() -> None:
+    """정책: trade 또는 quote 중 하나라도 APPLIED면 healthy. 거래가 뜸한 종목에서
+    quote만 받는 정상 접속을 실패로 오판하지 않는다."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+    max_attempts = 3
+
+    def factory() -> MarketEventSource:
+        calls["n"] += 1
+        if calls["n"] > max_attempts + 2:
+            return ReplayMarketEventSource([])
+        return _FaultySource(
+            [_heartbeat(received_at=_BASE), _quote(sequence=1)], yields_before=2
+        )
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=factory,
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, multiplier=2.0, max_attempts=max_attempts),
+        sleep=sleep,
+        session_id="f3-hb-3",
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED  # NOT exhausted
+    assert summary.consecutive_failures == 0
+    assert sleep.calls == [1.0] * (max_attempts + 2)
 
 
 def test_clean_eof_reports_zero_consecutive_failures() -> None:
