@@ -37,14 +37,18 @@ from market_data.conditions import (
     evaluate_clause,
     metric_value,
     rule_required_slots,
+    rule_required_windows,
 )
 from market_data.decision_loader import DecisionLoadError, load_decision_bundle
 from market_data.indicators import (
+    IndicatorContext,
     IndicatorKind,
     IndicatorNotReadyError,
     IndicatorReadiness,
     IndicatorWindowSnapshot,
     IndicatorWindowSpec,
+    build_indicator_context,
+    canonical_window_payload,
     compute_indicator,
     evaluate_window,
     return_bps,
@@ -88,6 +92,7 @@ __all__ = [
     "DecisionTriggerBundle",
     "EpochStartReason",
     "FutureMarketEventError",
+    "IndicatorContext",
     "IndicatorKind",
     "IndicatorNotReadyError",
     "IndicatorReadiness",
@@ -132,6 +137,8 @@ __all__ = [
     "TriggerSignal",
     "TriggerState",
     "TriggerStatus",
+    "build_indicator_context",
+    "canonical_window_payload",
     "compute_indicator",
     "evaluate_all",
     "evaluate_clause",
@@ -141,6 +148,7 @@ __all__ = [
     "return_bps",
     "rolling_volume",
     "rule_required_slots",
+    "rule_required_windows",
     "sma_price",
     "vwap",
 ]

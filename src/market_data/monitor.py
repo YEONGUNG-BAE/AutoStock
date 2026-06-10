@@ -20,6 +20,7 @@ from market_data.models import (
     NormalizedTradeTick,
 )
 from market_data.protocols import MarketEventSource
+from market_data.rolling_window import RollingObserveStatus, RollingTradeHistoryStore
 
 __all__ = [
     "MonitorState",
@@ -197,6 +198,7 @@ class MarketMonitor:
         store: LatestMarketStateStore,
         source_factory: Callable[[], MarketEventSource],
         clock: Callable[[], datetime],
+        rolling_store: RollingTradeHistoryStore | None = None,
         policy: ReconnectPolicy | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         session_id: str,
@@ -218,6 +220,7 @@ class MarketMonitor:
             raise ValueError("heartbeat_timeout_seconds must be > 0 when set.")
 
         self._store = store
+        self._rolling_store = rolling_store
         self._source_factory = source_factory
         self._clock = clock
         self._policy = policy or ReconnectPolicy()
@@ -345,11 +348,18 @@ class MarketMonitor:
         meta = _evidence_meta(event)
         stream = _stream_key(event)
         # 확인된 재접속 후 이 stream의 첫 이벤트에서만 reset한다(apply 직전).
+        # latest를 먼저 reset하고 그 다음 rolling을 reset한다 — rolling reset이 실패해도
+        # latest는 이미 비워져 downstream trigger가 MISSING으로 fail-closed하기 쉽다.
         if stream in self._pending_reset:
             try:
                 self._store.reset_stream(*stream)
             except Exception as exc:
                 raise MonitorInternalError("store.reset_stream failed") from exc
+            if self._rolling_store is not None:
+                try:
+                    self._rolling_store.reset_stream(*stream)
+                except Exception as exc:
+                    raise MonitorInternalError("rolling_store.reset_stream failed") from exc
             self._emit(
                 "reset",
                 attempt,
@@ -360,8 +370,11 @@ class MarketMonitor:
             self._pending_reset.discard(stream)
         self._seen_streams.add(stream)
         self._events_consumed += 1
+        # latest apply와 rolling observe는 동일한 now를 공유한다(중간에 clock을 다시
+        # 읽지 않는다) — 두 store의 시점 판정이 어긋나지 않게 하기 위함이다.
+        now = self._clock()
         try:
-            result = self._store.apply(event, now=self._clock())
+            result = self._store.apply(event, now=now)
         except FutureMarketEventError:
             self._counts.future_event_error += 1
             self._emit(
@@ -382,6 +395,24 @@ class MarketMonitor:
             MarketEventType.BEST_BID_ASK,
         ):
             self._market_applied_this_attempt += 1
+        # APPLIED trade만 rolling history에 mirror한다(quote/heartbeat는 제외). latest가
+        # APPLIED로 판정한 trade를 rolling이 비-APPLIED로 거부하면 두 store 계약이 어긋난
+        # 내부 invariant 위반이므로 MonitorInternalError로 fail-closed한다(조용히 진행 금지).
+        if (
+            self._rolling_store is not None
+            and result.status is ApplyStatus.APPLIED
+            and result.event_type is MarketEventType.TRADE
+        ):
+            assert isinstance(event, NormalizedTradeTick)
+            try:
+                roll = self._rolling_store.observe(event, now=now)
+            except Exception as exc:
+                raise MonitorInternalError("rolling_store.observe failed") from exc
+            if roll.status is not RollingObserveStatus.APPLIED:
+                raise MonitorInternalError(
+                    f"rolling observe was not APPLIED for a latest-APPLIED trade "
+                    f"(status={roll.status.value})."
+                )
         status = result.status.value
         setattr(self._counts, status, getattr(self._counts, status) + 1)
         self._emit(

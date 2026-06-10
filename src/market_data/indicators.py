@@ -35,11 +35,14 @@ from domain.enums import Market
 from market_data.rolling_window import EpochStartReason, TradeHistorySnapshot, TradeSample
 
 __all__ = [
+    "IndicatorContext",
     "IndicatorKind",
     "IndicatorNotReadyError",
     "IndicatorReadiness",
     "IndicatorWindowSnapshot",
     "IndicatorWindowSpec",
+    "build_indicator_context",
+    "canonical_window_payload",
     "compute_indicator",
     "evaluate_window",
     "return_bps",
@@ -168,15 +171,24 @@ class IndicatorWindowSpec(BaseModel):
     @property
     def window_id(self) -> str:
         """spec의 canonical JSON SHA-256(hex). 같은 의미의 정책은 같은 id를 만든다."""
-        payload = {
-            "lookback_events": self.lookback_events,
-            "lookback_seconds": _canonical_decimal(self.lookback_seconds),
-            "min_events": self.min_events,
-            "freshness_max_age_seconds": _canonical_decimal(self.freshness_max_age_seconds),
-            "max_gap_seconds": _canonical_decimal(self.max_gap_seconds),
-        }
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(
+            canonical_window_payload(self), sort_keys=True, separators=(",", ":")
+        )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def canonical_window_payload(spec: IndicatorWindowSpec) -> dict[str, object | None]:
+    """window_id 해시·rule-set canonicalization이 공유하는 정규화 payload.
+
+    Decimal은 `_canonical_decimal`(normalize)로 직렬화하므로 60 ≡ 60.0이 동일 payload가
+    된다. Python repr/str(spec) 같은 비결정 표현을 쓰지 않는다(rule_set_id 안정성)."""
+    return {
+        "lookback_events": spec.lookback_events,
+        "lookback_seconds": _canonical_decimal(spec.lookback_seconds),
+        "min_events": spec.min_events,
+        "freshness_max_age_seconds": _canonical_decimal(spec.freshness_max_age_seconds),
+        "max_gap_seconds": _canonical_decimal(spec.max_gap_seconds),
+    }
 
 
 @dataclass(frozen=True)
@@ -442,3 +454,60 @@ _CALCULATORS = {
 def compute_indicator(kind: IndicatorKind, window: IndicatorWindowSnapshot) -> Decimal:
     """READY window에서 지표를 계산한다. 비-READY면 IndicatorNotReadyError."""
     return _CALCULATORS[kind](window)
+
+
+@dataclass(frozen=True)
+class IndicatorContext:
+    """TriggerEngine에 주입하는 불변 rolling-indicator 입력.
+
+    엔진이 store/monitor/network를 직접 읽지 않도록, evaluate된 window snapshot들만
+    frozen tuple로 보관한다. 모든 snapshot은 동일한 (market, symbol)에 속해야 하며
+    window_id는 유일해야 한다. 순서는 window_id 기준으로 결정론적으로 정규화된다.
+    """
+
+    market: Market
+    symbol: str
+    windows: tuple[IndicatorWindowSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for w in self.windows:
+            if w.window_id in seen:
+                raise ValueError(f"duplicate window_id in IndicatorContext: {w.window_id}.")
+            seen.add(w.window_id)
+            if w.market != self.market or w.symbol != self.symbol:
+                raise ValueError(
+                    "IndicatorContext window market/symbol must match the context."
+                )
+        ordered = tuple(sorted(self.windows, key=lambda w: w.window_id))
+        object.__setattr__(self, "windows", ordered)
+
+    def get(self, window_id: str) -> IndicatorWindowSnapshot | None:
+        """window_id로 snapshot을 조회한다. 없으면 None(엔진이 fail-closed 처리)."""
+        for w in self.windows:
+            if w.window_id == window_id:
+                return w
+        return None
+
+
+def build_indicator_context(
+    history: TradeHistorySnapshot,
+    specs: tuple[IndicatorWindowSpec, ...],
+    *,
+    now: datetime,
+) -> IndicatorContext:
+    """history와 spec들로 IndicatorContext를 만든다(store/network 재조회 없음).
+
+    동일 window_id를 가진 spec은 한 번만 evaluate한다. snapshot의 market/symbol은
+    history에서 오므로 context identity와 항상 일치한다."""
+    by_id: dict[str, IndicatorWindowSnapshot] = {}
+    for spec in specs:
+        wid = spec.window_id
+        if wid in by_id:
+            continue
+        by_id[wid] = evaluate_window(history, spec, now=now)
+    return IndicatorContext(
+        market=history.market,
+        symbol=history.symbol,
+        windows=tuple(by_id.values()),
+    )

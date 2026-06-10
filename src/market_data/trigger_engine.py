@@ -42,8 +42,16 @@ from market_data.conditions import (
     evaluate_all,
     metric_value,
     rule_required_slots,
+    rule_required_windows,
+)
+from market_data.indicators import (
+    IndicatorContext,
+    IndicatorReadiness,
+    IndicatorWindowSnapshot,
+    canonical_window_payload,
 )
 from market_data.latest_state import LatestMarketStateSnapshot
+from market_data.models import NormalizedTradeTick
 
 __all__ = [
     "TriggerPlan",
@@ -164,6 +172,9 @@ class ConditionObservation(BaseModel):
 
     metric: Metric
     value: Decimal
+    # rolling metric은 어느 window의 값인지 evidence만으로 구분 가능해야 한다.
+    # latest metric은 None(후방호환).
+    window_id: str | None = None
 
 
 class TriggerSignal(BaseModel):
@@ -261,6 +272,15 @@ class TriggerReason(StrEnum):
     DEBOUNCE_PENDING = "debounce_pending"
     COOLDOWN_ACTIVE = "cooldown_active"
     MAX_FIRES_REACHED = "max_fires_reached"
+    # RTM-4b.2 rolling-indicator gating (fail-closed).
+    MISSING_INDICATOR = "missing_indicator"
+    INDICATOR_WARMING = "indicator_warming"
+    INDICATOR_DISCONTINUOUS = "indicator_discontinuous"
+    INDICATOR_STALE = "indicator_stale"
+    INDICATOR_FUTURE = "indicator_future"
+    INDICATOR_INSUFFICIENT_RETENTION = "indicator_insufficient_retention"
+    INDICATOR_IDENTITY_MISMATCH = "indicator_identity_mismatch"
+    INDICATOR_LAGGING = "indicator_lagging"
 
 
 @dataclass(frozen=True)
@@ -284,11 +304,14 @@ class ReplaceResult:
     state: TriggerState
 
 
-def _canonical_rule(clause: ConditionClause) -> dict[str, str]:
+def _canonical_rule(clause: ConditionClause) -> dict[str, object | None]:
     return {
         "metric": clause.metric.value,
         "comparator": clause.comparator.value,
         "threshold": str(clause.threshold),
+        # rolling window는 정규화 payload(60≡60.0)를 포함해 rule_set_id에 반영한다.
+        # SMA 20틱 vs 60틱 vs 60초가 서로 다른 rule_set_id/idempotency를 갖게 한다.
+        "window": canonical_window_payload(clause.window) if clause.window is not None else None,
     }
 
 
@@ -413,19 +436,23 @@ class TriggerEngine:
         permission: TradingPermission | None,
         *,
         now: datetime,
+        indicators: IndicatorContext | None = None,
     ) -> TriggerEvaluation:
         """현재 상태/스냅샷/권한으로 단 한 번의 결정론적 평가를 수행한다.
 
+        price-only plan은 indicators 없이 RTM-4a와 동일하게 동작한다. rolling rule이 있는
+        plan은 IndicatorContext가 필수이며, 엔진은 store를 직접 읽지 않는다(주입 입력만 사용).
         정상적인 suppression은 예외가 아니라 typed result로 반환한다(fail-closed)."""
         require_timezone_aware_datetime(now, field_name="now")
         with self._lock:
-            return self._evaluate_locked(snapshot, permission, now)
+            return self._evaluate_locked(snapshot, permission, now, indicators)
 
     def _evaluate_locked(
         self,
         snapshot: LatestMarketStateSnapshot,
         permission: TradingPermission | None,
         now: datetime,
+        indicators: IndicatorContext | None,
     ) -> TriggerEvaluation:
         bundle = self._active
         if bundle is None:
@@ -484,7 +511,12 @@ class TriggerEngine:
             if not snapshot.trade_fresh:
                 return self._suppress_break(TriggerReason.STALE_TRADE)
 
-        condition_true = evaluate_all(plan.rules, snapshot)
+        # --- rolling indicator readiness + latest/indicator coherence (F4/F5) ---
+        indicator_gate = self._indicator_gate(plan, plan.rules, snapshot, indicators)
+        if indicator_gate is not None:
+            return self._suppress_break(indicator_gate)
+
+        condition_true = evaluate_all(plan.rules, snapshot, indicators=indicators)
 
         # --- cooldown: re-arm only after cooldown elapsed AND reset satisfied ---
         if self._state is TriggerState.COOLDOWN:
@@ -498,8 +530,16 @@ class TriggerEngine:
             gate = self._reset_slot_gate(plan, snapshot)
             if gate is not None:
                 return self._suppress_break(gate)
+            # reset_rules의 rolling indicator도 readiness/coherence를 gate한다(F2 확장).
+            # missing/warming/discontinuous/stale/future/insufficient/identity/lag면
+            # _suppress_break로 빠지며 _reset_count가 0으로 리셋된다(stale 입력 re-arm 방지).
+            reset_indicator_gate = self._indicator_gate(
+                plan, plan.reset_rules, snapshot, indicators
+            )
+            if reset_indicator_gate is not None:
+                return self._suppress_break(reset_indicator_gate)
             reset_true = (
-                evaluate_all(plan.reset_rules, snapshot)
+                evaluate_all(plan.reset_rules, snapshot, indicators=indicators)
                 if plan.reset_rules
                 else not condition_true
             )
@@ -554,7 +594,7 @@ class TriggerEngine:
                 TriggerStatus.DEBOUNCING, TriggerState.DEBOUNCING, TriggerReason.DEBOUNCE_PENDING
             )
 
-        return self._fire(plan, snapshot, now)
+        return self._fire(plan, snapshot, now, indicators)
 
     def _reset_slot_gate(
         self, plan: TriggerPlan, snapshot: LatestMarketStateSnapshot
@@ -583,8 +623,49 @@ class TriggerEngine:
                 return TriggerReason.STALE_TRADE
         return None
 
+    def _indicator_gate(
+        self,
+        plan: TriggerPlan,
+        rules: tuple[ConditionClause, ...],
+        snapshot: LatestMarketStateSnapshot,
+        indicators: IndicatorContext | None,
+    ) -> TriggerReason | None:
+        """rules가 요구하는 rolling window의 존재·readiness·최신 trade와의 coherence를
+        검사한다. 통과하면 None, 아니면 fail-closed suppress 사유를 반환한다.
+
+        price-only rules면 요구 window가 없어 None. rolling rule이 있으면 IndicatorContext가
+        필수이며, context identity·각 window readiness·latest trade와의 정확한 coherence를
+        모두 만족해야 한다. 엔진은 store를 읽지 않고 주입된 context만 본다."""
+        required = rule_required_windows(rules)
+        if not required:
+            return None
+        if indicators is None:
+            return TriggerReason.MISSING_INDICATOR
+        if indicators.market != plan.market or indicators.symbol != plan.symbol:
+            return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+        # rolling metric은 rule_required_slots에서 needs_trade를 강제하므로 정상 경로에서는
+        # 최신 trade가 이미 검증됐다. 방어적으로 한 번 더 확인한다.
+        trade = snapshot.trade
+        if trade is None:
+            return TriggerReason.MISSING_TRADE
+        for spec in required:
+            window = indicators.get(spec.window_id)
+            if window is None:
+                return TriggerReason.MISSING_INDICATOR
+            readiness_reason = _READINESS_REASON.get(window.readiness)
+            if readiness_reason is not None:
+                return readiness_reason
+            coherence_reason = _coherence_reason(window, trade)
+            if coherence_reason is not None:
+                return coherence_reason
+        return None
+
     def _fire(
-        self, plan: TriggerPlan, snapshot: LatestMarketStateSnapshot, now: datetime
+        self,
+        plan: TriggerPlan,
+        snapshot: LatestMarketStateSnapshot,
+        now: datetime,
+        indicators: IndicatorContext | None,
     ) -> TriggerEvaluation:
         assert snapshot.quote is not None
         reference_price = (
@@ -593,7 +674,11 @@ class TriggerEngine:
             else snapshot.quote.bid_price
         )
         observations = tuple(
-            ConditionObservation(metric=c.metric, value=_observed(c.metric, snapshot))
+            ConditionObservation(
+                metric=c.metric,
+                value=_observed(c.metric, snapshot, indicators, c.window),
+                window_id=c.window.window_id if c.window is not None else None,
+            )
             for c in plan.rules
         )
         key = _idempotency_key(
@@ -645,9 +730,60 @@ class TriggerEngine:
         return TriggerEvaluation(TriggerStatus.SUPPRESSED, self._state, reason)
 
 
-def _observed(metric: Metric, snapshot: LatestMarketStateSnapshot) -> Decimal:
-    value = metric_value(metric, snapshot)
-    assert value is not None  # engine guarantees freshness/presence before firing
+_READINESS_REASON: dict[IndicatorReadiness, TriggerReason] = {
+    IndicatorReadiness.MISSING: TriggerReason.MISSING_INDICATOR,
+    IndicatorReadiness.WARMING: TriggerReason.INDICATOR_WARMING,
+    IndicatorReadiness.DISCONTINUOUS: TriggerReason.INDICATOR_DISCONTINUOUS,
+    IndicatorReadiness.STALE: TriggerReason.INDICATOR_STALE,
+    IndicatorReadiness.FUTURE: TriggerReason.INDICATOR_FUTURE,
+    IndicatorReadiness.INSUFFICIENT_RETENTION: TriggerReason.INDICATOR_INSUFFICIENT_RETENTION,
+    # READY는 매핑하지 않는다(coherence 단계로 진행).
+}
+
+
+def _coherence_reason(
+    window: IndicatorWindowSnapshot, trade: NormalizedTradeTick
+) -> TriggerReason | None:
+    """READY indicator window와 최신 trade tick의 정확한 coherence를 판정한다.
+
+    None이면 정확히 일치(같은 stream·같은 최신 체결). 불일치면 fail-closed 사유를 반환한다.
+      - market/symbol/provider/channel 불일치 → INDICATOR_IDENTITY_MISMATCH
+      - indicator가 명백히 뒤처짐(sequence< 또는 event_time<) → INDICATOR_LAGGING
+      - 정확 일치(sequence/event_time/received_at 모두 ==) → None
+      - 그 외(indicator가 앞서거나, 부분적으로 모순) → INDICATOR_IDENTITY_MISMATCH
+    """
+    seq = trade.provider_sequence
+    if window.market != trade.market or window.symbol != trade.symbol:
+        return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+    if window.provider != seq.provider or window.channel != seq.channel:
+        return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+    # 이 시점 이후 비교를 위해 indicator의 최신 메타데이터가 존재해야 한다(READY 보장).
+    if (
+        window.latest_sequence is None
+        or window.latest_event_time is None
+        or window.latest_received_at is None
+    ):
+        return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+    if window.latest_sequence < seq.sequence or window.latest_event_time < trade.trade_at:
+        return TriggerReason.INDICATOR_LAGGING
+    if (
+        window.latest_sequence == seq.sequence
+        and window.latest_event_time == trade.trade_at
+        and window.latest_received_at == trade.received_at
+    ):
+        return None
+    # indicator가 latest보다 앞서거나 sequence/time/received_at이 부분적으로 모순 → fail-closed.
+    return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+
+
+def _observed(
+    metric: Metric,
+    snapshot: LatestMarketStateSnapshot,
+    indicators: IndicatorContext | None,
+    window,
+) -> Decimal:
+    value = metric_value(metric, snapshot, indicators=indicators, window=window)
+    assert value is not None  # engine guarantees freshness/readiness/coherence before firing
     return value
 
 
