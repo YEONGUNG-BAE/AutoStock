@@ -165,12 +165,15 @@ def _trade(*, seq: int = SEQ, trade_at: datetime = EVENT_TIME, received_at: date
     )
 
 
-def _snap(*, trade: NormalizedTradeTick | None = None, trade_fresh: bool = True) -> LatestMarketStateSnapshot:
+def _snap(
+    *, trade: NormalizedTradeTick | None = None, trade_fresh: bool = True,
+    evaluated_at: datetime = NOW,
+) -> LatestMarketStateSnapshot:
     if trade is None:
         trade = _trade()
     return LatestMarketStateSnapshot(
         market=Market.KR, symbol=SYMBOL, trade=trade, quote=_quote(),
-        trade_fresh=trade_fresh, quote_fresh=True,
+        trade_fresh=trade_fresh, quote_fresh=True, evaluated_at=evaluated_at,
     )
 
 
@@ -207,10 +210,13 @@ def _window(
     )
 
 
-def _ctx(*windows: IndicatorWindowSnapshot, market: Market = Market.KR, symbol: str = SYMBOL) -> IndicatorContext:
+def _ctx(
+    *windows: IndicatorWindowSnapshot, market: Market = Market.KR, symbol: str = SYMBOL,
+    evaluated_at: datetime = NOW,
+) -> IndicatorContext:
     if not windows:
         windows = (_window(),)
-    return IndicatorContext(market=market, symbol=symbol, windows=windows)
+    return IndicatorContext(market=market, symbol=symbol, windows=windows, evaluated_at=evaluated_at)
 
 
 def _armed(*, plan: TriggerPlan | None = None, action: AnalysisAction = AnalysisAction.BUY) -> TriggerEngine:
@@ -379,7 +385,8 @@ def test_price_only_plan_ignores_indicators() -> None:
 def test_missing_trade_for_rolling_plan() -> None:
     engine = _armed()
     snap = LatestMarketStateSnapshot(
-        market=Market.KR, symbol=SYMBOL, trade=None, quote=_quote(), trade_fresh=True, quote_fresh=True
+        market=Market.KR, symbol=SYMBOL, trade=None, quote=_quote(), trade_fresh=True,
+        quote_fresh=True, evaluated_at=NOW,
     )
     result = engine.evaluate(snap, _permission(), now=NOW, indicators=_ctx())
     assert result.status is TriggerStatus.SUPPRESSED
@@ -482,3 +489,26 @@ def test_equivalent_decimal_window_yields_same_idempotency() -> None:
     b = IndicatorWindowSpec(lookback_seconds=Decimal("60.0"), min_events=2, freshness_max_age_seconds=Decimal("3600"))
     assert a.window_id == b.window_id
     assert _idempotency_key_for(a) == _idempotency_key_for(b)
+
+
+# --------------------------------------------------------------------------- #
+# RTM-4b.2 hardening: IndicatorContext as-of staleness (fail-closed)
+# --------------------------------------------------------------------------- #
+def test_reused_stale_indicator_context_is_suppressed() -> None:
+    # snapshot is fresh (evaluated_at == now) so the snapshot gate passes, but the
+    # injected IndicatorContext was built at an earlier tick. The context as-of gate
+    # must suppress with INDICATOR_CONTEXT_STALE rather than fire on stale windows.
+    engine = _armed()
+    snap = _snap(evaluated_at=NOW)
+    stale_ctx = _ctx(evaluated_at=BASE)  # built before NOW
+    result = engine.evaluate(snap, _permission(), now=NOW, indicators=stale_ctx)
+    assert result.status is TriggerStatus.SUPPRESSED
+    assert result.reason is TriggerReason.INDICATOR_CONTEXT_STALE
+    assert engine.state is TriggerState.ARMED
+
+
+def test_fresh_indicator_context_at_exact_now_fires() -> None:
+    # control: context evaluated_at == now → as-of gate passes and the rolling plan fires.
+    engine = _armed()
+    result = engine.evaluate(_snap(evaluated_at=NOW), _permission(), now=NOW, indicators=_ctx(evaluated_at=NOW))
+    assert result.status is TriggerStatus.TRIGGERED

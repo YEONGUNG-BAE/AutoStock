@@ -468,8 +468,10 @@ class IndicatorContext:
     market: Market
     symbol: str
     windows: tuple[IndicatorWindowSnapshot, ...]
+    evaluated_at: datetime
 
     def __post_init__(self) -> None:
+        require_timezone_aware_datetime(self.evaluated_at, field_name="evaluated_at")
         seen: set[str] = set()
         for w in self.windows:
             if w.window_id in seen:
@@ -510,4 +512,5 @@ def build_indicator_context(
         market=history.market,
         symbol=history.symbol,
         windows=tuple(by_id.values()),
+        evaluated_at=now,
     )

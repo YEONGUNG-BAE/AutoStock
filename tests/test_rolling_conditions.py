@@ -113,7 +113,8 @@ def _snap(
     *, trade: object = None, quote: object = None, market: Market = Market.KR, symbol: str = "005930"
 ) -> LatestMarketStateSnapshot:
     return LatestMarketStateSnapshot(
-        market=market, symbol=symbol, trade=trade, quote=quote, trade_fresh=True, quote_fresh=True
+        market=market, symbol=symbol, trade=trade, quote=quote, trade_fresh=True,
+        quote_fresh=True, evaluated_at=_BASE + timedelta(seconds=4),
     )
 
 
@@ -246,13 +247,13 @@ def test_rolling_metric_requires_trade_slot() -> None:
 def test_context_rejects_duplicate_window_id() -> None:
     win = evaluate_window(_history(_RISING), _spec(), now=_BASE + timedelta(seconds=4))
     with pytest.raises(ValueError, match="duplicate window_id"):
-        IndicatorContext(market=Market.KR, symbol="005930", windows=(win, win))
+        IndicatorContext(market=Market.KR, symbol="005930", windows=(win, win), evaluated_at=_BASE + timedelta(seconds=4))
 
 
 def test_context_rejects_identity_mismatch() -> None:
     win = evaluate_window(_history(_RISING), _spec(), now=_BASE + timedelta(seconds=4))
     with pytest.raises(ValueError, match="market/symbol"):
-        IndicatorContext(market=Market.US, symbol="005930", windows=(win,))
+        IndicatorContext(market=Market.US, symbol="005930", windows=(win,), evaluated_at=_BASE + timedelta(seconds=4))
 
 
 def test_context_orders_windows_by_id() -> None:
@@ -260,7 +261,7 @@ def test_context_orders_windows_by_id() -> None:
     spec_b = _spec(lookback_events=10, min_events=2)
     w_a = evaluate_window(_history(_RISING), spec_a, now=_BASE + timedelta(seconds=4))
     w_b = evaluate_window(_history(_RISING), spec_b, now=_BASE + timedelta(seconds=4))
-    ctx = IndicatorContext(market=Market.KR, symbol="005930", windows=(w_a, w_b))
+    ctx = IndicatorContext(market=Market.KR, symbol="005930", windows=(w_a, w_b), evaluated_at=_BASE + timedelta(seconds=4))
     ids = [w.window_id for w in ctx.windows]
     assert ids == sorted(ids)
 
@@ -383,5 +384,5 @@ def test_window_id_stable_across_equivalent_decimal() -> None:
     assert a.window_id == b.window_id
     win = evaluate_window(_history(_RISING), a, now=_BASE + timedelta(seconds=4))
     _ = replace  # imported for parity with other suites; not needed here
-    ctx = IndicatorContext(market=Market.KR, symbol="005930", windows=(win,))
+    ctx = IndicatorContext(market=Market.KR, symbol="005930", windows=(win,), evaluated_at=_BASE + timedelta(seconds=4))
     assert ctx.get(b.window_id) is not None

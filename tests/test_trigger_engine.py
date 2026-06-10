@@ -166,15 +166,16 @@ def _trade(*, price: str = "100") -> NormalizedTradeTick:
 def _snap(
     *, trade: NormalizedTradeTick | None = None, quote: NormalizedBestBidAsk | None = None,
     trade_fresh: bool = True, quote_fresh: bool = True,
+    evaluated_at: datetime = NOW,
 ) -> LatestMarketStateSnapshot:
     return LatestMarketStateSnapshot(
         market=Market.KR, symbol="005930", trade=trade, quote=quote,
-        trade_fresh=trade_fresh, quote_fresh=quote_fresh,
+        trade_fresh=trade_fresh, quote_fresh=quote_fresh, evaluated_at=evaluated_at,
     )
 
 
-def _fireable_snap(*, price: str = "100") -> LatestMarketStateSnapshot:
-    return _snap(trade=_trade(price=price), quote=_quote())
+def _fireable_snap(*, price: str = "100", at: datetime = NOW) -> LatestMarketStateSnapshot:
+    return _snap(trade=_trade(price=price), quote=_quote(), evaluated_at=at)
 
 
 def _armed_engine(**plan_over: object) -> TriggerEngine:
@@ -362,7 +363,7 @@ def test_debounce_seconds_boundary() -> None:
     engine = _armed_engine(debounce_events=1, debounce_seconds="2")
     early = engine.evaluate(_fireable_snap(), _permission(), now=NOW)
     assert early.status is TriggerStatus.DEBOUNCING  # events ok, seconds not
-    late = engine.evaluate(_fireable_snap(), _permission(), now=NOW + timedelta(seconds=2))
+    late = engine.evaluate(_fireable_snap(at=NOW + timedelta(seconds=2)), _permission(), now=NOW + timedelta(seconds=2))
     assert late.status is TriggerStatus.TRIGGERED
 
 
@@ -382,7 +383,7 @@ def test_same_activation_yields_identical_idempotency_key() -> None:
     a = _armed_engine()
     b = _armed_engine()
     ra = a.evaluate(_fireable_snap(), _permission(), now=NOW)
-    rb = b.evaluate(_fireable_snap(), _permission(), now=NOW + timedelta(seconds=5))
+    rb = b.evaluate(_fireable_snap(at=NOW + timedelta(seconds=5)), _permission(), now=NOW + timedelta(seconds=5))
     assert ra.signal is not None and rb.signal is not None
     # key excludes wall-clock/price → identical across engines for same activation
     assert ra.signal.idempotency_key == rb.signal.idempotency_key
@@ -397,14 +398,14 @@ def test_cooldown_blocks_until_elapsed_then_rearms() -> None:
     assert fire1.status is TriggerStatus.TRIGGERED
     assert fire1.state is TriggerState.COOLDOWN
     # within cooldown, even with reset condition true → still cooling
-    cooling = engine.evaluate(_fireable_snap(price="101"), _permission(), now=NOW + timedelta(seconds=5))
+    cooling = engine.evaluate(_fireable_snap(price="101", at=NOW + timedelta(seconds=5)), _permission(), now=NOW + timedelta(seconds=5))
     assert cooling.status is TriggerStatus.COOLDOWN
     assert cooling.reason is TriggerReason.COOLDOWN_ACTIVE
     # cooldown elapsed + reset satisfied (price 101 → condition false) → rearm this tick
-    rearm = engine.evaluate(_fireable_snap(price="101"), _permission(), now=NOW + timedelta(seconds=11))
+    rearm = engine.evaluate(_fireable_snap(price="101", at=NOW + timedelta(seconds=11)), _permission(), now=NOW + timedelta(seconds=11))
     assert rearm.status is TriggerStatus.CONDITION_NOT_MET
     assert rearm.state is TriggerState.ARMED
-    fire2 = engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW + timedelta(seconds=12))
+    fire2 = engine.evaluate(_fireable_snap(price="100", at=NOW + timedelta(seconds=12)), _permission(), now=NOW + timedelta(seconds=12))
     assert fire2.status is TriggerStatus.TRIGGERED
     assert fire2.state is TriggerState.LOCKED  # max_fires=2 reached
 
@@ -633,7 +634,8 @@ def _other_snap(*, market: Market, symbol: str, price: str = "100") -> LatestMar
         provider_sequence=ProviderSequence(provider="kis", channel="t", sequence=1, received_at=NOW),
     )
     return LatestMarketStateSnapshot(
-        market=market, symbol=symbol, trade=trade, quote=quote, trade_fresh=True, quote_fresh=True
+        market=market, symbol=symbol, trade=trade, quote=quote, trade_fresh=True,
+        quote_fresh=True, evaluated_at=NOW,
     )
 
 
@@ -793,3 +795,42 @@ def test_concurrent_evaluations_fire_exactly_once() -> None:
 
     assert results.count(TriggerStatus.TRIGGERED) == 1
     assert results.count(TriggerStatus.ALREADY_FIRED) == n - 1
+
+
+# --------------------------------------------------------------------------- #
+# RTM-4b.2 hardening: as-of staleness (fail-closed) + bool rejection
+# --------------------------------------------------------------------------- #
+def test_reused_stale_snapshot_is_suppressed_not_fired() -> None:
+    # snapshot peeked at NOW, but engine ticks at NOW+1h (still within permission/
+    # decision validity). trade_fresh/quote_fresh were computed at NOW and would be
+    # trusted blindly; the as-of gate must suppress instead of firing.
+    engine = _armed_engine()
+    stale = _fireable_snap(at=NOW)  # evaluated_at=NOW
+    result = engine.evaluate(stale, _permission(), now=NOW + timedelta(hours=1))
+    assert result.status is TriggerStatus.SUPPRESSED
+    assert result.reason is TriggerReason.STALE_SNAPSHOT
+    assert result.signal is None
+    assert engine.state is TriggerState.ARMED  # never advanced
+
+
+def test_fresh_snapshot_at_exact_now_still_fires() -> None:
+    # control: same tick, snapshot evaluated_at == now → as-of gate passes.
+    engine = _armed_engine()
+    at = NOW + timedelta(hours=1)
+    fresh = _fireable_snap(at=at)
+    result = engine.evaluate(fresh, _permission(), now=at)
+    assert result.status is TriggerStatus.TRIGGERED
+
+
+@pytest.mark.parametrize("metric", list(Metric))
+def test_bool_threshold_rejected_for_all_metrics(metric: Metric) -> None:
+    for value in (True, False):
+        with pytest.raises(ValidationError):
+            ConditionClause(metric=metric, comparator=Comparator.GTE, threshold=value)
+
+
+@pytest.mark.parametrize("field", ["debounce_seconds", "cooldown_seconds"])
+def test_bool_seconds_rejected(field: str) -> None:
+    for value in (True, False):
+        with pytest.raises(ValidationError):
+            _plan(**{field: value})

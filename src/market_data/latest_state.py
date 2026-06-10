@@ -85,6 +85,7 @@ class LatestMarketStateSnapshot:
     quote: NormalizedBestBidAsk | None
     trade_fresh: bool
     quote_fresh: bool
+    evaluated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,7 @@ class LatestMarketStateStore:
             quote=quote,
             trade_fresh=trade_fresh,
             quote_fresh=quote_fresh,
+            evaluated_at=aware_now,
         )
 
     def require_fresh(

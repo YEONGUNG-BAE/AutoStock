@@ -106,6 +106,8 @@ class ConditionClause(BaseModel):
     def _coerce_threshold(cls, value: object) -> Decimal:
         if isinstance(value, Decimal):
             return value
+        if isinstance(value, bool):
+            raise ValueError("threshold must not be a bool.")
         if isinstance(value, (str, int)):
             return Decimal(value)
         raise ValueError("threshold must be a Decimal, str, or int.")

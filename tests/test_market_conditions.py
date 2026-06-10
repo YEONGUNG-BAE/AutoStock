@@ -75,6 +75,7 @@ def _snap(
         quote=quote,
         trade_fresh=trade_fresh,
         quote_fresh=quote_fresh,
+        evaluated_at=NOW,
     )
 
 

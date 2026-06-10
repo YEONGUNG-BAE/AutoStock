@@ -109,6 +109,8 @@ class TriggerPlan(BaseModel):
     def _coerce_decimal(cls, value: object) -> Decimal:
         if isinstance(value, Decimal):
             return value
+        if isinstance(value, bool):
+            raise ValueError("seconds must not be a bool.")
         if isinstance(value, (str, int)):
             return Decimal(value)
         raise ValueError("seconds must be a Decimal, str, or int.")
@@ -272,6 +274,9 @@ class TriggerReason(StrEnum):
     DEBOUNCE_PENDING = "debounce_pending"
     COOLDOWN_ACTIVE = "cooldown_active"
     MAX_FIRES_REACHED = "max_fires_reached"
+    # RTM-4b.2 hardening: as-of staleness (cached snapshot/context reused after now advanced).
+    STALE_SNAPSHOT = "stale_snapshot"
+    INDICATOR_CONTEXT_STALE = "indicator_context_stale"
     # RTM-4b.2 rolling-indicator gating (fail-closed).
     MISSING_INDICATOR = "missing_indicator"
     INDICATOR_WARMING = "indicator_warming"
@@ -494,6 +499,14 @@ class TriggerEngine:
         if now > permission.valid_until:
             return self._suppress_break(TriggerReason.STALE_PERMISSION)
 
+        # --- as-of staleness (fail-closed): the snapshot must have been peeked at
+        # exactly this tick's `now`. trade_fresh/quote_fresh are computed once at peek
+        # time; reusing a stale snapshot after `now` advanced would fire on expired
+        # freshness booleans. Require an exact as-of match (monitor reads clock once
+        # per tick), so a reused snapshot is suppressed rather than trusted. ---
+        if snapshot.evaluated_at != now:
+            return self._suppress_break(TriggerReason.STALE_SNAPSHOT)
+
         # --- market-state freshness (BUY/SELL always need a fresh quote) ---
         needs_trade, _ = rule_required_slots(plan.rules)
         if snapshot.quote is None:
@@ -512,7 +525,7 @@ class TriggerEngine:
                 return self._suppress_break(TriggerReason.STALE_TRADE)
 
         # --- rolling indicator readiness + latest/indicator coherence (F4/F5) ---
-        indicator_gate = self._indicator_gate(plan, plan.rules, snapshot, indicators)
+        indicator_gate = self._indicator_gate(plan, plan.rules, snapshot, indicators, now)
         if indicator_gate is not None:
             return self._suppress_break(indicator_gate)
 
@@ -534,7 +547,7 @@ class TriggerEngine:
             # missing/warming/discontinuous/stale/future/insufficient/identity/lag면
             # _suppress_break로 빠지며 _reset_count가 0으로 리셋된다(stale 입력 re-arm 방지).
             reset_indicator_gate = self._indicator_gate(
-                plan, plan.reset_rules, snapshot, indicators
+                plan, plan.reset_rules, snapshot, indicators, now
             )
             if reset_indicator_gate is not None:
                 return self._suppress_break(reset_indicator_gate)
@@ -629,6 +642,7 @@ class TriggerEngine:
         rules: tuple[ConditionClause, ...],
         snapshot: LatestMarketStateSnapshot,
         indicators: IndicatorContext | None,
+        now: datetime,
     ) -> TriggerReason | None:
         """rules가 요구하는 rolling window의 존재·readiness·최신 trade와의 coherence를
         검사한다. 통과하면 None, 아니면 fail-closed suppress 사유를 반환한다.
@@ -643,6 +657,10 @@ class TriggerEngine:
             return TriggerReason.MISSING_INDICATOR
         if indicators.market != plan.market or indicators.symbol != plan.symbol:
             return TriggerReason.INDICATOR_IDENTITY_MISMATCH
+        # as-of staleness (fail-closed): the context must have been built at exactly
+        # this tick's `now`. A reused context would carry stale window readiness/values.
+        if indicators.evaluated_at != now:
+            return TriggerReason.INDICATOR_CONTEXT_STALE
         # rolling metric은 rule_required_slots에서 needs_trade를 강제하므로 정상 경로에서는
         # 최신 trade가 이미 검증됐다. 방어적으로 한 번 더 확인한다.
         trade = snapshot.trade
