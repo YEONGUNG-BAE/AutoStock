@@ -293,6 +293,121 @@ def test_monitor_exhausts_after_max_attempts() -> None:
     assert sleep.calls == [1.0]  # backoff only after the first failure, not after exhaustion
 
 
+# --- F3: connection_attempt(평생) vs consecutive_failures(재접속 정책) 분리 --------
+
+
+def test_healthy_drops_do_not_exhaust_beyond_max_attempts() -> None:
+    """접속마다 APPLIED 이벤트를 흘린 뒤 drop을 max_attempts보다 많이 반복해도
+    EXHAUSTED되지 않는다. healthy drop은 consecutive_failures를 0으로 리셋한다(F3)."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+    max_attempts = 3
+
+    def factory() -> MarketEventSource:
+        calls["n"] += 1
+        if calls["n"] > max_attempts + 2:
+            return ReplayMarketEventSource([])  # 결국 깔끔히 EOF로 종료
+        return _FaultySource(
+            [_trade(sequence=1), _trade(sequence=2), _trade(sequence=3)], yields_before=3
+        )
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=factory,
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, multiplier=2.0, max_attempts=max_attempts),
+        sleep=sleep,
+        session_id="f3-1",
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED  # NOT exhausted
+    assert summary.connection_attempts == max_attempts + 3  # 평생 카운터는 단조 증가
+    assert summary.consecutive_failures == 0  # healthy drop이 매번 0으로 리셋
+    # backoff는 healthy drop마다 initial(1.0)로 재시작한다 — 평생 누적으로 커지지 않는다.
+    assert sleep.calls == [1.0] * (max_attempts + 2)
+
+
+def test_zero_applied_failures_exhaust_exactly_at_max_attempts() -> None:
+    """APPLIED 없는 연속 실패만 누적되어 정확히 max_attempts에서 EXHAUSTED한다.
+    backoff는 consecutive_failures를 따라 커진다."""
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _FaultySource([_trade(sequence=1)], yields_before=0),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, multiplier=2.0, max_attempts=3),
+        sleep=sleep,
+        session_id="f3-2",
+    )
+    with pytest.raises(MonitorExhaustedError) as excinfo:
+        _run(monitor)
+    summary = excinfo.value.summary
+    assert summary.final_state is MonitorState.EXHAUSTED
+    assert summary.consecutive_failures == 3
+    assert summary.connection_attempts == 3
+    assert sleep.calls == [1.0, 2.0]  # 실패 1·2 후만 backoff, exhaustion 후엔 없음
+
+
+def test_duplicate_only_connection_is_not_healthy() -> None:
+    """APPLIED 없이 duplicate만 발생한 접속은 healthy가 아니다 → 실패로 누적된다."""
+    store = LatestMarketStateStore()
+    # 스트림을 미리 채워 다음 동일 sequence 이벤트가 APPLIED가 아닌 DUPLICATE가 되게 한다.
+    store.apply(_trade(sequence=5), now=_BASE + timedelta(seconds=1))
+    sleep = _RecordingSleep()
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _FaultySource([_trade(sequence=5)], yields_before=1),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=1.0, max_attempts=1),
+        sleep=sleep,
+        session_id="f3-3",
+    )
+    with pytest.raises(MonitorExhaustedError) as excinfo:
+        _run(monitor)
+    summary = excinfo.value.summary
+    assert summary.applied == 0
+    assert summary.duplicate == 1
+    assert summary.consecutive_failures == 1
+    assert summary.final_state is MonitorState.EXHAUSTED
+
+
+def test_clean_eof_reports_zero_consecutive_failures() -> None:
+    """정상 EOF 종료는 consecutive_failures=0으로 보고된다(정상 계약 보존)."""
+    store = LatestMarketStateStore()
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: ReplayMarketEventSource([_trade(sequence=1)]),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        session_id="f3-4",
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
+    assert summary.consecutive_failures == 0
+    assert summary.applied == 1
+
+
+def test_evidence_carries_connection_attempt_and_consecutive_failures() -> None:
+    """evidence가 connection_attempt(평생)와 consecutive_failures(재접속)를 구분해 담는다."""
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _FaultySource([_trade(sequence=1)], yields_before=0),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=2),
+        sleep=_RecordingSleep(),
+        session_id="f3-5",
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+    exhausted = [e for e in evidence if e.kind == "exhausted"]
+    assert exhausted and exhausted[-1].connection_attempt == 2
+    assert exhausted[-1].consecutive_failures == 2
+
+
 # --- cancellation -----------------------------------------------------------
 
 
@@ -325,17 +440,23 @@ def test_evidence_never_leaks_price_or_raw_values() -> None:
     sentinel = "999999999"
     events = [_trade(sequence=1, price=sentinel)]
     evidence: list[MonitorEvidence] = []
+    # 첫 접속은 sentinel가격 trade를 적용한 뒤 drop(apply+drop evidence를 모두 만든다),
+    # 둘째 접속은 즉시 EOF로 깔끔히 종료한다. F3 이후 healthy drop은 EXHAUSTED로 죽지
+    # 않으므로 종료는 EOF로 못박고, evidence isolation만 검증한다.
+    first = _FaultySource(events, yields_before=1)
+    second = ReplayMarketEventSource([])  # immediate EOF
+    sources: list[MarketEventSource] = [first, second]
     monitor = MarketMonitor(
         store=store,
-        source_factory=lambda: _FaultySource(events, yields_before=1),
+        source_factory=lambda: sources.pop(0),
         clock=_fixed_clock(_BASE + timedelta(seconds=5)),
-        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=5),
         sleep=_RecordingSleep(),
         session_id="sess-8",
         on_evidence=evidence.append,
     )
-    with pytest.raises(MonitorExhaustedError):
-        _run(monitor)
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
     # drop evidence carries only a generic reason_code, never the exception text or price
     for e in evidence:
         assert sentinel not in str(e)

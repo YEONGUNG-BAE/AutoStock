@@ -39,11 +39,11 @@ chmod +x ops/acceptance_check.sh
 - Summary: `11 PASS, 0 WARN, 0 FAIL`
 - exit code `0`
 
-**pytest baseline:** `2799 passed` (acceptance check 내부 Check 1)
+**pytest gate:** acceptance check 내부 Check 1은 통과 수(pass count)가 아니라 **pytest exit code**로 판정한다(0=PASS, 그 외=FAIL). 실제 통과 수는 정보용으로만 출력되며 게이트 기준이 아니다 — 테스트 추가/삭제만으로는 WARN/FAIL이 발생하지 않고, 실제 실패(exit≠0)만 FAIL로 잡힌다.
 
 **실패 시:** 다음 운용 단계(Ollama smoke, Date.md 갱신, PaperLoop one-shot 등)로 **진행하지 않는다**. FAIL 원인을 해결한 뒤 acceptance check를 재실행한다.
 
-WARN은 exit code 1을 만들지 않지만, pytest baseline mismatch(`2799 passed` 미포함)는 baseline drift 가능성이 있으므로 원인을 확인한다.
+WARN은 exit code 1을 만들지 않는다. pytest는 합계 숫자가 아니라 exit code로 게이트되므로 baseline drift 자체가 게이트 신호가 아니다(실제 실패만 FAIL).
 
 ---
 
@@ -1268,7 +1268,7 @@ Controlled Day 1은 **30-trading-day paper pilot 시작이 아니다.**
 
 ### Prerequisites
 
-운용 시작 전 regression gate (baseline은 [§2 Acceptance check](#2-acceptance-check) 참조 — 현재 `2799 passed`, `11 PASS, 0 WARN, 0 FAIL`):
+운용 시작 전 regression gate (기대 결과 `11 PASS, 0 WARN, 0 FAIL`, exit code 0 — pytest는 통과 수가 아니라 exit code로 게이트된다. [§2 Acceptance check](#2-acceptance-check) 참조):
 
 ```bash
 ./ops/acceptance_check.sh

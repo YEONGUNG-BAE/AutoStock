@@ -24,6 +24,7 @@ from run_kis_market_monitor import load_events, main
 _SUMMARY_KEYS = {
     "monitor_session_id",
     "connection_attempts",
+    "consecutive_failures",
     "applied",
     "duplicate",
     "out_of_order",

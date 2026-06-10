@@ -485,14 +485,24 @@ class TriggerEngine:
                 return self._suppress_break(TriggerReason.STALE_TRADE)
 
         condition_true = evaluate_all(plan.rules, snapshot)
-        reset_true = (
-            evaluate_all(plan.reset_rules, snapshot)
-            if plan.reset_rules
-            else not condition_true
-        )
 
         # --- cooldown: re-arm only after cooldown elapsed AND reset satisfied ---
         if self._state is TriggerState.COOLDOWN:
+            # reset_rules freshness gate (F2): re-arm은 신선한 reset 입력에서만 허용한다.
+            # plan.rules의 slot은 위에서 이미 검증했지만, reset_rules가 추가로 읽는
+            # trade/quote slot(예: quote-only rules + trade-only reset_rules)은 거기서
+            # 검증되지 않는다. missing/stale/identity-mismatch면 reset을 평가하지 않고
+            # _suppress_break로 빠진다 — stale 입력으로 같은 tick에 re-arm/fire하지 않게.
+            # _suppress_break는 COOLDOWN에서 누적 reset_count를 0으로 되돌린다(스트림
+            # 단절을 사이에 둔 비연속 reset이 연속으로 오인되지 않게).
+            gate = self._reset_slot_gate(plan, snapshot)
+            if gate is not None:
+                return self._suppress_break(gate)
+            reset_true = (
+                evaluate_all(plan.reset_rules, snapshot)
+                if plan.reset_rules
+                else not condition_true
+            )
             self._reset_count = self._reset_count + 1 if reset_true else 0
             cooldown_done = self._cooldown_until is None or now >= self._cooldown_until
             if (
@@ -545,6 +555,33 @@ class TriggerEngine:
             )
 
         return self._fire(plan, snapshot, now)
+
+    def _reset_slot_gate(
+        self, plan: TriggerPlan, snapshot: LatestMarketStateSnapshot
+    ) -> TriggerReason | None:
+        """reset_rules가 요구하는 trade/quote slot의 존재·정체성·freshness를 검사한다.
+        통과하면 None, 아니면 suppress 사유를 반환한다. reset_rules가 없으면(=기본
+        not-condition reset) gate할 입력이 없으므로 None. quote는 _fire의 reference
+        price 때문에 항상 위에서 검증되지만, reset_rules가 trade를 추가로 요구하면
+        그 trade slot은 여기서 처음 검증된다."""
+        if not plan.reset_rules:
+            return None
+        needs_trade, needs_quote = rule_required_slots(plan.reset_rules)
+        if needs_quote:
+            if snapshot.quote is None:
+                return TriggerReason.MISSING_QUOTE
+            if snapshot.quote.market != plan.market or snapshot.quote.symbol != plan.symbol:
+                return TriggerReason.SNAPSHOT_SYMBOL_MISMATCH
+            if not snapshot.quote_fresh:
+                return TriggerReason.STALE_QUOTE
+        if needs_trade:
+            if snapshot.trade is None:
+                return TriggerReason.MISSING_TRADE
+            if snapshot.trade.market != plan.market or snapshot.trade.symbol != plan.symbol:
+                return TriggerReason.SNAPSHOT_SYMBOL_MISMATCH
+            if not snapshot.trade_fresh:
+                return TriggerReason.STALE_TRADE
+        return None
 
     def _fire(
         self, plan: TriggerPlan, snapshot: LatestMarketStateSnapshot, now: datetime

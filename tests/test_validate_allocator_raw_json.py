@@ -521,22 +521,22 @@ def test_45_allocator_ops_scripts_do_not_import_forbidden_modules() -> None:
 
 
 def test_46_pytest_baseline_synchronized_between_runbook_and_acceptance_check() -> None:
+    # F7: pytest 게이트는 하드코딩된 pass-count가 아니라 pytest exit code로 판정한다.
+    # 이 가드는 (a) 하드코딩 "N passed" grep 게이트가 acceptance에 재도입되는 것을 막고
+    # (b) RUNBOOK/acceptance가 특정 합계 숫자에 묶여 테스트 증감이 거짓 경보가 되지
+    # 않게 강제한다. 실제 실패는 exit code(!=0)로만 FAIL 처리된다.
     acceptance_text = ACCEPTANCE_CHECK.read_text(encoding="utf-8")
     runbook_text = RUNBOOK.read_text(encoding="utf-8")
 
-    acceptance_match = re.search(r'grep -q "(\d+) passed"', acceptance_text)
-    assert acceptance_match is not None
-
-    baseline = acceptance_match.group(1)
-    assert f"pytest: {baseline} passed" in acceptance_text
-    assert f"pytest baseline mismatch(`{baseline} passed`" in runbook_text
-    assert f"**pytest baseline:** `{baseline} passed`" in runbook_text
-
-    runbook_counts = re.findall(r"(\d+) passed", runbook_text)
-    acceptance_counts = re.findall(r"(\d+) passed", acceptance_text)
-    assert len(set(runbook_counts)) == 1
-    assert len(set(acceptance_counts)) == 1
-    assert runbook_counts[0] == acceptance_counts[0] == baseline
+    assert re.search(r'grep -q "\d+ passed"', acceptance_text) is None, (
+        "acceptance_check.sh must not gate pytest on a hardcoded pass count"
+    )
+    assert 'fail "pytest: command failed (exit' in acceptance_text, (
+        "acceptance_check.sh must FAIL pytest on non-zero exit code"
+    )
+    assert re.search(r"\d+ passed", runbook_text) is None, (
+        "RUNBOOK must not pin a hardcoded pytest pass count as a gate baseline"
+    )
 
 
 def test_47_manual_smoke_shape_raw_json_validates_successfully(tmp_path: Path) -> None:

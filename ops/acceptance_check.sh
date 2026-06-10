@@ -25,21 +25,22 @@ fail() {
     echo "[FAIL] $1"
 }
 
-# Check 1 — pytest
+# Check 1 — pytest (exit-code 기준 판정; pass 수는 정보용 출력일 뿐 게이트가 아니다)
+# 테스트 추가/삭제로 합계가 바뀌어도 WARN하지 않고, exit!=0(=실제 실패)만 FAIL한다.
+# 하드코딩된 pass-count grep은 (a) 정상적인 테스트 증가를 거짓 경보로 만들고
+# (b) 일부 실패가 다른 통과로 상쇄돼 숫자가 우연히 맞으면 실패를 가릴 수 있었다.
 check_pytest() {
     local output
     local exit_code
-    output="$(uv run pytest tests/ -v 2>&1)"
+    local summary
+    output="$(uv run pytest tests/ 2>&1)"
     exit_code=$?
     if [ "$exit_code" -ne 0 ]; then
         fail "pytest: command failed (exit $exit_code)"
         return
     fi
-        if echo "$output" | grep -q "2799 passed"; then
-        pass "pytest: 2799 passed"
-    else
-        warn "pytest: exit 0 but baseline '2799 passed' not found"
-    fi
+    summary="$(echo "$output" | grep -Eo '[0-9]+ passed[a-z0-9, ]*' | tail -1)"
+    pass "pytest: exit 0 (${summary:-passed})"
 }
 
 # Check 2 — config smoke

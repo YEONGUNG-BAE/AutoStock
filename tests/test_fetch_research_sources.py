@@ -1311,19 +1311,33 @@ def test_price_live_smoke_existing_snapshot_fails_even_with_force(
 def test_price_live_smoke_json_and_verbose_keeps_stdout_pure_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # F7 hermeticity: main()을 in-process로 호출해 fake ticker factory 패치가 실제로
+    # 적용되게 한다. subprocess로 돌리면 monkeypatch가 자식 프로세스에 전달되지 않아
+    # 실제 Yahoo Finance를 호출하므로 네트워크에 의존한다(비-hermetic). 이 테스트는
+    # --json + --verbose가 동시에 켜져도 stdout이 단일 JSON 객체로 유지되고 진단 텍스트는
+    # stderr로만 나가는지 검증한다.
+    from fetch_research_sources import main
+
     _patch_price_live_with_fake_ticker_factory(monkeypatch)
+    _patch_fixed_fetched_at(monkeypatch)
     out_jsonl = tmp_path / "research_sources.jsonl"
-    result = _run_fetch_cli(
-        *_price_live_smoke_argv(
+
+    exit_code = main(
+        _price_live_smoke_argv(
             snapshot_dir=tmp_path / "sources" / "price",
             out_jsonl=out_jsonl,
             extra=["--verbose"],
         )
     )
-    assert result.returncode == 0, result.stderr
-    json.loads(result.stdout)
-    assert "verbose:" in result.stderr
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # stdout은 순수 JSON 한 덩어리여야 한다
+    assert payload["status"] == "ok"
+    assert "verbose:" in captured.err  # 진단은 stderr로만
+    assert "verbose:" not in captured.out
 
 
 def _success_opendart_list_body() -> dict[str, object]:

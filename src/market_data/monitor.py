@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from market_data.latest_state import (
+    ApplyStatus,
     FutureMarketEventError,
     LatestMarketStateStore,
 )
@@ -79,6 +80,7 @@ class MonitorEvidence:
     monitor_session_id: str
     state: MonitorState
     connection_attempt: int
+    consecutive_failures: int
     kind: str
     event_type: str | None = None
     provider: str | None = None
@@ -104,6 +106,7 @@ class _Counts:
 class MonitorSummary:
     monitor_session_id: str
     connection_attempts: int
+    consecutive_failures: int
     applied: int
     duplicate: int
     out_of_order: int
@@ -229,6 +232,11 @@ class MarketMonitor:
         self._state = MonitorState.IDLE
         self._counts = _Counts()
         self._events_consumed = 0
+        # F3: connection_attempt(평생 단조 증가, 감사용)과 consecutive_failures(재접속
+        # 정책·backoff를 구동, healthy 접속에서 0으로 리셋)를 분리한다. 정상 데이터를
+        # 흘린 접속이 drop돼도 EXHAUSTED로 죽지 않게 한다.
+        self._consecutive_failures = 0
+        self._applied_this_attempt = 0
         self._seen_streams: set[tuple[str, str]] = set()
         self._pending_reset: set[tuple[str, str]] = set()
         self._started_at: datetime | None = None
@@ -244,6 +252,7 @@ class MarketMonitor:
         try:
             while True:
                 attempt += 1
+                self._applied_this_attempt = 0
                 self._state = MonitorState.CONNECTING
                 self._epoch_started_at = self._clock()
                 self._emit("connect", attempt)
@@ -251,13 +260,21 @@ class MarketMonitor:
                 if outcome in ("eof", "budget"):
                     self._state = MonitorState.STOPPED
                     return self._summary(attempt)
-                # outcome == "drop" -> transport reconnect
-                if attempt >= self._policy.max_attempts:
+                # outcome == "drop" -> transport reconnect.
+                # F3: 이번 접속이 최소 1건의 APPLIED 이벤트를 흘렸다면 healthy로 보고
+                # consecutive_failures를 0으로 리셋한다(backoff도 initial부터 재시작).
+                # APPLIED가 없던 접속(factory/iterator 오류·heartbeat timeout·중복/역순
+                # /future-only)만 연속 실패로 누적해 max_attempts에서 EXHAUSTED한다.
+                if self._applied_this_attempt > 0:
+                    self._consecutive_failures = 0
+                else:
+                    self._consecutive_failures += 1
+                if self._consecutive_failures >= self._policy.max_attempts:
                     self._state = MonitorState.EXHAUSTED
                     self._emit("exhausted", attempt)
                     raise MonitorExhaustedError(self._summary(attempt))
                 self._pending_reset |= set(self._seen_streams)
-                delay = self._policy.delay_for_attempt(attempt)
+                delay = self._policy.delay_for_attempt(max(self._consecutive_failures, 1))
                 self._state = MonitorState.BACKING_OFF
                 self._emit("backoff", attempt, backoff_seconds=delay)
                 await self._sleep(delay)
@@ -357,6 +374,8 @@ class MarketMonitor:
             raise
         except Exception as exc:
             raise MonitorInternalError("store.apply failed") from exc
+        if result.status is ApplyStatus.APPLIED:
+            self._applied_this_attempt += 1
         status = result.status.value
         setattr(self._counts, status, getattr(self._counts, status) + 1)
         self._emit(
@@ -421,6 +440,7 @@ class MarketMonitor:
         return MonitorSummary(
             monitor_session_id=self._session_id,
             connection_attempts=attempt,
+            consecutive_failures=self._consecutive_failures,
             applied=self._counts.applied,
             duplicate=self._counts.duplicate,
             out_of_order=self._counts.out_of_order,
@@ -458,6 +478,7 @@ class MarketMonitor:
             monitor_session_id=self._session_id,
             state=self._state,
             connection_attempt=attempt,
+            consecutive_failures=self._consecutive_failures,
             kind=kind,
             event_type=fields["event_type"],  # type: ignore[arg-type]
             provider=fields["provider"],  # type: ignore[arg-type]

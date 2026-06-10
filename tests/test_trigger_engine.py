@@ -421,6 +421,112 @@ def test_rearm_requires_reset_events_consecutive() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# F2: reset_rules freshness gate (stale reset input must never re-arm/fire)
+# --------------------------------------------------------------------------- #
+# quote-only trigger rules + trade-only reset_rules. plan.rules의 slot 검증은
+# trade를 요구하지 않으므로, reset_rules가 추가로 읽는 trade slot은 COOLDOWN의
+# reset gate에서 처음 검증된다.
+def _reset_gate_engine(**over: object) -> TriggerEngine:
+    base: dict[str, object] = dict(
+        rules=(_clause(Metric.BEST_ASK_PRICE, Comparator.LTE, "101"),),
+        reset_rules=(_clause(Metric.LAST_TRADE_PRICE, Comparator.GTE, "100"),),
+        max_fires_per_decision=2,
+        cooldown_seconds="0",
+        reset_events=1,
+    )
+    base.update(over)
+    return _armed_engine(**base)
+
+
+def test_quote_only_rules_fire_without_trade_present() -> None:
+    # reset gate가 초기 무장/발화를 막지 않음을 먼저 못박는다: trade 없이도 발화한다.
+    engine = _reset_gate_engine()
+    res = engine.evaluate(_snap(trade=None, quote=_quote(ask="101")), _permission(), now=NOW)
+    assert res.status is TriggerStatus.TRIGGERED
+    assert res.state is TriggerState.COOLDOWN
+
+
+def test_reset_with_stale_trade_input_holds_cooldown() -> None:
+    engine = _reset_gate_engine()
+    fire1 = engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)
+    assert fire1.state is TriggerState.COOLDOWN
+    # reset 조건 자체는 충족(trade 100 >= 100)이지만 trade가 stale → re-arm 금지.
+    held = engine.evaluate(
+        _snap(trade=_trade(price="100"), quote=_quote(), trade_fresh=False),
+        _permission(),
+        now=NOW,
+    )
+    assert held.status is TriggerStatus.SUPPRESSED
+    assert held.state is TriggerState.COOLDOWN
+    assert held.reason is TriggerReason.STALE_TRADE
+
+
+def test_reset_with_missing_trade_input_holds_cooldown() -> None:
+    engine = _reset_gate_engine()
+    engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)  # COOLDOWN
+    held = engine.evaluate(_snap(trade=None, quote=_quote()), _permission(), now=NOW)
+    assert held.status is TriggerStatus.SUPPRESSED
+    assert held.state is TriggerState.COOLDOWN
+    assert held.reason is TriggerReason.MISSING_TRADE
+
+
+def test_reset_count_zeroed_after_stale_suppression() -> None:
+    # reset_events=2: 하나의 fresh reset 뒤 stale가 끼어들면 누적 count가 0으로 리셋돼
+    # 이후 단일 fresh reset로는 re-arm되지 않아야 한다(비연속 reset 오인 방지).
+    engine = _reset_gate_engine(reset_events=2)
+    engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)  # COOLDOWN
+    one = engine.evaluate(_snap(trade=_trade(price="100"), quote=_quote()), _permission(), now=NOW)
+    assert one.status is TriggerStatus.COOLDOWN
+    # stale trade가 끼어듦 → suppressed, reset_count 0으로
+    engine.evaluate(
+        _snap(trade=_trade(price="100"), quote=_quote(), trade_fresh=False),
+        _permission(),
+        now=NOW,
+    )
+    after = engine.evaluate(_snap(trade=_trade(price="100"), quote=_quote()), _permission(), now=NOW)
+    assert after.status is TriggerStatus.COOLDOWN  # count restarted → still cooling
+    assert after.state is TriggerState.COOLDOWN
+
+
+def test_reset_with_fresh_trade_rearms_normally() -> None:
+    # fresh reset 입력이면 정상 re-arm 한다(게이트가 정상 경로를 막지 않음).
+    engine = _reset_gate_engine(reset_events=1)
+    engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)  # COOLDOWN
+    rearm = engine.evaluate(
+        _snap(trade=_trade(price="100"), quote=_quote(ask="102")),  # condition false → ARMED
+        _permission(),
+        now=NOW,
+    )
+    assert rearm.status is TriggerStatus.CONDITION_NOT_MET
+    assert rearm.state is TriggerState.ARMED
+
+
+def test_reset_gate_does_not_block_initial_arm() -> None:
+    # 초기 ARMED에서는 reset gate가 적용되지 않는다: trade가 없어도 suppress되지 않고
+    # plan.rules(quote-only)만으로 판정된다.
+    engine = _reset_gate_engine()
+    res = engine.evaluate(_snap(trade=None, quote=_quote(ask="102")), _permission(), now=NOW)
+    assert res.status is TriggerStatus.CONDITION_NOT_MET
+    assert res.state is TriggerState.ARMED
+
+
+def test_reset_rules_quote_metric_stale_is_fail_closed() -> None:
+    # reset_rules가 quote metric을 읽어도 stale quote면 fail-closed(재무장 금지).
+    engine = _reset_gate_engine(
+        reset_rules=(_clause(Metric.BEST_BID_PRICE, Comparator.GTE, "1"),),
+    )
+    engine.evaluate(_fireable_snap(price="100"), _permission(), now=NOW)  # COOLDOWN
+    held = engine.evaluate(
+        _snap(trade=_trade(price="100"), quote=_quote(), quote_fresh=False),
+        _permission(),
+        now=NOW,
+    )
+    assert held.status is TriggerStatus.SUPPRESSED
+    assert held.state is TriggerState.COOLDOWN
+    assert held.reason is TriggerReason.STALE_QUOTE
+
+
+# --------------------------------------------------------------------------- #
 # decision replacement (atomic)
 # --------------------------------------------------------------------------- #
 def test_replace_older_decision_rejected() -> None:
