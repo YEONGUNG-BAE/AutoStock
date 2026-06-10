@@ -85,13 +85,18 @@ def _to_timedelta(seconds: Decimal) -> timedelta:
 
 
 class IndicatorReadiness(StrEnum):
-    """window readiness. READY가 아니면 지표 계산은 허용되지 않는다(fail-closed)."""
+    """window readiness. READY가 아니면 지표 계산은 허용되지 않는다(fail-closed).
+
+    STALE(과거로 오래됨)와 FUTURE(now보다 미래 timestamp)는 분리한다. latest store의
+    정상 경로는 future tick을 차단하지만, indicator 계층은 독립적인 불변 입력을 받으므로
+    clock skew/ordering bug를 단순 stale로 뭉개지 않고 별도로 진단한다(4b.2 reason 매핑용)."""
 
     MISSING = "missing"
     WARMING = "warming"
     DISCONTINUOUS = "discontinuous"
     READY = "ready"
     STALE = "stale"
+    FUTURE = "future"
     INSUFFICIENT_RETENTION = "insufficient_retention"
 
 
@@ -193,6 +198,12 @@ class IndicatorWindowSnapshot:
     age_seconds: Decimal | None
     continuity_epoch: int
     epoch_start_reason: EpochStartReason
+    # RTM-4b.2 coherence: 결과만으로 어느 provider/channel/sequence/수신시각 기준인지
+    # 자체 식별 가능하도록 source 메타데이터를 그대로 전달한다(판정에는 쓰이지 않음).
+    provider: str | None
+    channel: str | None
+    latest_sequence: int | None
+    latest_received_at: datetime | None
 
     @property
     def is_ready(self) -> bool:
@@ -217,8 +228,9 @@ def evaluate_window(
       3. DISCONTINUOUS           — reset 직후 현재 epoch에 표본이 없음(suffix 0)
       4. INSUFFICIENT_RETENTION  — 요청 구간 내부 표본이 실제로 eviction됨(동적)
       5. WARMING / DISCONTINUOUS — 연속 suffix가 min_events 미달
-      6. STALE                   — 최신 tick age가 freshness 임계 초과(또는 음수)
-      7. READY
+      6. FUTURE                  — 최신 tick이 now보다 미래(age < 0; clock skew/ordering)
+      7. STALE                   — 최신 tick age가 freshness 임계 초과
+      8. READY
     """
     aware_now = require_timezone_aware_datetime(now, field_name="now")
     retention = history.retention
@@ -234,6 +246,10 @@ def evaluate_window(
         age_seconds=None,
         continuity_epoch=history.continuity_epoch,
         epoch_start_reason=history.epoch_start_reason,
+        provider=history.provider,
+        channel=history.channel,
+        latest_sequence=history.latest_sequence,
+        latest_received_at=history.latest_received_at,
     )
 
     def _with(readiness: IndicatorReadiness, **over: object) -> IndicatorWindowSnapshot:
@@ -285,17 +301,33 @@ def evaluate_window(
 
     # 4) 동적 retention coverage: 요청 구간 내부 표본이 실제로 eviction됐는지.
     #    애매하면 항상 INSUFFICIENT_RETENTION으로 fail-closed한다.
+    #
+    #    count+time 복합 window의 effective window는 두 경계의 *교집합*이다. 가장
+    #    최근에 evict된 표본(evicted high-water mark)이 이 교집합 내부에 속했어야만
+    #    coverage가 깨진 것이다. 교집합 membership = (time 경계 내부) AND (count 경계
+    #    내부)이므로, 두 경계가 모두 있을 때는 두 조건이 *동시에* 참일 때만 INSUFFICIENT다.
+    #    한쪽만 참이면 evict된 표본은 교집합 밖이라 요청 window를 훼손하지 않는다.
+    #    단일 경계 spec은 그 경계의 조건만으로 판정한다(기존 count-only/time-only 동작 유지).
     evicted_time = history.evicted_through_event_time
+    time_evicted = False
     if spec.lookback_seconds is not None and evicted_time is not None:
         old_edge = anchor - _to_timedelta(spec.lookback_seconds)
-        # old edge가 배타적이므로 evicted high-water mark가 그보다 *크면* 내부 표본이 잘렸다.
-        if evicted_time > old_edge:
-            return _with(IndicatorReadiness.INSUFFICIENT_RETENTION)
+        # old edge가 배타적이므로 evicted high-water mark가 그보다 *크면* time 경계 내부가 잘렸다.
+        time_evicted = evicted_time > old_edge
+    count_evicted = False
     if spec.lookback_events is not None and len(samples) < spec.lookback_events:
-        # 요청한 N개보다 적게 남았는데 eviction 이력이 있으면 count window가 잘린 것이다.
+        # 요청한 N개보다 적게 남았는데 eviction 이력이 있으면 count 경계가 잘린 것이다.
         # eviction이 없으면 아직 충분히 쌓이지 않은 것(WARMING/DISCONTINUOUS 단계로).
-        if history.evicted_event_count > 0:
-            return _with(IndicatorReadiness.INSUFFICIENT_RETENTION)
+        count_evicted = history.evicted_event_count > 0
+
+    if spec.lookback_events is not None and spec.lookback_seconds is not None:
+        insufficient = time_evicted and count_evicted
+    elif spec.lookback_seconds is not None:
+        insufficient = time_evicted
+    else:
+        insufficient = count_evicted
+    if insufficient:
+        return _with(IndicatorReadiness.INSUFFICIENT_RETENTION)
 
     # --- gap 처리: 선택 구간에서 마지막 gap 이후 연속 suffix만 유효 ---
     suffix = selected
@@ -332,7 +364,18 @@ def evaluate_window(
 
     # 6) freshness: 최신 tick age. lookback 기간과 절대 혼용하지 않는다.
     age = _age_seconds(aware_now, anchor)
-    if age < 0 or age > spec.freshness_max_age_seconds:
+    # 미래 tick(age < 0)은 STALE(과거로 오래됨)과 원인이 다르므로 분리한다. latest store의
+    # 정상 경로는 future tick을 막지만 indicator 계층은 독립 입력을 받으므로 clock skew/
+    # ordering bug를 별도 readiness로 노출해 4b.2 reason 매핑이 정확해지도록 한다.
+    if age < 0:
+        return _with(
+            IndicatorReadiness.FUTURE,
+            selected=suffix,
+            anchor_event_time=anchor,
+            oldest_selected_event_time=oldest_selected,
+            age_seconds=age,
+        )
+    if age > spec.freshness_max_age_seconds:
         return _with(
             IndicatorReadiness.STALE,
             selected=suffix,

@@ -9,10 +9,17 @@ Retention coverage truth table (anchor=latest trade_at, old edge 배타적):
 | ------------------------------------------------ | ----------------------- |
 | lookback_events > hard_max_events (정적)          | INSUFFICIENT_RETENTION  |
 | lookback_seconds > hard_max_age_seconds (정적)    | INSUFFICIENT_RETENTION  |
-| evicted_through_event_time > anchor-lookback_sec | INSUFFICIENT_RETENTION  |
-| evicted_through_event_time <= anchor-lookback_sec| (다음 단계로) READY 가능 |
-| lookback_events>len(samples) & evicted_count>0   | INSUFFICIENT_RETENTION  |
-| lookback_events>len(samples) & evicted_count==0  | (다음 단계로; WARMING)   |
+| time-only: evicted_through > anchor-lookback_sec | INSUFFICIENT_RETENTION  |
+| time-only: evicted_through <= anchor-lookback_sec| (다음 단계로) READY 가능 |
+| count-only: len<lookback_events & evicted_count>0| INSUFFICIENT_RETENTION  |
+| count-only: len<lookback_events & evicted_count==0| (다음 단계로; WARMING)  |
+| count+time: time_evicted AND count_evicted       | INSUFFICIENT_RETENTION  |
+| count+time: 둘 중 하나만(교집합 밖)               | (다음 단계로) READY 가능 |
+
+count+time 복합 window는 두 경계의 *교집합*이 effective window다. 가장 최근에 evict된
+표본이 그 교집합 내부에 속했을 때(=time 경계 내부 AND count 경계 내부)만 coverage가 깨진다.
+
+freshness: age<0(미래 tick)→FUTURE, age>freshness_max_age_seconds→STALE(분리).
 """
 
 from __future__ import annotations
@@ -392,14 +399,14 @@ def test_age_beyond_max_is_stale() -> None:
     assert w.readiness is IndicatorReadiness.STALE
 
 
-def test_future_latest_tick_is_fail_closed_stale() -> None:
-    # now is before the latest trade_at → negative age → fail-closed (not READY).
+def test_future_latest_tick_is_fail_closed_future_not_stale() -> None:
+    # now is before the latest trade_at → negative age → FUTURE (distinct from STALE).
     samples = tuple(
         _sample(seq=i, price="100", qty="10", offset=i) for i in range(1, 4)
     )  # anchor offset=3
     spec = _spec(lookback_events=3, min_events=2, freshness_max_age_seconds=Decimal("60"))
     w = evaluate_window(_history(samples), spec, now=_BASE + timedelta(seconds=1))
-    assert w.readiness is IndicatorReadiness.STALE
+    assert w.readiness is IndicatorReadiness.FUTURE
     assert w.age_seconds is not None and w.age_seconds < 0
 
 
@@ -502,6 +509,97 @@ def test_count_shortfall_without_eviction_is_warming_not_insufficient() -> None:
     snap = _history(samples, retention=_retention(events=100), evicted_event_count=0)
     w = evaluate_window(snap, spec, now=_BASE + timedelta(seconds=3))
     assert w.readiness is IndicatorReadiness.WARMING
+
+
+def test_combined_count_binding_time_eviction_outside_count_is_ready() -> None:
+    # count+time spec. count is the binding (narrower) bound: 5 samples remain, want
+    # newest 3, so the count window is fully covered (count_evicted=False). An evicted
+    # sample falls inside the *time* range (time_evicted=True), but it is OUTSIDE the
+    # effective intersection (the latest-3 count window), so coverage is intact → READY.
+    # Old independent-OR logic wrongly returned INSUFFICIENT here.
+    samples = tuple(
+        _sample(seq=i, price="100", qty="10", offset=o)
+        for i, o in [(6, 80), (7, 85), (8, 90), (9, 95), (10, 100)]
+    )
+    spec = IndicatorWindowSpec(
+        lookback_events=3,
+        lookback_seconds=Decimal("200"),  # old edge = anchor-200 → far in the past
+        min_events=2,
+        freshness_max_age_seconds=Decimal("120"),
+    )
+    snap = _history(
+        samples,
+        retention=_retention(events=1000, age="3600"),
+        evicted_event_count=4,
+        evicted_through_event_time=_BASE + timedelta(seconds=60),  # inside time range
+    )
+    w = evaluate_window(snap, spec, now=_BASE + timedelta(seconds=100))
+    assert w.readiness is IndicatorReadiness.READY
+
+
+def test_combined_time_binding_count_eviction_outside_time_is_ready() -> None:
+    # count+time spec. time is the binding (narrower) bound. count shows a shortfall
+    # (3 < lookback_events=10) and eviction occurred (count_evicted=True), but the
+    # evicted high-water mark is OUTSIDE the time range (time_evicted=False), so the
+    # effective intersection is intact → READY. Old OR logic wrongly returned INSUFFICIENT.
+    samples = tuple(
+        _sample(seq=i, price="100", qty="10", offset=o)
+        for i, o in [(8, 90), (9, 95), (10, 100)]
+    )
+    spec = IndicatorWindowSpec(
+        lookback_events=10,
+        lookback_seconds=Decimal("30"),  # old edge = 100-30 = 70 (exclusive)
+        min_events=2,
+        freshness_max_age_seconds=Decimal("120"),
+    )
+    snap = _history(
+        samples,
+        retention=_retention(events=1000, age="3600"),
+        evicted_event_count=5,
+        evicted_through_event_time=_BASE + timedelta(seconds=50),  # 50 <= 70 → outside
+    )
+    w = evaluate_window(snap, spec, now=_BASE + timedelta(seconds=100))
+    assert w.readiness is IndicatorReadiness.READY
+
+
+def test_combined_intersection_internal_eviction_is_insufficient() -> None:
+    # count+time spec where BOTH bounds are truncated: count shortfall (2 < 3) with
+    # eviction (count_evicted=True) AND evicted high-water mark inside the time range
+    # (time_evicted=True). The evicted sample belongs to the effective intersection →
+    # INSUFFICIENT (genuine coverage loss is still fail-closed).
+    samples = tuple(
+        _sample(seq=i, price="100", qty="10", offset=o)
+        for i, o in [(9, 85), (10, 100)]
+    )
+    spec = IndicatorWindowSpec(
+        lookback_events=3,
+        lookback_seconds=Decimal("50"),  # old edge = 100-50 = 50 (exclusive)
+        min_events=2,
+        freshness_max_age_seconds=Decimal("120"),
+    )
+    snap = _history(
+        samples,
+        retention=_retention(events=1000, age="3600"),
+        evicted_event_count=7,
+        evicted_through_event_time=_BASE + timedelta(seconds=60),  # 60 > 50 → inside
+    )
+    w = evaluate_window(snap, spec, now=_BASE + timedelta(seconds=100))
+    assert w.readiness is IndicatorReadiness.INSUFFICIENT_RETENTION
+
+
+def test_ready_window_carries_source_coherence_metadata() -> None:
+    # RTM-4b.2 coherence: a snapshot must self-identify its provider/channel/sequence/
+    # received_at so downstream consumers need not re-read the store.
+    samples = tuple(
+        _sample(seq=i, price="100", qty="10", offset=i) for i in range(1, 4)
+    )
+    spec = _spec(lookback_events=3, min_events=2, freshness_max_age_seconds=Decimal("60"))
+    w = evaluate_window(_history(samples), spec, now=_BASE + timedelta(seconds=4))
+    assert w.readiness is IndicatorReadiness.READY
+    assert w.provider == "kis"
+    assert w.channel == "H0STCNT0|005930"
+    assert w.latest_sequence == 3
+    assert w.latest_received_at == _BASE + timedelta(seconds=3)
 
 
 # --------------------------------------------------------------------------- #
