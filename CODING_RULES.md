@@ -126,6 +126,21 @@ src/
   - `.uv-cache/`
 - `src/data/`는 source code directory이므로 ignore하지 않는다. runtime data directory를 ignore할 때는 `/data/`처럼 root anchored rule을 사용한다.
 
+### Commit ownership / documentation hygiene
+
+- Git commit, amend, rebase, push는 operator가 직접 수행한다.
+- 구현자는 코드·테스트·문서 변경과 검증까지만 수행하고 commit하지 않는다.
+- 구현 완료 후 변경 파일과 gate 결과를 채팅 보고로 전달하고 operator의 commit을 기다린다.
+- 다음과 같은 일시적 Git 상태는 `docs/TECH_DEBT.md`에 기록하지 않는다.
+  - Not committed
+  - operator commits
+  - commit pending
+  - working tree clean/dirty
+  - 특정 변경이 아직 commit되지 않았다는 서술
+- `docs/TECH_DEBT.md`에는 장기간 유효한 기술 부채, blocker, 설계 결정, 유보 범위만 기록한다.
+- commit 여부는 채팅의 작업 완료 보고에서만 언급한다.
+- 이미 commit된 사실을 반영하기 위한 목적으로 `docs/TECH_DEBT.md`를 다시 수정하지 않는다.
+
 
 ## MVP 구현 순서
 

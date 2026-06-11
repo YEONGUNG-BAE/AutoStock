@@ -834,3 +834,31 @@ def test_bool_seconds_rejected(field: str) -> None:
     for value in (True, False):
         with pytest.raises(ValidationError):
             _plan(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "field", ["debounce_events", "reset_events", "max_fires_per_decision"]
+)
+def test_bool_count_fields_rejected(field: str) -> None:
+    # bool is an int subclass; True/False must not coerce to 1/0 past the >= 1 gate.
+    for value in (True, False):
+        with pytest.raises(ValidationError):
+            _plan(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "field", ["debounce_events", "reset_events", "max_fires_per_decision"]
+)
+def test_int_count_fields_still_accept_valid_values(field: str) -> None:
+    for value in (1, 2, 5):
+        plan = _plan(**{field: value})
+        assert getattr(plan, field) == value
+
+
+@pytest.mark.parametrize(
+    "field", ["debounce_events", "reset_events", "max_fires_per_decision"]
+)
+def test_int_count_fields_still_reject_zero_and_negative(field: str) -> None:
+    for value in (0, -1):
+        with pytest.raises(ValidationError):
+            _plan(**{field: value})

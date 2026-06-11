@@ -2100,6 +2100,9 @@ Phase 14 tiny-live는 **dry-run gate/scaffold**다.
 | Date.md automatic generator | 수동 운영 우선 |
 | Postmortem tags in DebugEvent | catalog 분리 |
 | Debug event codes as Postmortem error_tags | Top 3 source 오염 방지 |
+| 구현자의 git commit/amend/rebase/push | commit은 operator가 직접 수행 (아래 참고) |
+
+> **Commit ownership:** Git commit/amend/rebase/push는 operator가 직접 수행하고, 구현자는 변경·검증·보고까지만 한다. 일시적 Git 상태(commit 여부 등)는 `docs/TECH_DEBT.md`에 기록하지 않는다. 전체 규칙은 `CODING_RULES.md`의 "Commit ownership / documentation hygiene" 절을 따른다.
 
 ---
 

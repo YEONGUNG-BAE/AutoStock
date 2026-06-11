@@ -115,6 +115,17 @@ class TriggerPlan(BaseModel):
             return Decimal(value)
         raise ValueError("seconds must be a Decimal, str, or int.")
 
+    @field_validator(
+        "debounce_events", "reset_events", "max_fires_per_decision", mode="before"
+    )
+    @classmethod
+    def _reject_bool_counts(cls, value: object, info: object) -> object:
+        # bool is an int subclass; without this guard True/False would coerce to 1/0
+        # and silently satisfy the >= 1 range check.
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must not be a bool.")  # type: ignore[attr-defined]
+        return value
+
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
         if self.action not in _EXECUTABLE_ACTIONS:
