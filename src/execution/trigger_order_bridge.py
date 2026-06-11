@@ -30,7 +30,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from domain.enums import OrderStatus
+from domain.enums import AccountRole, OrderSide, OrderStatus, OrderType
 from domain.market import MarketPrice
 from domain.order import OrderIntent, OrderResult
 from paper_loop.models import QuantityResolutionResult, QuantityResolutionStatus
@@ -53,11 +53,22 @@ REASON_HOLD_NOOP = "hold_noop"
 REASON_SIZING_FAILED = "sizing_failed"
 REASON_NO_EXECUTABLE_QUANTITY = "no_executable_quantity"
 REASON_COHERENCE_FAILED = "coherence_failed"
+REASON_GENERATION_EXCEPTION = "generation_exception"
+REASON_SIZING_EXCEPTION = "sizing_exception"
+REASON_LEDGER_PREFLIGHT_EXCEPTION = "ledger_preflight_exception"
 REASON_BROKER_EXCEPTION = "broker_exception"
 REASON_DISPATCH_OUTCOME_MISSING = "dispatch_outcome_missing"
 REASON_DISPATCH_OUTCOME_NONTERMINAL = "dispatch_outcome_nonterminal"
 REASON_RESTART_BEFORE_DISPATCH = "restart_before_dispatch"
 REASON_DISPATCH_OUTCOME_UNKNOWN = "dispatch_outcome_unknown"
+
+
+# AnalysisAction(value) → 기대 OrderSide. signal.action 에서 파생되는 side 가 실제 실행 intent 의
+# side 와 일치하는지 broker 호출 전에 검증하기 위한 매핑.
+_ACTION_TO_SIDE: dict[str, OrderSide] = {
+    "buy": OrderSide.BUY,
+    "sell": OrderSide.SELL,
+}
 
 
 # OrderStatus → JournalResultStatus. 매핑에 없는 상태(PENDING/CANCELLED)는 terminal commit
@@ -80,6 +91,13 @@ class BridgeCoherenceError(BridgeError):
     """resolve 이후 실행 intent 가 기대 불변식을 어김(내부 논리 오류).
 
     reserve 행은 ABORTED 로 안전 종료한 뒤 raise 한다(주문은 전송되지 않았다).
+    """
+
+
+class BridgeDependencyError(BridgeError):
+    """dispatch 전(generate/resolve/ledger preflight) 의존성 호출이 예외를 던짐.
+
+    주문은 전송되지 않았으므로 reserve 행을 ABORTED 로 안전 종료한 뒤 raise 한다(고아 RESERVED 방지).
     """
 
 
@@ -213,7 +231,9 @@ class TriggerOrderBridge:
         now: datetime,
     ) -> BridgeResult:
         """하나의 발화 신호를 reserve→generate→resolve→dispatch→commit 으로 처리한다."""
-        self._preflight(signal=signal, bundle=bundle, risk_input=risk_input)
+        self._preflight(
+            signal=signal, bundle=bundle, risk_input=risk_input, market_price=market_price
+        )
 
         # 1) reserve — idempotency_key 단위 단발 선점.
         reserve = self._journal.reserve(signal, now)
@@ -227,8 +247,14 @@ class TriggerOrderBridge:
         key = signal.idempotency_key
         order_id = f"order-{_scalar(signal.decision_id)}"
 
-        # 2) order intent 생성(RiskFilter 평가 포함).
-        gen = self._generator.generate(risk_input)
+        # 2) order intent 생성(RiskFilter 평가 포함). 예외는 dispatch 전이므로 ABORTED 안전 종료.
+        try:
+            gen = self._generator.generate(risk_input)
+        except Exception as exc:  # noqa: BLE001 — 고아 RESERVED 방지: 안전 abort 후 surfacing
+            self._journal.mark_aborted(key, REASON_GENERATION_EXCEPTION, now)
+            raise BridgeDependencyError(
+                f"OrderIntentGenerator.generate raised: {exc!r}"
+            ) from exc
         if gen.status is OrderGenerationStatus.BLOCKED:
             return self._abort(key, REASON_RISK_BLOCKED, now)
         if gen.status is OrderGenerationStatus.NOOP:
@@ -238,25 +264,39 @@ class TriggerOrderBridge:
             raise BridgeCoherenceError("GENERATED status without order_intent.")
 
         # 3) target_weight → quantity sizing. PaperBroker 는 target_weight intent 를 거절한다.
-        resolution = self._resolver.resolve(
-            intent=gen.order_intent,
-            context=risk_input.context,
-            market_price=market_price,
-            current_position_quantity=current_position_quantity,
-        )
+        try:
+            resolution = self._resolver.resolve(
+                intent=gen.order_intent,
+                context=risk_input.context,
+                market_price=market_price,
+                current_position_quantity=current_position_quantity,
+            )
+        except Exception as exc:  # noqa: BLE001 — 고아 RESERVED 방지: 안전 abort 후 surfacing
+            self._journal.mark_aborted(key, REASON_SIZING_EXCEPTION, now)
+            raise BridgeDependencyError(
+                f"QuantityResolver.resolve raised: {exc!r}"
+            ) from exc
         if resolution.status is QuantityResolutionStatus.FAILED:
             return self._abort(key, REASON_SIZING_FAILED, now)
         if resolution.status is QuantityResolutionStatus.NOOP:
             return self._abort(key, REASON_NO_EXECUTABLE_QUANTITY, now)
 
         executable = resolution.order_intent
-        # 4) 실행 intent 불변식 검증.
-        self._assert_executable_coherence(executable, key=key, order_id=order_id, now=now)
+        # 4) 실행 intent 불변식 검증(order_id/correlation/quantity + symbol/market/side/source/type/account).
+        self._assert_executable_coherence(
+            executable, signal=signal, key=key, order_id=order_id, now=now
+        )
         assert executable is not None  # _assert_executable_coherence 가 보장
 
         # 5) ledger preflight(desync 방어): 같은 order_id 의 durable result 가 이미 있으면
-        #    broker 를 호출하지 않고 그 durable 상태로 종결한다.
-        durable_pre = self._ledger.get_order_result(order_id)
+        #    broker 를 호출하지 않고 그 durable 상태로 종결한다. 예외는 dispatch 전 → ABORTED.
+        try:
+            durable_pre = self._ledger.get_order_result(order_id)
+        except Exception as exc:  # noqa: BLE001 — 고아 RESERVED 방지: 안전 abort 후 surfacing
+            self._journal.mark_aborted(key, REASON_LEDGER_PREFLIGHT_EXCEPTION, now)
+            raise BridgeDependencyError(
+                f"ledger.get_order_result (preflight) raised: {exc!r}"
+            ) from exc
         if durable_pre is not None:
             self._journal.mark_dispatching(key, order_id, now)
             return self._finalize_from_durable(key, durable_pre, now)
@@ -264,14 +304,12 @@ class TriggerOrderBridge:
         # 6) DISPATCHING 영속화(order_id 전역 UNIQUE 점유) — broker 호출 직전.
         self._journal.mark_dispatching(key, order_id, now)
 
-        # 7) broker 제출. 예외는 결과 불명확 → UNCERTAIN.
+        # 7) broker 제출. 예외가 나도 ledger 에 durable 이 commit 됐을 수 있으므로(반환 직전 예외)
+        #    ledger 를 다시 읽어 진실원천으로 삼는다 — 그래야 'broker 반환값 불신' 원칙과 일관된다.
         try:
             self._broker.submit_order(executable, market_price)
-        except Exception:  # noqa: BLE001 — 결과 불명확은 모두 UNCERTAIN 로 fail-closed
-            record = self._journal.mark_uncertain(key, REASON_BROKER_EXCEPTION, now)
-            return BridgeResult(
-                BridgeOutcome.UNCERTAIN, record, REASON_BROKER_EXCEPTION, None
-            )
+        except Exception:  # noqa: BLE001 — 결과 불명확은 ledger 재조회 후 fail-closed
+            return self._reconcile_after_broker_exception(key, order_id, now)
 
         # 8) ledger 가 source of truth. broker 반환값을 신뢰하지 않는다.
         durable_post = self._ledger.get_order_result(order_id)
@@ -331,6 +369,7 @@ class TriggerOrderBridge:
         signal: TriggerFireSignal,
         bundle: FireBundle,
         risk_input: FireRiskInput,
+        market_price: MarketPrice,
     ) -> None:
         """주문/저널 호출 전 정합성 검증. 실패 시 아무것도 reserve 하지 않고 raise(fail-closed)."""
         plan = bundle.plan
@@ -376,16 +415,27 @@ class TriggerOrderBridge:
                 "risk_input.correlation_id must equal signal.idempotency_key."
             )
 
-        # risk_input 이 같은 decision 을 가리키는지 확인.
-        if _scalar(risk_input.analysis_decision.decision_id) != _scalar(signal.decision_id):
+        # 주문은 bundle.decision 이 아니라 risk_input.analysis_decision 에서 파생되므로
+        # (symbol/market/side/target weight 전부) 그 둘이 동일해야 한다. decision_id 만 같고
+        # symbol/action 이 다른 risk_input 이 들어오면 엉뚱한 종목·방향 주문이 나갈 수 있다.
+        if risk_input.analysis_decision != decision:
             raise BridgePreflightError(
-                "risk_input.analysis_decision.decision_id != signal.decision_id."
+                "risk_input.analysis_decision must equal bundle.decision "
+                "(order identity is derived from risk_input)."
             )
+
+        # market_price 도 발화 신호와 같은 종목/시장이어야 한다(PaperBroker 는 intent↔price 만 보고
+        # signal 과의 일치는 보지 않으므로, 여기서 발화 신호 기준으로 한 번 더 잠근다).
+        if _scalar(market_price.market) != _scalar(signal.market):
+            raise BridgePreflightError("market_price.market != signal.market.")
+        if market_price.symbol != signal.symbol:
+            raise BridgePreflightError("market_price.symbol != signal.symbol.")
 
     def _assert_executable_coherence(
         self,
         executable: OrderIntent | None,
         *,
+        signal: TriggerFireSignal,
         key: str,
         order_id: str,
         now: datetime,
@@ -406,10 +456,63 @@ class TriggerOrderBridge:
                 problems.append("executable intent missing quantity")
             if executable.target_weight_percent is not None:
                 problems.append("executable intent still carries target_weight_percent")
+            # 종목/시장/방향/원천 decision 이 발화 신호와 일치하는지 broker 호출 전 강제.
+            if executable.symbol != signal.symbol:
+                problems.append(
+                    f"symbol {executable.symbol!r} != signal.symbol {signal.symbol!r}"
+                )
+            if _scalar(executable.market) != _scalar(signal.market):
+                problems.append(
+                    f"market {_scalar(executable.market)!r} != signal.market {_scalar(signal.market)!r}"
+                )
+            expected_side = _ACTION_TO_SIDE.get(_scalar(signal.action))
+            if expected_side is None:
+                problems.append(f"unmappable signal.action {_scalar(signal.action)!r}")
+            elif executable.side != expected_side:
+                problems.append(
+                    f"side {executable.side.value!r} != expected {expected_side.value!r} "
+                    f"for action {_scalar(signal.action)!r}"
+                )
+            if executable.source_decision_id != _scalar(signal.decision_id):
+                problems.append(
+                    f"source_decision_id {executable.source_decision_id!r} "
+                    f"!= signal.decision_id {_scalar(signal.decision_id)!r}"
+                )
+            if executable.order_type != OrderType.MARKET:
+                problems.append(
+                    f"order_type {executable.order_type.value!r} != MARKET (v1 paper)"
+                )
+            if executable.account_role != AccountRole.PAPER:
+                problems.append(
+                    f"account_role {executable.account_role.value!r} != PAPER (v1 paper lane)"
+                )
         if problems:
             # 주문 미전송 상태이므로 ABORTED 안전 종료 후 raise(버그 surfacing).
             self._journal.mark_aborted(key, REASON_COHERENCE_FAILED, now)
             raise BridgeCoherenceError("; ".join(problems))
+
+    def _reconcile_after_broker_exception(
+        self, key: str, order_id: str, now: datetime
+    ) -> BridgeResult:
+        """broker.submit_order 예외 후 ledger 를 진실원천으로 재조회한다.
+
+        broker 가 ledger commit 직후 반환 과정에서 예외를 던질 수 있으므로, ledger 에 durable
+        terminal 결과가 있으면 그것으로 COMMIT 한다. 없거나(또는 재조회 자체가 실패하면)
+        nonterminal 이면 UNCERTAIN 으로 멈춘다(자동 재제출 금지).
+        """
+        durable: OrderResult | None
+        try:
+            durable = self._ledger.get_order_result(order_id)
+        except Exception:  # noqa: BLE001 — ledger 재조회 실패도 결과 불명확으로 처리
+            durable = None
+        result_status = (
+            _TERMINAL_RESULT_MAP.get(durable.status) if durable is not None else None
+        )
+        if result_status is not None:
+            record = self._journal.mark_committed(key, result_status, now)
+            return BridgeResult(BridgeOutcome.COMMITTED, record, None, durable)
+        record = self._journal.mark_uncertain(key, REASON_BROKER_EXCEPTION, now)
+        return BridgeResult(BridgeOutcome.UNCERTAIN, record, REASON_BROKER_EXCEPTION, None)
 
     def _abort(self, key: str, reason_code: str, now: datetime) -> BridgeResult:
         record = self._journal.mark_aborted(key, reason_code, now)

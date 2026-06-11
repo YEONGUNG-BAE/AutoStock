@@ -134,6 +134,57 @@ def test_threaded_concurrent_reserve_yields_exactly_one_new(tmp_path: Path) -> N
     assert count == 1
 
 
+def test_threaded_concurrent_mark_dispatching_yields_exactly_one(tmp_path: Path) -> None:
+    # 같은 RESERVED 행에 두 connection이 *동시에* 서로 다른 order_id로 mark_dispatching.
+    # 정확히 1개 성공, 나머지는 IllegalTransitionError, "database is locked" 미노출.
+    # 최종 상태는 DISPATCHING이며 order_id는 성공한 thread의 것.
+    path = tmp_path / "trigger_journal.sqlite3"
+    seed = SqliteTriggerJournal(path)
+    seed.reserve(_signal(), _NOW)
+    seed.close()
+
+    barrier = threading.Barrier(2)
+    successes: dict[str, str] = {}
+    illegal = 0
+    errors: list[Exception] = []
+    lock = threading.Lock()
+
+    def worker(name: str, order_id: str) -> None:
+        nonlocal illegal
+        try:
+            journal = SqliteTriggerJournal(path)
+            barrier.wait()
+            try:
+                journal.mark_dispatching("idem-1", order_id, _later(1))
+                with lock:
+                    successes[name] = order_id
+            except IllegalTransitionError:
+                with lock:
+                    illegal += 1
+            finally:
+                journal.close()
+        except Exception as exc:  # pragma: no cover - 실패 시 메인 스레드에서 surface
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(name, oid))
+        for name, oid in (("a", "order-aaa"), ("b", "order-bbb"))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []  # database-locked 등 외부 노출 없음
+    assert len(successes) == 1
+    assert illegal == 1
+    final = SqliteTriggerJournal(path)
+    record = final.get("idem-1")
+    assert record.state is JournalState.DISPATCHING
+    assert record.order_id == next(iter(successes.values()))
+    final.close()
+
+
 def test_same_key_mismatched_identity_raises_collision(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     journal.reserve(_signal(), _NOW)

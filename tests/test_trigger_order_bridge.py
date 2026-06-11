@@ -111,21 +111,25 @@ def _executable_intent(
     correlation_id: str = _IDEM,
     quantity: str = "42",
     target_weight_percent: str | None = None,
+    symbol: str = "005930",
+    side: OrderSide = OrderSide.BUY,
+    source_decision_id: str | None = _DECISION_ID,
 ) -> OrderIntent:
     return OrderIntent(
         order_id=order_id,
         correlation_id=correlation_id,
-        symbol="005930",
+        symbol=symbol,
         market=Market.KR,
         asset_class=AssetClass.KR_EQUITY,
         account_role=AccountRole.PAPER,
-        side=OrderSide.BUY,
+        side=side,
         order_type=OrderType.MARKET,
         execution_mode=ExecutionMode.NORMAL,
         quantity=Decimal(quantity) if quantity is not None else None,
         target_weight_percent=(
             Decimal(target_weight_percent) if target_weight_percent is not None else None
         ),
+        source_decision_id=source_decision_id,
         created_at=_NOW,
     )
 
@@ -546,59 +550,363 @@ def test_reconcile_record_rejects_terminal(tmp_path: Path) -> None:
         bridge.reconcile_record(aborted, now=_later(10))
 
 
-# --------------------------------------------------------------------- integration (real generator + resolver)
-def test_integration_real_generator_and_resolver_filled(tmp_path: Path) -> None:
-    """실제 OrderIntentGenerator + QuantityResolver + 실제 journal + fake broker/ledger 로
-    전체 경로가 FILLED commit 까지 가는지 확인한다(sizing 단계가 실제로 동작)."""
-    pytest.importorskip("risk")
-    from analysis import AnalysisAction
-    from domain import Money, Percent
-    from risk import OrderIntentGenerator, RiskFilterContext, RiskMode
-    from paper_loop import QuantityResolver
+# --------------------------------------------------------------------- identity coherence
+def test_preflight_risk_input_decision_mismatch_rejects(tmp_path: Path) -> None:
+    # 같은 decision_id 라도 risk_input.analysis_decision 이 bundle.decision 과 다르면 거절.
+    # (주문은 risk_input 에서 파생되므로 엉뚱한 종목/방향 주문을 막는 핵심 게이트.)
+    bridge, _, broker, journal = _bridge(tmp_path)
+    divergent = _FakeRiskInput(analysis_decision=_FakeDecision(symbol="000660"))
+    with pytest.raises(BridgePreflightError):
+        _dispatch(bridge, risk_input=divergent)
+    assert broker.calls == 0
+    assert journal.get(_IDEM) is None
 
-    # 실제 RiskFilterInput 을 만들기 위해 conftest factory 가 필요하지만, 여기서는
-    # generator/resolver 의 순수성만 검증하므로 fake gen/resolve 로 대체된 경로 외에
-    # 실제 resolver 의 sizing 결과를 직접 호출해 본다.
-    context = RiskFilterContext(
-        created_at=_NOW,
-        mode=RiskMode.NORMAL,
-        total_nav=Money.from_str("100000000", Currency.KRW),
-        cash=Money.from_str("100000000", Currency.KRW),
-        invested_amount=Money.from_str("0", Currency.KRW),
-        current_symbol_market_value=Money.from_str("0", Currency.KRW),
-    )
-    resolver = QuantityResolver()
-    resolution = resolver.resolve(
-        intent=_generated_target_weight_intent(),
-        context=context,
-        market_price=_market_price(),
-    )
-    assert resolution.status is QuantityResolutionStatus.RESOLVED
-    assert resolution.order_intent is not None
-    assert resolution.order_intent.quantity is not None
-    assert resolution.order_intent.target_weight_percent is None
-    assert resolution.order_intent.correlation_id == _IDEM
-    assert resolution.order_intent.order_id == _ORDER_ID
 
-    # 실제 resolver 산출 intent 를 그대로 bridge 에 흘려 FILLED commit 확인.
+def test_preflight_market_price_symbol_mismatch_rejects(tmp_path: Path) -> None:
+    bridge, _, broker, journal = _bridge(tmp_path)
+    wrong_price = MarketPrice(
+        symbol="000660", market=Market.KR, currency=Currency.KRW,
+        price=Decimal("70000"), as_of=_NOW,
+    )
+    with pytest.raises(BridgePreflightError):
+        _dispatch(bridge, market_price=wrong_price)
+    assert broker.calls == 0
+    assert journal.get(_IDEM) is None
+
+
+def test_executable_symbol_mismatch_aborts_and_raises(tmp_path: Path) -> None:
+    # resolver 가 다른 종목 intent 를 돌려주면 broker 호출 전에 차단된다.
+    bad = _executable_intent(symbol="000660")
+    bridge, _, broker, journal = _bridge(
+        tmp_path, resolve=_ResolveResult(QuantityResolutionStatus.RESOLVED, bad)
+    )
+    with pytest.raises(BridgeCoherenceError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+def test_executable_side_mismatch_aborts_and_raises(tmp_path: Path) -> None:
+    # signal.action == buy 인데 resolved intent.side == SELL → 차단.
+    bad = _executable_intent(side=OrderSide.SELL)
+    bridge, _, broker, journal = _bridge(
+        tmp_path, resolve=_ResolveResult(QuantityResolutionStatus.RESOLVED, bad)
+    )
+    with pytest.raises(BridgeCoherenceError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+def test_executable_source_decision_mismatch_aborts_and_raises(tmp_path: Path) -> None:
+    bad = _executable_intent(source_decision_id="analysis-OTHER")
+    bridge, _, broker, journal = _bridge(
+        tmp_path, resolve=_ResolveResult(QuantityResolutionStatus.RESOLVED, bad)
+    )
+    with pytest.raises(BridgeCoherenceError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+# --------------------------------------------------------------------- pre-dispatch exceptions
+class _RaisingGenerator:
+    def generate(self, risk_input: object):
+        raise RuntimeError("generator boom")
+
+
+class _RaisingResolver:
+    def resolve(self, **kwargs: object):
+        raise RuntimeError("resolver boom")
+
+
+def test_generator_exception_aborts_no_orphan(tmp_path: Path) -> None:
+    from execution.trigger_order_bridge import BridgeDependencyError
+
+    journal = _journal(tmp_path)
     ledger = _FakeLedger()
+    broker = _FakeBroker(ledger=ledger, result=_order_result(OrderStatus.FILLED))
+    bridge = TriggerOrderBridge(
+        journal=journal,
+        generator=_RaisingGenerator(),
+        resolver=_FakeResolver(
+            _ResolveResult(QuantityResolutionStatus.RESOLVED, _executable_intent())
+        ),
+        broker=broker,
+        ledger=ledger,
+    )
+    with pytest.raises(BridgeDependencyError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    # 고아 RESERVED 가 아니라 ABORTED 로 닫혔는지 확인.
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+def test_resolver_exception_aborts_no_orphan(tmp_path: Path) -> None:
+    from execution.trigger_order_bridge import BridgeDependencyError
+
+    journal = _journal(tmp_path)
+    ledger = _FakeLedger()
+    broker = _FakeBroker(ledger=ledger, result=_order_result(OrderStatus.FILLED))
+    bridge = TriggerOrderBridge(
+        journal=journal,
+        generator=_FakeGenerator(
+            _GenResult(OrderGenerationStatus.GENERATED, _generated_target_weight_intent())
+        ),
+        resolver=_RaisingResolver(),
+        broker=broker,
+        ledger=ledger,
+    )
+    with pytest.raises(BridgeDependencyError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+def test_ledger_preflight_exception_aborts_no_orphan(tmp_path: Path) -> None:
+    from execution.trigger_order_bridge import BridgeDependencyError
+
+    class _RaisingLedger:
+        def has_processed_order(self, order_id: str) -> bool:
+            return False
+
+        def get_order_result(self, order_id: str):
+            raise RuntimeError("ledger boom")
+
+    journal = _journal(tmp_path)
+    broker = _FakeBroker(ledger=_FakeLedger(), result=_order_result(OrderStatus.FILLED))
+    bridge = TriggerOrderBridge(
+        journal=journal,
+        generator=_FakeGenerator(
+            _GenResult(OrderGenerationStatus.GENERATED, _generated_target_weight_intent())
+        ),
+        resolver=_FakeResolver(
+            _ResolveResult(QuantityResolutionStatus.RESOLVED, _executable_intent())
+        ),
+        broker=broker,
+        ledger=_RaisingLedger(),
+    )
+    with pytest.raises(BridgeDependencyError):
+        _dispatch(bridge)
+    assert broker.calls == 0
+    assert journal.get(_IDEM).state is JournalState.ABORTED
+
+
+# --------------------------------------------------------------------- broker-exception ledger reconcile
+def test_broker_exception_with_ledger_fill_commits(tmp_path: Path) -> None:
+    # broker 가 ledger 에 FILLED 를 commit 한 직후 예외를 던지면, bridge 는 ledger 를 재조회해
+    # COMMITTED(FILLED) 로 닫아야 한다(반환값 불신·진실원천 일관성).
+    ledger = _FakeLedger()
+
+    class _CommitThenRaiseBroker:
+        calls = 0
+
+        def submit_order(self, intent: OrderIntent, market_price: MarketPrice) -> OrderResult:
+            self.calls += 1
+            ledger.set_durable(_order_result(OrderStatus.FILLED))
+            raise RuntimeError("post-commit broker boom")
+
     journal = _journal(tmp_path)
     bridge = TriggerOrderBridge(
         journal=journal,
         generator=_FakeGenerator(
             _GenResult(OrderGenerationStatus.GENERATED, _generated_target_weight_intent())
         ),
-        resolver=resolver,
-        broker=_FakeBroker(ledger=ledger, result=_order_result(OrderStatus.FILLED)),
+        resolver=_FakeResolver(
+            _ResolveResult(QuantityResolutionStatus.RESOLVED, _executable_intent())
+        ),
+        broker=_CommitThenRaiseBroker(),
         ledger=ledger,
     )
+    result = _dispatch(bridge)
+    assert result.outcome is BridgeOutcome.COMMITTED
+    assert result.order_result.status == OrderStatus.FILLED
+    record = journal.get(_IDEM)
+    assert record.state is JournalState.COMMITTED
+    assert record.result_status == "FILLED"
+
+
+def test_broker_exception_without_ledger_record_uncertain(tmp_path: Path) -> None:
+    # broker 가 ledger 에 아무것도 commit 하지 않고 예외 → UNCERTAIN.
+    bridge, _, broker, journal = _bridge(tmp_path, broker_raises=True)
+    result = _dispatch(bridge)
+    assert result.outcome is BridgeOutcome.UNCERTAIN
+    assert result.reason_code == "broker_exception"
+    assert journal.get(_IDEM).state is JournalState.UNCERTAIN
+
+
+# --------------------------------------------------------------------- full-stack integration
+def test_integration_full_stack_filled(tmp_path: Path, sample_risk_input_factory) -> None:
+    """real OrderIntentGenerator + QuantityResolver + PaperBrokerAdapter + SQLiteLedger +
+    SqliteTriggerJournal 로 발화→주문 전 경로를 FILLED commit 까지 검증한다.
+
+    동일 AnalysisDecision 을 bundle.decision 과 risk_input.analysis_decision 양쪽에 써서
+    identity coherence 게이트가 실제 객체에서도 통과하는지 확인한다."""
+    from analysis import AnalysisAction
+    from domain import Money, Percent
+    from domain.enums import AccountRole as _AccountRole
+    from domain.identifiers import DecisionId
+    from domain.position import CashSnapshot
+    from ledger.sqlite_ledger import SQLiteLedger
+    from broker.paper_broker import PaperBrokerAdapter
+    from risk import OrderIntentGenerator
+    from paper_loop import QuantityResolver
+    from market_data.conditions import Comparator, ConditionClause, Metric
+    from market_data.trigger_engine import DecisionTriggerBundle, TriggerPlan, TriggerSignal
+
+    idem = "idem-int-1"
+    risk_input = sample_risk_input_factory(
+        action=AnalysisAction.BUY,
+        target_weight_percent=Percent("4"),
+        correlation_id=idem,
+        context_overrides={
+            "current_symbol_market_value": Money.from_str("3000000", Currency.KRW),
+            "current_symbol_cumulative_buy_cost": Money.from_str("1000000", Currency.KRW),
+        },
+    )
+    analysis = risk_input.analysis_decision
+    created = analysis.created_at
+
+    plan = TriggerPlan(
+        plan_id="plan-int-1",
+        decision_id=analysis.decision_id,
+        created_at=created,
+        valid_from=created,
+        expires_at=created + timedelta(days=1),
+        universe=analysis.universe,
+        market=Market.KR,
+        symbol=analysis.symbol,
+        action=AnalysisAction.BUY,
+        rules=(ConditionClause(metric=Metric.LAST_TRADE_PRICE, comparator=Comparator.LTE, threshold="100000"),),
+    )
+    bundle = DecisionTriggerBundle(decision=analysis, plan=plan)
+    signal = TriggerSignal(
+        trigger_id="trig-int-1",
+        idempotency_key=idem,
+        decision_id=analysis.decision_id,
+        plan_id="plan-int-1",
+        market=Market.KR,
+        symbol=analysis.symbol,
+        action=AnalysisAction.BUY,
+        reference_price=Decimal("70000"),
+        triggered_at=created,
+        condition_values=(),
+    )
+    market_price = MarketPrice(
+        symbol=analysis.symbol, market=Market.KR, currency=Currency.KRW,
+        price=Decimal("70000"), as_of=created,
+    )
+
+    ledger = SQLiteLedger(tmp_path / "ledger.sqlite3")
+    broker = PaperBrokerAdapter(
+        ledger,
+        initial_cash=CashSnapshot(
+            currency=Currency.KRW,
+            amount=Decimal("100000000"),
+            account_role=_AccountRole.PAPER,
+            as_of=created,
+        ),
+    )
+    journal = SqliteTriggerJournal(tmp_path / "journal.sqlite3")
+    bridge = TriggerOrderBridge(
+        journal=journal,
+        generator=OrderIntentGenerator(),
+        resolver=QuantityResolver(),
+        broker=broker,
+        ledger=ledger,
+    )
+
     result = bridge.dispatch(
-        signal=_FakeSignal(),
-        bundle=_FakeBundle(),
-        risk_input=_FakeRiskInput(context=context),
-        market_price=_market_price(),
+        signal=signal,
+        bundle=bundle,
+        risk_input=risk_input,
+        market_price=market_price,
         current_position_quantity=None,
-        now=_NOW,
+        now=created,
     )
     assert result.outcome is BridgeOutcome.COMMITTED
-    assert journal.get(_IDEM).state is JournalState.COMMITTED
+    assert result.order_result is not None
+    assert result.order_result.status == OrderStatus.FILLED
+    record = journal.get(idem)
+    assert record.state is JournalState.COMMITTED
+    assert record.result_status == "FILLED"
+    assert record.order_id == f"order-{analysis.decision_id.value}"
+    # ledger 에 실제 체결/포지션이 남았는지 확인(진짜 broker write path).
+    assert ledger.get_order_result(record.order_id).status == OrderStatus.FILLED
+    assert ledger.get_fill_by_order_id(record.order_id) is not None
+
+
+def test_integration_full_stack_identity_mismatch_blocks(
+    tmp_path: Path, sample_risk_input_factory
+) -> None:
+    """real 컴포넌트에서 risk_input 이 signal/bundle 과 다른 종목이면 preflight 가 막아
+    broker write 가 일어나지 않는지 확인한다(핵심 식별자 blocker 회귀)."""
+    from analysis import AnalysisAction
+    from domain import Money, Percent
+    from domain.enums import AccountRole as _AccountRole
+    from domain.position import CashSnapshot
+    from ledger.sqlite_ledger import SQLiteLedger
+    from broker.paper_broker import PaperBrokerAdapter
+    from risk import OrderIntentGenerator
+    from paper_loop import QuantityResolver
+    from market_data.conditions import Comparator, ConditionClause, Metric
+    from market_data.trigger_engine import DecisionTriggerBundle, TriggerPlan, TriggerSignal
+
+    idem = "idem-int-2"
+    # bundle/signal 은 005930, 그러나 risk_input 은 000660 (같은 decision_id).
+    bundle_risk_input = sample_risk_input_factory(
+        action=AnalysisAction.BUY, target_weight_percent=Percent("4"), correlation_id=idem,
+        context_overrides={
+            "current_symbol_market_value": Money.from_str("3000000", Currency.KRW),
+            "current_symbol_cumulative_buy_cost": Money.from_str("1000000", Currency.KRW),
+        },
+    )
+    analysis = bundle_risk_input.analysis_decision
+    created = analysis.created_at
+    divergent_risk_input = sample_risk_input_factory(
+        action=AnalysisAction.BUY, target_weight_percent=Percent("4"), correlation_id=idem,
+        symbol="000660",
+        context_overrides={
+            "current_symbol_market_value": Money.from_str("3000000", Currency.KRW),
+            "current_symbol_cumulative_buy_cost": Money.from_str("1000000", Currency.KRW),
+        },
+    )
+
+    plan = TriggerPlan(
+        plan_id="plan-int-2", decision_id=analysis.decision_id, created_at=created,
+        valid_from=created, expires_at=created + timedelta(days=1), universe=analysis.universe,
+        market=Market.KR, symbol=analysis.symbol, action=AnalysisAction.BUY,
+        rules=(ConditionClause(metric=Metric.LAST_TRADE_PRICE, comparator=Comparator.LTE, threshold="100000"),),
+    )
+    bundle = DecisionTriggerBundle(decision=analysis, plan=plan)
+    signal = TriggerSignal(
+        trigger_id="trig-int-2", idempotency_key=idem, decision_id=analysis.decision_id,
+        plan_id="plan-int-2", market=Market.KR, symbol=analysis.symbol, action=AnalysisAction.BUY,
+        reference_price=Decimal("70000"), triggered_at=created, condition_values=(),
+    )
+    market_price = MarketPrice(
+        symbol=analysis.symbol, market=Market.KR, currency=Currency.KRW,
+        price=Decimal("70000"), as_of=created,
+    )
+    ledger = SQLiteLedger(tmp_path / "ledger.sqlite3")
+    broker = PaperBrokerAdapter(
+        ledger,
+        initial_cash=CashSnapshot(
+            currency=Currency.KRW, amount=Decimal("100000000"),
+            account_role=_AccountRole.PAPER, as_of=created,
+        ),
+    )
+    journal = SqliteTriggerJournal(tmp_path / "journal.sqlite3")
+    bridge = TriggerOrderBridge(
+        journal=journal, generator=OrderIntentGenerator(), resolver=QuantityResolver(),
+        broker=broker, ledger=ledger,
+    )
+
+    with pytest.raises(BridgePreflightError):
+        bridge.dispatch(
+            signal=signal, bundle=bundle, risk_input=divergent_risk_input,
+            market_price=market_price, current_position_quantity=None, now=created,
+        )
+    # 아무 주문도 ledger 에 쓰이지 않았다.
+    assert ledger.get_order_result(f"order-{analysis.decision_id.value}") is None
+    assert journal.get(idem) is None

@@ -28,6 +28,7 @@ from execution.trigger_journal import (
 from execution.sqlite_trigger_journal import SqliteTriggerJournal
 from execution.trigger_order_bridge import (
     BridgeCoherenceError,
+    BridgeDependencyError,
     BridgeError,
     BridgeOutcome,
     BridgePreflightError,
@@ -45,6 +46,7 @@ from execution.trigger_order_bridge import (
 
 __all__ = [
     "BridgeCoherenceError",
+    "BridgeDependencyError",
     "BridgeError",
     "BridgeOutcome",
     "BridgePreflightError",
