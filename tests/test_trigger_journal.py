@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +19,9 @@ from execution.sqlite_trigger_journal import SqliteTriggerJournal
 from execution.trigger_journal import (
     IdentityCollisionError,
     IllegalTransitionError,
+    JournalResultStatus,
     JournalState,
+    NonMonotonicTimestampError,
     OrderIdConflictError,
     RecordNotFoundError,
     ReserveOutcome,
@@ -84,7 +87,8 @@ def test_duplicate_reserve_creates_no_new_row(tmp_path: Path) -> None:
     assert count == 1
 
 
-def test_concurrent_same_key_reserve_yields_exactly_one_new(tmp_path: Path) -> None:
+def test_sequential_two_connection_reserve_yields_one_new(tmp_path: Path) -> None:
+    # 서로 다른 두 connection의 *순차* duplicate reserve (race 아님).
     path = tmp_path / "trigger_journal.sqlite3"
     journal_a = SqliteTriggerJournal(path)
     journal_b = SqliteTriggerJournal(path)
@@ -94,6 +98,39 @@ def test_concurrent_same_key_reserve_yields_exactly_one_new(tmp_path: Path) -> N
     assert outcomes.count(ReserveOutcome.RESERVED_NEW) == 1
     assert ReserveOutcome.EXISTING_PENDING in outcomes
     count = journal_a._conn.execute("SELECT COUNT(*) FROM trigger_fire_journal").fetchone()[0]
+    assert count == 1
+
+
+def test_threaded_concurrent_reserve_yields_exactly_one_new(tmp_path: Path) -> None:
+    # threading.Barrier로 두 thread가 같은 key를 *실제 동시* reserve. 정확히 1 NEW + 1 PENDING,
+    # "database is locked" 미노출(busy_timeout으로 경합 흡수).
+    path = tmp_path / "trigger_journal.sqlite3"
+    SqliteTriggerJournal(path).close()  # 스키마 먼저 생성(테이블 경합 제거).
+    barrier = threading.Barrier(2)
+    results: dict[str, ReserveOutcome] = {}
+    errors: list[Exception] = []
+
+    def worker(name: str) -> None:
+        try:
+            journal = SqliteTriggerJournal(path)
+            barrier.wait()
+            results[name] = journal.reserve(_signal(), _NOW).outcome
+            journal.close()
+        except Exception as exc:  # pragma: no cover - 실패 시 메인 스레드에서 surface
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    outcomes = list(results.values())
+    assert outcomes.count(ReserveOutcome.RESERVED_NEW) == 1
+    assert outcomes.count(ReserveOutcome.EXISTING_PENDING) == 1
+    final = SqliteTriggerJournal(path)
+    count = final._conn.execute("SELECT COUNT(*) FROM trigger_fire_journal").fetchone()[0]
     assert count == 1
 
 
@@ -345,3 +382,133 @@ def test_transaction_rollback_leaves_no_partial_row(tmp_path: Path) -> None:
             )
             raise RuntimeError("boom")
     assert journal.get("idem-x") is None
+
+
+# --- terminal 전이 회귀(ABORTED / UNCERTAIN) ---
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda j: j.mark_dispatching("idem-1", "order-x", _later(5)),
+        lambda j: j.mark_committed("idem-1", "FILLED", _later(5)),
+        lambda j: j.mark_aborted("idem-1", "x", _later(5)),
+        lambda j: j.mark_uncertain("idem-1", "x", _later(5)),
+    ],
+)
+def test_no_transition_out_of_terminal_aborted(tmp_path: Path, operation) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_aborted("idem-1", "risk_reject", _later(1))
+    with pytest.raises(IllegalTransitionError):
+        operation(journal)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda j: j.mark_dispatching("idem-1", "order-x", _later(5)),
+        lambda j: j.mark_committed("idem-1", "FILLED", _later(5)),
+        lambda j: j.mark_aborted("idem-1", "x", _later(5)),
+        lambda j: j.mark_uncertain("idem-1", "x", _later(5)),
+    ],
+)
+def test_no_transition_out_of_terminal_uncertain(tmp_path: Path, operation) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(1))
+    journal.mark_uncertain("idem-1", "restart_unknown", _later(2))
+    with pytest.raises(IllegalTransitionError):
+        operation(journal)
+
+
+def test_repeated_commit_rejected(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(1))
+    journal.mark_committed("idem-1", "FILLED", _later(2))
+    with pytest.raises(IllegalTransitionError):
+        journal.mark_committed("idem-1", "FILLED", _later(3))
+
+
+# --- result_status enum 검증 ---
+
+
+def test_commit_rejects_unknown_result_status(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(1))
+    with pytest.raises(TriggerJournalError):
+        journal.mark_committed("idem-1", "teleport", _later(2))
+
+
+def test_commit_rejects_bool_result_status(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(1))
+    with pytest.raises(TriggerJournalError):
+        journal.mark_committed("idem-1", True, _later(2))  # type: ignore[arg-type]
+
+
+def test_commit_accepts_journal_result_status_enum(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(1))
+    record = journal.mark_committed("idem-1", JournalResultStatus.PARTIALLY_FILLED, _later(2))
+    assert record.result_status == "PARTIALLY_FILLED"
+
+
+# --- timestamp 단조성 ---
+
+
+def test_reserve_rejects_triggered_after_reserved(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    with pytest.raises(NonMonotonicTimestampError):
+        journal.reserve(_signal(triggered_at=_later(10)), _NOW)
+    assert journal.get("idem-1") is None
+
+
+def test_transition_rejects_backward_time(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    journal.mark_dispatching("idem-1", "order-dec-1", _later(5))
+    with pytest.raises(NonMonotonicTimestampError):
+        journal.mark_committed("idem-1", "FILLED", _later(1))
+    # 역행 시도는 거부되고 상태/시각은 보존된다(rollback).
+    record = journal.get("idem-1")
+    assert record is not None
+    assert record.state is JournalState.DISPATCHING
+
+
+def test_transition_allows_equal_time(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.reserve(_signal(), _NOW)
+    record = journal.mark_dispatching("idem-1", "order-dec-1", _NOW)
+    assert record.state is JournalState.DISPATCHING
+
+
+# --- mixed-offset 정렬 / UTC canonical 저장 ---
+
+
+def test_list_nonterminal_orders_by_absolute_time_across_offsets(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    kst = timezone(timedelta(hours=9))
+    # A: 2026-06-11T09:00+09:00 == 00:00Z (절대적으로 더 이름)
+    a_at = datetime(2026, 6, 11, 9, 0, 0, tzinfo=kst)
+    # B: 2026-06-11T08:00+00:00 == 08:00Z (절대적으로 더 늦음)
+    b_at = datetime(2026, 6, 11, 8, 0, 0, tzinfo=timezone.utc)
+    # raw isoformat 문자열 정렬이면 "08:00..+00:00" < "09:00..+09:00" 라 B가 먼저 와 틀린다.
+    journal.reserve(_signal(idempotency_key="A", decision_id="dec-a", triggered_at=a_at), a_at)
+    journal.reserve(_signal(idempotency_key="B", decision_id="dec-b", triggered_at=b_at), b_at)
+    keys = [record.idempotency_key for record in journal.list_nonterminal()]
+    assert keys == ["A", "B"]
+
+
+def test_stored_datetimes_are_normalized_to_utc(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    kst = timezone(timedelta(hours=9))
+    at = datetime(2026, 6, 11, 9, 0, 0, tzinfo=kst)
+    record = journal.reserve(_signal(triggered_at=at), at).record
+    assert record.reserved_at.utcoffset() == timedelta(0)
+    assert record.triggered_at.utcoffset() == timedelta(0)
+    assert record.reserved_at == at  # 동일 절대시각

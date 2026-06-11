@@ -10,7 +10,9 @@ from __future__ import annotations
 from execution.trigger_journal import (
     IdentityCollisionError,
     IllegalTransitionError,
+    JournalResultStatus,
     JournalState,
+    NonMonotonicTimestampError,
     OrderIdConflictError,
     RecordNotFoundError,
     ReserveOutcome,
@@ -26,7 +28,9 @@ from execution.sqlite_trigger_journal import SqliteTriggerJournal
 __all__ = [
     "IdentityCollisionError",
     "IllegalTransitionError",
+    "JournalResultStatus",
     "JournalState",
+    "NonMonotonicTimestampError",
     "OrderIdConflictError",
     "RecordNotFoundError",
     "ReserveOutcome",

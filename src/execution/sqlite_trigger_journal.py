@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Iterator
@@ -19,7 +19,9 @@ from domain.enums import Market
 from execution.trigger_journal import (
     IdentityCollisionError,
     IllegalTransitionError,
+    JournalResultStatus,
     JournalState,
+    NonMonotonicTimestampError,
     OrderIdConflictError,
     RecordNotFoundError,
     ReserveOutcome,
@@ -29,6 +31,9 @@ from execution.trigger_journal import (
     TriggerJournalError,
     TriggerJournalRecord,
 )
+
+# write 경합 시 "database is locked" 대신 이 시간만큼 대기한다(동시 reserve 정책 고정).
+_BUSY_TIMEOUT_SECONDS = 5.0
 
 _IDENTITY_FIELDS =("trigger_id", "decision_id", "plan_id", "market", "symbol", "action")
 
@@ -60,7 +65,9 @@ CREATE TABLE IF NOT EXISTS trigger_fire_journal (
 
 
 def _dt_to_str(value: datetime) -> str:
-    return value.isoformat()
+    # 모든 datetime을 UTC로 normalize해서 저장한다. 그래야 TEXT(ISO-8601) 문자열 정렬이
+    # 절대시간 순서와 일치한다(서로 다른 offset이 섞여도 list_nonterminal 정렬이 안전).
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _str_to_dt(value: str | None, *, field_name: str) -> datetime | None:
@@ -108,8 +115,14 @@ class SqliteTriggerJournal:
     """TriggerJournal 의 SQLite 구현."""
 
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), timeout=_BUSY_TIMEOUT_SECONDS)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute(f"PRAGMA busy_timeout = {int(_BUSY_TIMEOUT_SECONDS * 1000)}")
+        # 파일 DB는 WAL로 동시 reader/writer 경합을 줄인다(:memory:는 WAL 미지원이라 무시).
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:  # pragma: no cover - :memory: 등
+            pass
         self._depth = 0
         self._init_schema()
 
@@ -142,6 +155,13 @@ class SqliteTriggerJournal:
     def reserve(self, signal: TriggerFireSignal, now: datetime) -> ReserveResult:
         aware_now = require_timezone_aware_datetime(now, field_name="now")
         fields = self._coerce_signal(signal)
+        triggered_at = fields["triggered_at"]
+        assert isinstance(triggered_at, datetime)
+        if triggered_at > aware_now:
+            raise NonMonotonicTimestampError(
+                f"triggered_at {triggered_at.isoformat()} is after reserved_at "
+                f"{aware_now.isoformat()}."
+            )
         now_str = _dt_to_str(aware_now)
         try:
             with self.transaction():
@@ -195,6 +215,7 @@ class SqliteTriggerJournal:
             self._guarded_update(
                 idempotency_key,
                 expected=JournalState.RESERVED,
+                now=aware_now,
                 sql="""
                     UPDATE trigger_fire_journal
                     SET state = ?, order_id = ?, dispatching_at = ?, updated_at = ?
@@ -214,14 +235,17 @@ class SqliteTriggerJournal:
         return self._require_record(idempotency_key)
 
     def mark_committed(
-        self, idempotency_key: str, result_status: str, now: datetime
+        self, idempotency_key: str, result_status: JournalResultStatus | str, now: datetime
     ) -> TriggerJournalRecord:
         aware_now = require_timezone_aware_datetime(now, field_name="now")
-        status_text = _require_nonblank(result_status, field_name="result_status")
+        status_text = _coerce_enum(
+            result_status, JournalResultStatus, field_name="result_status"
+        )
         now_str = _dt_to_str(aware_now)
         self._guarded_update(
             idempotency_key,
             expected=JournalState.DISPATCHING,
+            now=aware_now,
             sql="""
                 UPDATE trigger_fire_journal
                 SET state = ?, result_status = ?, finalized_at = ?, updated_at = ?
@@ -247,6 +271,7 @@ class SqliteTriggerJournal:
         self._guarded_update(
             idempotency_key,
             expected=JournalState.RESERVED,
+            now=aware_now,
             sql="""
                 UPDATE trigger_fire_journal
                 SET state = ?, reason_code = ?, finalized_at = ?, updated_at = ?
@@ -272,6 +297,7 @@ class SqliteTriggerJournal:
         self._guarded_update(
             idempotency_key,
             expected=JournalState.DISPATCHING,
+            now=aware_now,
             sql="""
                 UPDATE trigger_fire_journal
                 SET state = ?, reason_code = ?, finalized_at = ?, updated_at = ?
@@ -311,17 +337,32 @@ class SqliteTriggerJournal:
     # --- 내부 helper ---
 
     def _guarded_update(
-        self, idempotency_key: str, *, expected: JournalState, sql: str, params: tuple[object, ...]
+        self,
+        idempotency_key: str,
+        *,
+        expected: JournalState,
+        now: datetime,
+        sql: str,
+        params: tuple[object, ...],
     ) -> None:
         with self.transaction():
-            cursor = self._conn.execute(sql, params)
-            if cursor.rowcount != 1:
-                existing = self.get(idempotency_key)
-                if existing is None:
-                    raise RecordNotFoundError(f"no journal record for {idempotency_key!r}.")
+            existing = self.get(idempotency_key)
+            if existing is None:
+                raise RecordNotFoundError(f"no journal record for {idempotency_key!r}.")
+            if existing.state is not expected:
                 raise IllegalTransitionError(
                     f"{idempotency_key!r}: expected state {expected.value!r}, "
                     f"found {existing.state.value!r}."
+                )
+            if now < existing.updated_at:
+                raise NonMonotonicTimestampError(
+                    f"{idempotency_key!r}: transition time {now.isoformat()} precedes "
+                    f"updated_at {existing.updated_at.isoformat()}."
+                )
+            cursor = self._conn.execute(sql, params)
+            if cursor.rowcount != 1:  # pragma: no cover - 선검사 통과 후 race에서만 발생
+                raise IllegalTransitionError(
+                    f"{idempotency_key!r}: concurrent transition lost the CAS race."
                 )
 
     def _coerce_signal(self, signal: TriggerFireSignal) -> dict[str, object]:

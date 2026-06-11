@@ -52,6 +52,20 @@ class ReserveOutcome(StrEnum):
     EXISTING_PENDING = "existing_pending"
 
 
+class JournalResultStatus(StrEnum):
+    """COMMITTED 시 기록되는 주문 결과 분류(execution 전용; ledger/broker enum 미import).
+
+    bridge(F1b)가 broker/ledger 결과를 이 추상 enum 으로 매핑한다. journal 은 임의 문자열을
+    COMMITTED 결과로 받지 않는다.
+    """
+
+    FILLED = "FILLED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    PENDING = "PENDING"
+
+
 class TriggerJournalError(Exception):
     """trigger journal 공통 에러 base."""
 
@@ -70,6 +84,10 @@ class IdentityCollisionError(TriggerJournalError):
 
 class OrderIdConflictError(TriggerJournalError):
     """이미 다른 fire 가 점유한 order_id 를 재사용하려는 시도."""
+
+
+class NonMonotonicTimestampError(TriggerJournalError):
+    """전이 시각이 직전 단계 시각보다 과거로 역행(시계 역행/순서 오류)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +156,9 @@ class TriggerJournal(Protocol):
         """RESERVED → DISPATCHING. order_id 는 전역 UNIQUE."""
 
     def mark_committed(
-        self, idempotency_key: str, result_status: str, now: datetime
+        self, idempotency_key: str, result_status: JournalResultStatus | str, now: datetime
     ) -> TriggerJournalRecord:
-        """DISPATCHING → COMMITTED."""
+        """DISPATCHING → COMMITTED. result_status 는 JournalResultStatus 로 검증된다."""
 
     def mark_aborted(
         self, idempotency_key: str, reason_code: str, now: datetime
