@@ -560,7 +560,7 @@ def test_integration_empty_account_buy_filled_canonical_sizing(tmp_path: Path, s
     ).build_context(
         symbol="005930", market=Market.KR,
         proposed_price=MarketPrice(symbol="005930", market=Market.KR, currency=KRW, price=Decimal(_PRICE), as_of=NOW),
-        policy=_policy(), now=NOW,
+        current_snapshot=_snap(), policy=_policy(), now=NOW,
     )
     assert val.cash.amount == Decimal("96010000")
     assert val.invested_amount.amount == Decimal("3990000")  # 57 * 70000
@@ -651,11 +651,14 @@ def test_integration_restart_reopen_same_db_no_duplicate(tmp_path: Path, sample_
 
 
 def test_integration_stale_portfolio_mark_no_fire_then_retry_fills(tmp_path: Path, sample_risk_input_factory) -> None:
-    # 핵심 회귀(pre-fire): 첫 tick 에 포트폴리오 mark 가 stale → 발화 전 fail-closed, broker 0,
-    # fire budget 미소비. 둘째 tick 에 fresh → 같은 결정/엔진으로 정상 발화→체결.
+    # 핵심 회귀(pre-fire): 발화 전에 포트폴리오 의존성(보유 종목 mark)이 stale 면 fail-closed,
+    # broker 0, fire budget 미소비. 둘째 tick 에 fresh → 같은 결정/엔진으로 정상 발화→체결.
+    # 대상 종목 mark 는 coordinator 의 snapshot 에서 오므로(정합 보장), stale 시나리오는
+    # *대상이 아닌 보유 종목*(000660)의 market-source mark 로 재현한다.
     market = _FakeMarket()
-    market.set("005930", Market.KR, _snap(quote_fresh=False))  # stale portfolio mark
+    market.set("000660", Market.KR, _snap(symbol="000660", quote_fresh=False))  # stale held mark
     coord, engine, _, broker, ledger, journal, _ = _real_stack(tmp_path, market=market)
+    _seed_position(broker, quantity="10", symbol="000660")  # 보유 종목(대상 아님), 10*70000=0.7M
     ri, bundle = _bundle(sample_risk_input_factory, correlation_id="idem-retry")
 
     first = coord.process(
@@ -669,8 +672,8 @@ def test_integration_stale_portfolio_mark_no_fire_then_retry_fills(tmp_path: Pat
     assert ledger.get_order_result(order_id) is None  # broker 0
     assert journal.get("idem-retry") is None
 
-    # mark 를 fresh 로 복구. 같은 engine/coord 로 재처리 → fire 가 소비되지 않았으므로 정상 발화.
-    market.set("005930", Market.KR, _snap(quote_fresh=True))  # fresh portfolio mark
+    # 보유 종목 mark 를 fresh 로 복구. 같은 engine/coord 로 재처리 → fire 미소비라 정상 발화.
+    market.set("000660", Market.KR, _snap(symbol="000660", quote_fresh=True))  # fresh held mark
     second = coord.process(
         bundle=bundle, snapshot=_snap(), permission=_permission(),
         allocator_decision=ri.allocator_decision, portfolio_policy=_policy(), now=NOW,
@@ -678,6 +681,7 @@ def test_integration_stale_portfolio_mark_no_fire_then_retry_fills(tmp_path: Pat
     assert second.status is CoordinatorStatus.COMMITTED
     assert second.order_result.status is OrderStatus.FILLED
     assert ledger.get_fill_by_order_id(order_id) is not None
+    # NAV = 99.3M cash + 0.7M(000660) = 100M → 4% target 4M / 70000 = 57주.
     assert broker.get_position("005930", Market.KR, AccountRole.PAPER).quantity == Decimal("57")
 
 

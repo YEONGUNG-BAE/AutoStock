@@ -111,8 +111,8 @@ def _position(
     )
 
 
-def _proposed(*, symbol: str = "005930", market: Market = Market.KR, price: str = "70000", currency: Currency = KRW) -> MarketPrice:
-    return MarketPrice(symbol=symbol, market=market, currency=currency, price=Decimal(price), as_of=NOW)
+def _proposed(*, symbol: str = "005930", market: Market = Market.KR, price: str = "70000", currency: Currency = KRW, as_of: datetime = NOW) -> MarketPrice:
+    return MarketPrice(symbol=symbol, market=market, currency=currency, price=Decimal(price), as_of=as_of)
 
 
 @dataclass
@@ -160,7 +160,7 @@ def _policy(**overrides: object) -> PaperPortfolioPolicy:
 def test_cash_only_no_position_nav_equals_cash_invested_zero() -> None:
     svc = _service(_FakeLedger(cash=_cash("100000000")), _FakeMarket())
     val = svc.build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
     )
     assert val.cash.amount == Decimal("100000000")
     assert val.invested_amount.amount == Decimal("0")
@@ -182,10 +182,10 @@ def test_cash_only_no_position_nav_equals_cash_invested_zero() -> None:
 def test_single_kr_position_invested_nav_cumulative_weight_exact() -> None:
     # midpoint=(69000+71000)/2=70000; 100주 → market_value 7M, cumulative 100*60000=6M.
     quote = _quote(bid="69000", ask="71000")
-    market = _FakeMarket(snapshots={("005930", Market.KR): _snap(quote=quote)})
+    snap = _snap(quote=quote)
     ledger = _FakeLedger(cash=_cash("93000000"), positions=(_position(quantity="100", avg_cost="60000"),))
-    val = _service(ledger, market).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(price="71000"), policy=_policy(), now=NOW
+    val = _service(ledger, _FakeMarket()).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(price="71000"), current_snapshot=snap, policy=_policy(), now=NOW
     )
     assert val.invested_amount.amount == Decimal("7000000")
     assert val.total_nav.amount == Decimal("100000000")  # 93M + 7M
@@ -193,14 +193,13 @@ def test_single_kr_position_invested_nav_cumulative_weight_exact() -> None:
     assert val.current_symbol_cumulative_buy_cost.amount == Decimal("6000000")
     assert val.current_symbol_weight_percent == Percent("7")
     assert val.position_quantity == Decimal("100")
-    assert val.marks["005930"].price == Decimal("70000")
+    assert val.marks[(Market.KR, "005930")].price == Decimal("70000")
 
 
 def test_multiple_positions_invested_sum_and_asset_buckets() -> None:
     # 005930(KR) 100주@70000 mark = 7M; AAPL...gold 대신 GOLD ETF 50주@40000 mark = 2M.
     market = _FakeMarket(
         snapshots={
-            ("005930", Market.KR): _snap(quote=_quote(bid="70000", ask="70000")),
             ("411060", Market.KR): _snap(symbol="411060", quote=_quote(symbol="411060", bid="40000", ask="40000")),
         }
     )
@@ -212,7 +211,8 @@ def test_multiple_positions_invested_sum_and_asset_buckets() -> None:
         ),
     )
     val = _service(ledger, market).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(),
+        current_snapshot=_snap(quote=_quote(bid="70000", ask="70000")), policy=_policy(), now=NOW
     )
     assert val.invested_amount.amount == Decimal("9000000")  # 7M + 2M
     assert val.total_nav.amount == Decimal("100000000")  # 91M + 9M
@@ -224,17 +224,17 @@ def test_multiple_positions_invested_sum_and_asset_buckets() -> None:
 
 def test_midpoint_mark_independent_of_buy_sell_proposed_price() -> None:
     quote = _quote(bid="69000", ask="71000")  # midpoint 70000
-    market = _FakeMarket(snapshots={("005930", Market.KR): _snap(quote=quote)})
+    snap = _snap(quote=quote)
     ledger = _FakeLedger(cash=_cash("93000000"), positions=(_position(quantity="100", avg_cost="60000"),))
-    buy_val = _service(ledger, market).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(price="71000"), policy=_policy(), now=NOW
+    buy_val = _service(ledger, _FakeMarket()).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(price="71000"), current_snapshot=snap, policy=_policy(), now=NOW
     )
-    sell_val = _service(ledger, market).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(price="69000"), policy=_policy(), now=NOW
+    sell_val = _service(ledger, _FakeMarket()).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(price="69000"), current_snapshot=snap, policy=_policy(), now=NOW
     )
     # 실행가격(ask vs bid)이 달라도 NAV/invested/mark 는 midpoint 기준이라 동일하다.
     assert buy_val.total_nav.amount == sell_val.total_nav.amount == Decimal("100000000")
-    assert buy_val.marks["005930"].price == sell_val.marks["005930"].price == Decimal("70000")
+    assert buy_val.marks[(Market.KR, "005930")].price == sell_val.marks[(Market.KR, "005930")].price == Decimal("70000")
     # proposed_price 만 다르다(slippage 기준).
     assert buy_val.risk_filter_context.proposed_price.amount == Decimal("71000")
     assert sell_val.risk_filter_context.proposed_price.amount == Decimal("69000")
@@ -242,7 +242,7 @@ def test_midpoint_mark_independent_of_buy_sell_proposed_price() -> None:
 
 def test_invested_zero_asset_weights_all_zero() -> None:
     val = _service(_FakeLedger(cash=_cash("50000000")), _FakeMarket()).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
     )
     assert val.current_asset_weights.kr == Percent("0")
     assert val.current_asset_weights.us == Percent("0")
@@ -251,17 +251,67 @@ def test_invested_zero_asset_weights_all_zero() -> None:
 
 def test_valuation_is_frozen() -> None:
     val = _service(_FakeLedger(), _FakeMarket()).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
     )
     with pytest.raises(Exception):
         val.total_nav = Money.from_str("1", KRW)  # type: ignore[misc]
+
+
+def test_valuation_marks_mapping_is_read_only() -> None:
+    val = _service(_FakeLedger(), _FakeMarket()).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
+    )
+    with pytest.raises(TypeError):
+        val.marks[(Market.KR, "005930")] = _proposed()  # type: ignore[index]
+
+
+def test_policy_metadata_is_read_only() -> None:
+    policy = _policy(metadata={"k": "v"})
+    assert policy.metadata["k"] == "v"
+    with pytest.raises(TypeError):
+        policy.metadata["k2"] = "v2"  # type: ignore[index]
+
+
+def test_marks_keyed_by_market_symbol_and_reference_prices_symbol_keyed() -> None:
+    # 내부 marks 는 (market, symbol) 튜플 키, RiskFilter.reference_prices 는 symbol 단독 키.
+    val = _service(_FakeLedger(), _FakeMarket()).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
+    )
+    assert (Market.KR, "005930") in val.marks
+    refs = val.risk_filter_context.reference_prices
+    assert refs is not None
+    assert "005930" in refs
+    assert refs["005930"].price == Decimal("70000")
+
+
+def test_target_mark_uses_current_snapshot_not_market_source() -> None:
+    # market source 가 005930 에 대해 전혀 다른 quote(midpoint 50000)를 줘도, 대상 종목 mark 는
+    # coordinator 가 넘긴 current_snapshot(midpoint 70000)에서 계산되어야 한다.
+    stray = _FakeMarket(snapshots={("005930", Market.KR): _snap(quote=_quote(bid="50000", ask="50000"))})
+    val = _service(_FakeLedger(), stray).build_context(
+        symbol="005930", market=Market.KR, proposed_price=_proposed(),
+        current_snapshot=_snap(quote=_quote(bid="70000", ask="70000")), policy=_policy(), now=NOW
+    )
+    assert val.marks[(Market.KR, "005930")].price == Decimal("70000")
+
+
+def test_proposed_as_of_must_match_snapshot_quote_at() -> None:
+    # proposed_price 가 current_snapshot 의 quote 에서 파생되지 않으면(as_of 불일치) fail-closed.
+    val_svc = _service(_FakeLedger(), _FakeMarket())
+    with pytest.raises(PaperPortfolioContextError) as exc:
+        val_svc.build_context(
+            symbol="005930", market=Market.KR,
+            proposed_price=_proposed(as_of=NOW - timedelta(seconds=3)),
+            current_snapshot=_snap(), policy=_policy(), now=NOW,
+        )
+    assert exc.value.reason_code == REASON_PROPOSED_PRICE_MISMATCH
 
 
 # ============================================================= fail-closed paths
 def _expect(svc: PaperPortfolioContextService, reason: str, **kwargs: object) -> None:
     call: dict[str, object] = {
         "symbol": "005930", "market": Market.KR, "proposed_price": _proposed(),
-        "policy": _policy(), "now": NOW,
+        "current_snapshot": _snap(), "policy": _policy(), "now": NOW,
     }
     call.update(kwargs)
     with pytest.raises(PaperPortfolioContextError) as exc:
@@ -283,36 +333,44 @@ def test_cash_non_krw_fails_closed() -> None:
     _expect(svc, REASON_CURRENCY_UNSUPPORTED)
 
 
-def test_snapshot_missing_fails_closed() -> None:
-    market = _FakeMarket(snapshots={("005930", Market.KR): None})
-    _expect(_service(_FakeLedger(), market), REASON_SNAPSHOT_MISSING)
-
-
 def test_snapshot_quote_none_fails_closed() -> None:
-    market = _FakeMarket(snapshots={("005930", Market.KR): _snap(with_quote=False)})
-    _expect(_service(_FakeLedger(), market), REASON_SNAPSHOT_MISSING)
+    # 대상 종목 mark 는 current_snapshot 에서 계산되므로, quote 가 없으면 SNAPSHOT_MISSING.
+    _expect(_service(_FakeLedger(), _FakeMarket()), REASON_SNAPSHOT_MISSING, current_snapshot=_snap(with_quote=False))
 
 
 def test_snapshot_stale_fails_closed() -> None:
-    market = _FakeMarket(snapshots={("005930", Market.KR): _snap(quote_fresh=False)})
-    _expect(_service(_FakeLedger(), market), REASON_SNAPSHOT_STALE)
+    _expect(_service(_FakeLedger(), _FakeMarket()), REASON_SNAPSHOT_STALE, current_snapshot=_snap(quote_fresh=False))
 
 
 def test_snapshot_evaluated_at_mismatch_fails_closed() -> None:
-    stale = _snap(evaluated_at=NOW - timedelta(seconds=5))
-    market = _FakeMarket(snapshots={("005930", Market.KR): stale})
-    _expect(_service(_FakeLedger(), market), REASON_SNAPSHOT_STALE)
+    _expect(
+        _service(_FakeLedger(), _FakeMarket()), REASON_SNAPSHOT_STALE,
+        current_snapshot=_snap(evaluated_at=NOW - timedelta(seconds=5)),
+    )
 
 
 def test_snapshot_identity_mismatch_fails_closed() -> None:
-    wrong = _snap(symbol="000660")
-    market = _FakeMarket(snapshots={("005930", Market.KR): wrong})
-    _expect(_service(_FakeLedger(), market), REASON_SNAPSHOT_IDENTITY_MISMATCH)
+    _expect(
+        _service(_FakeLedger(), _FakeMarket()), REASON_SNAPSHOT_IDENTITY_MISMATCH,
+        current_snapshot=_snap(symbol="000660"),
+    )
 
 
 def test_quote_non_krw_fails_closed() -> None:
-    market = _FakeMarket(snapshots={("005930", Market.KR): _snap(quote=_quote(currency=Currency.USD))})
-    _expect(_service(_FakeLedger(), market), REASON_CURRENCY_UNSUPPORTED)
+    _expect(
+        _service(_FakeLedger(), _FakeMarket()), REASON_CURRENCY_UNSUPPORTED,
+        current_snapshot=_snap(quote=_quote(currency=Currency.USD)),
+    )
+
+
+def test_held_position_snapshot_stale_fails_closed() -> None:
+    # 보유 중인 다른 종목(411060)의 market-source mark 가 stale 이면 build 전체가 fail-closed.
+    market = _FakeMarket(snapshots={("411060", Market.KR): _snap(symbol="411060", quote_fresh=False)})
+    ledger = _FakeLedger(
+        cash=_cash("100000000"),
+        positions=(_position(symbol="411060", quantity="50", avg_cost="38000", asset_class=AssetClass.GOLD),),
+    )
+    _expect(_service(ledger, market), REASON_SNAPSHOT_STALE)
 
 
 def test_position_non_krw_fails_closed() -> None:
@@ -349,7 +407,12 @@ def test_ledger_positions_raise_fails_closed() -> None:
 
 
 def test_market_source_raise_fails_closed() -> None:
-    _expect(_service(_FakeLedger(), _FakeMarket(raise_get=True)), REASON_POSITION_SOURCE_ERROR)
+    # 대상 종목은 current_snapshot 으로 처리되므로, market source 는 보유 종목이 있을 때만 호출된다.
+    ledger = _FakeLedger(
+        cash=_cash("100000000"),
+        positions=(_position(symbol="411060", quantity="50", avg_cost="38000", asset_class=AssetClass.GOLD),),
+    )
+    _expect(_service(ledger, _FakeMarket(raise_get=True)), REASON_POSITION_SOURCE_ERROR)
 
 
 def test_non_paper_positions_excluded() -> None:
@@ -359,7 +422,7 @@ def test_non_paper_positions_excluded() -> None:
         positions=(_position(symbol="000660", quantity="100", avg_cost="50000", account_role=AccountRole.US_REGULAR),),
     )
     val = _service(ledger, _FakeMarket()).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
     )
     assert val.invested_amount.amount == Decimal("0")
     assert val.total_nav.amount == Decimal("100000000")
@@ -372,7 +435,7 @@ def test_cash_asset_class_position_excluded_from_invested() -> None:
         positions=(_position(symbol="CASHX", quantity="100", avg_cost="1", asset_class=AssetClass.CASH),),
     )
     val = _service(ledger, _FakeMarket()).build_context(
-        symbol="005930", market=Market.KR, proposed_price=_proposed(), policy=_policy(), now=NOW
+        symbol="005930", market=Market.KR, proposed_price=_proposed(), current_snapshot=_snap(), policy=_policy(), now=NOW
     )
     assert val.invested_amount.amount == Decimal("0")
     assert val.total_nav.amount == Decimal("100000000")

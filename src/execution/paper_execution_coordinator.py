@@ -20,7 +20,8 @@ RTM 경계(중요):
 
 조립 흐름(process):
     as-of/identity preflight → (plan 있을 때) 실행 MarketPrice 구성(BUY=ask, SELL=bid)
-        → service.build_context(canonical RiskFilterContext) → RiskFilterInput 구조 검증
+        → service.build_context(같은 frozen snapshot 을 current_snapshot 으로 전달 →
+          실행가/슬리피지 기준/대상 종목 mark 가 단일 quote 에 정합) → RiskFilterInput 구조 검증
         → engine.replace_bundle(idempotent) → engine.evaluate
         → (비발화면 SUPPRESSED) → RiskFilterInput 재구성(correlation_id=idempotency_key)
         → bridge.dispatch(current_position_quantity=valuation.position_quantity)
@@ -186,6 +187,7 @@ class PaperExecutionCoordinator:
                     symbol=plan.symbol,
                     market=plan.market,
                     proposed_price=market_price,
+                    current_snapshot=snapshot,
                     policy=portfolio_policy,
                     now=now,
                 )

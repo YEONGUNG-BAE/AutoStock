@@ -14,14 +14,27 @@ canonical RiskFilterContext 를 *재구성 없이 계산*한다. 이 계층은 n
   missing/stale/identity-mismatch 는 모두 fail-closed.
 - 실행 가격(proposed_price, BUY=ask/SELL=bid)은 coordinator 가 결정해 주입한다. 실행
   가격과 포트폴리오 mark 는 *섞지 않는다*: mark 는 valuation, proposed_price 는 slippage 용.
+- 평가 대상 종목의 mark 는 coordinator 가 실행 가격을 만든 **그 frozen 스냅샷**
+  (current_snapshot)에서 계산한다 — market_state_source 로 재조회하지 않는다. 이로써 같은 tick
+  에서 실행 가격/슬리피지 기준/포트폴리오 mark 가 단일 quote 에 정합된다. proposed_price 의
+  as_of 가 그 quote_at 과 다르면 proposed_price_mismatch 로 fail-closed. 나머지 포지션의 mark 만
+  market_state_source.get_snapshot 로 조회한다.
+
+mark 캐시 키:
+- 내부 mark 캐시와 valuation.marks 는 (market, symbol) 로 키잉한다. ledger position PK 는
+  (symbol, market, account_role) 이라 동일 문자열 symbol 이 서로 다른 market 에 존재할 수 있으므로
+  symbol 단독 키는 cross-market mark 재사용 버그를 낳는다. 반면 RiskFilter.reference_prices 는
+  대상 종목 symbol 로만 조회하므로 symbol-keyed 를 유지하되 대상 종목 reference 를 권위값으로 둔다.
 
 계산:
 - position market_value = quantity × midpoint mark
-- cumulative_buy_cost = quantity × avg_cost
+- current_symbol_cumulative_buy_cost = quantity × avg_cost = **잔여 cost basis**(매도 후 누적되는
+  역사적 총매수원금이 아니라 현재 보유분의 원가). RiskFilter 단일종목 5% NAV 집중 cap 은 현재
+  집중도(= 잔여 원가 + 추가매수)를 보는 것이므로 잔여 cost basis 가 올바른 입력이다(역사적 누적은
+  과대계상되어 정당한 재매수를 차단한다). 용어는 RiskFilterContext 의 기존 필드명을 따른다.
 - invested_amount = Σ position market_value (CASH asset_class 제외)
 - total_nav = cash + invested_amount (nav <= 0 → nav_invalid)
 - current_symbol_market_value = qty × mark (포지션 없으면 0)
-- current_symbol_cumulative_buy_cost = qty × avg_cost (없으면 0)
 - current_symbol_weight_percent = value / total_nav × 100
 - asset weights: AssetClass bucket(KR_EQUITY→kr, US_EQUITY→us, GOLD→gold; CASH 제외;
   그 외 → asset_bucket_unsupported), denominator = invested_amount, invested==0 → 전부 0.
@@ -33,6 +46,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from allocator.models import AssetBucket
@@ -112,7 +126,11 @@ class PaperPortfolioPolicy:
     gold_trades_this_month: int = 0
     gold_trades_this_quarter: int = 0
     asset_bucket: AssetBucket | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # frozen dataclass 의 metadata 를 외부 변이 불가능한 read-only view 로 고정한다.
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 @dataclass(frozen=True)
@@ -129,7 +147,7 @@ class PaperPortfolioValuation:
     current_symbol_weight_percent: Percent
     current_asset_weights: AssetClassWeights
     position_quantity: Decimal
-    marks: Mapping[str, MarketPrice]
+    marks: Mapping[tuple[Market, str], MarketPrice]
     risk_filter_context: RiskFilterContext
 
 
@@ -155,6 +173,7 @@ class PaperPortfolioContextService:
         symbol: str,
         market: Market,
         proposed_price: MarketPrice,
+        current_snapshot: LatestMarketStateSnapshot,
         policy: PaperPortfolioPolicy,
         now: datetime,
     ) -> PaperPortfolioValuation:
@@ -172,16 +191,24 @@ class PaperPortfolioContextService:
                 f"proposed_price currency {proposed_price.currency.value} is not {BASE_CURRENCY.value}.",
             )
 
+        # 대상 종목 mark 는 coordinator 가 실행 가격을 만든 그 frozen 스냅샷에서 계산한다(재조회 금지).
+        # proposed_price 는 그 스냅샷의 quote 에서 파생되어야 하므로 as_of 가 quote_at 과 일치해야 한다.
+        current_mark = self._mark_from_snapshot(
+            current_snapshot, symbol, market, now=aware_now
+        )
+        if proposed_price.as_of != current_mark.as_of:
+            raise PaperPortfolioContextError(
+                REASON_PROPOSED_PRICE_MISMATCH,
+                "proposed_price.as_of differs from the canonical snapshot quote_at.",
+            )
+
         cash = self._load_cash(aware_now)
         positions = self._load_positions()
 
-        marks: dict[str, MarketPrice] = {}
+        # 내부 캐시는 (market, symbol) 로 키잉한다(동일 symbol·다른 market 의 mark 재사용 방지).
+        marks: dict[tuple[Market, str], MarketPrice] = {(market, symbol): current_mark}
         invested_total = Decimal("0")
         bucket_values: dict[str, Decimal] = {"kr": Decimal("0"), "us": Decimal("0"), "gold": Decimal("0")}
-
-        # 현재 평가 종목의 mark 는 포지션 유무와 무관하게 항상 필요하다(slippage 기준).
-        current_mark = self._mark_for(symbol, market, now=aware_now)
-        marks[symbol] = current_mark
 
         current_quantity = Decimal("0")
         current_avg_cost = Decimal("0")
@@ -202,10 +229,11 @@ class PaperPortfolioContextService:
                     REASON_ASSET_BUCKET_UNSUPPORTED,
                     f"asset_class {position.asset_class.value} has no canonical bucket.",
                 )
-            mark = marks.get(position.symbol)
+            key = (position.market, position.symbol)
+            mark = marks.get(key)
             if mark is None:
                 mark = self._mark_for(position.symbol, position.market, now=aware_now)
-                marks[position.symbol] = mark
+                marks[key] = mark
             market_value = position.quantity * mark.price
             invested_total += market_value
             bucket_values[bucket] += market_value
@@ -236,6 +264,11 @@ class PaperPortfolioContextService:
 
         proposed_money = Money(amount=proposed_price.price, currency=proposed_price.currency)
 
+        # RiskFilter.reference_prices 는 symbol 단독으로 조회되므로 symbol-keyed 로 평탄화하되,
+        # 대상 종목 reference 를 마지막에 명시 대입해 권위값으로 둔다(cross-market 충돌 시 우선).
+        reference_prices: dict[str, MarketPrice] = {sym: mp for (_mkt, sym), mp in marks.items()}
+        reference_prices[symbol] = current_mark
+
         context = RiskFilterContext(
             created_at=aware_now,
             mode=policy.mode,
@@ -256,7 +289,7 @@ class PaperPortfolioContextService:
             gold_trades_this_month=policy.gold_trades_this_month,
             gold_trades_this_quarter=policy.gold_trades_this_quarter,
             proposed_price=proposed_money,
-            reference_prices=dict(marks),
+            reference_prices=reference_prices,
             metadata=dict(policy.metadata),
         )
 
@@ -271,7 +304,7 @@ class PaperPortfolioContextService:
             current_symbol_weight_percent=current_symbol_weight_percent,
             current_asset_weights=asset_weights,
             position_quantity=current_quantity,
-            marks=dict(marks),
+            marks=MappingProxyType(dict(marks)),
             risk_filter_context=context,
         )
 
@@ -316,6 +349,17 @@ class PaperPortfolioContextService:
             raise PaperPortfolioContextError(
                 REASON_POSITION_SOURCE_ERROR, "market_state get_snapshot raised."
             ) from exc
+        return self._mark_from_snapshot(snapshot, symbol, market, now=now)
+
+    def _mark_from_snapshot(
+        self,
+        snapshot: LatestMarketStateSnapshot | None,
+        symbol: str,
+        market: Market,
+        *,
+        now: datetime,
+    ) -> MarketPrice:
+        """주어진 스냅샷에서 midpoint mark 를 만든다(재조회 없음). 동일 검증 규칙 적용."""
         if snapshot is None or snapshot.quote is None:
             raise PaperPortfolioContextError(
                 REASON_SNAPSHOT_MISSING,
