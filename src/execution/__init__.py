@@ -47,7 +47,14 @@ from execution.paper_execution_coordinator import (
     CoordinatorResult,
     CoordinatorStatus,
     PaperExecutionCoordinator,
-    PositionSource,
+)
+from execution.paper_portfolio_context import (
+    PaperPortfolioContextError,
+    PaperPortfolioContextService,
+    PaperPortfolioLedgerSource,
+    PaperPortfolioPolicy,
+    PaperPortfolioValuation,
+    PortfolioMarketStateSource,
 )
 
 __all__ = [
@@ -60,7 +67,12 @@ __all__ = [
     "CoordinatorResult",
     "CoordinatorStatus",
     "PaperExecutionCoordinator",
-    "PositionSource",
+    "PaperPortfolioContextError",
+    "PaperPortfolioContextService",
+    "PaperPortfolioLedgerSource",
+    "PaperPortfolioPolicy",
+    "PaperPortfolioValuation",
+    "PortfolioMarketStateSource",
     "FireBroker",
     "FireBundle",
     "FireDecision",

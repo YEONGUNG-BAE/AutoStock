@@ -1,43 +1,43 @@
-"""RTM-5: paper-only 실행 조정 계층(execution coordinator).
+"""RTM-7a: paper-only 실행 조정 계층(execution coordinator).
 
-TriggerEngine 의 발화 결과를 현재 paper 포트폴리오 컨텍스트와 안전하게 조립하여
+TriggerEngine 의 발화 결과를 canonical paper 포트폴리오 컨텍스트와 안전하게 조립하여
 TriggerOrderBridge.dispatch 까지 연결하는 *명시적 라이브러리 API* 다. 이 모듈은
-engine/bridge/broker(position 조회)를 *호출*만 하며 그 어떤 것도 수정하지 않는다.
+engine/bridge/context-service 를 *호출*만 하며 그 어떤 것도 수정하지 않는다.
 
-RTM-5 경계(중요):
-- 이 coordinator 는 라이브러리 callable 일 뿐, scheduler/daemon/monitor 에 자동 연결되지 않는다.
-  무인 per-tick 연결은 RTM-7 범위다.
+RTM-7a 핵심 변경(missed-execution 차단):
+- 포지션/현금/포트폴리오/의존성 검증을 **TriggerEngine.evaluate 이전으로** 옮긴다.
+  evaluate 는 TRIGGERED 경로에서만 fire budget 을 소비하므로, evaluate 이후에 의존성
+  조회가 실패하면 *주문 없이 fire 만 소비*되는 누락이 생긴다. 이를 막기 위해 실행 가격
+  구성·canonical context 계산·RiskFilterInput 구조 검증을 모두 evaluate 보다 먼저 수행하고,
+  실패 시 engine/journal/broker 를 건드리지 않고 FAILED_CLOSED 로 반환한다.
+- caller 가 RiskFilterContext 를 주입하지 않는다. NAV/cash/invested/weight 는 주입 불가능한
+  ledger truth 이며, PaperPortfolioContextService 가 ledger + 최신 스냅샷에서 계산한다.
+
+RTM 경계(중요):
+- 라이브러리 callable 일 뿐, scheduler/daemon/monitor 에 자동 연결되지 않는다(RTM-7 범위).
 - 실제 KIS/live order adapter 를 사용하지 않으며 network/LLM 을 호출하지 않는다.
 - 실제 runtime/paper DB 경로를 하드코딩하지 않는다(의존성 주입).
 
-fail-closed 설계: 의심스러우면 주문을 내기보다 멈춘다. coordinator 단계의 식별자/as-of/
-포지션 정합 위반은 engine/journal/broker 를 호출하기 *전에* FAILED_CLOSED 로 반환한다.
-
 조립 흐름(process):
-    as-of/identity preflight → engine.replace_bundle(idempotent) → engine.evaluate
-        → (비발화면 SUPPRESSED 반환)
-        → ledger/broker 에서 현재 PAPER 포지션 수량 조회(외부 scalar 주입 금지)
-        → 동일 frozen snapshot 의 quote 로 MarketPrice 생성(BUY=ask, SELL=bid)
-        → RiskFilterInput 신규 구성(analysis_decision=bundle.decision,
-          correlation_id=signal.idempotency_key)
-        → bridge.dispatch → typed CoordinatorResult
+    as-of/identity preflight → (plan 있을 때) 실행 MarketPrice 구성(BUY=ask, SELL=bid)
+        → service.build_context(canonical RiskFilterContext) → RiskFilterInput 구조 검증
+        → engine.replace_bundle(idempotent) → engine.evaluate
+        → (비발화면 SUPPRESSED) → RiskFilterInput 재구성(correlation_id=idempotency_key)
+        → bridge.dispatch(current_position_quantity=valuation.position_quantity)
+        → typed CoordinatorResult
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
 
 from analysis.models import AnalysisAction
 from allocator.models import AllocatorDecision
 from domain._datetime import require_timezone_aware_datetime
-from domain.enums import AccountRole, Market
 from domain.market import MarketPrice
 from domain.order import OrderResult
-from domain.position import Position
 from market_data.indicators import IndicatorContext
 from market_data.latest_state import LatestMarketStateSnapshot
 from market_data.trigger_engine import (
@@ -49,8 +49,14 @@ from market_data.trigger_engine import (
     TriggerSignal,
     TriggerStatus,
 )
-from risk.models import RiskFilterContext, RiskFilterInput
+from risk.models import RiskFilterInput
 
+from execution.paper_portfolio_context import (
+    PaperPortfolioContextError,
+    PaperPortfolioContextService,
+    PaperPortfolioPolicy,
+    PaperPortfolioValuation,
+)
 from execution.trigger_order_bridge import (
     BridgeOutcome,
     BridgeResult,
@@ -62,14 +68,10 @@ from execution.trigger_order_bridge import (
 REASON_SNAPSHOT_AS_OF_MISMATCH = "snapshot_as_of_mismatch"
 REASON_INDICATOR_AS_OF_MISMATCH = "indicator_as_of_mismatch"
 REASON_SNAPSHOT_IDENTITY_MISMATCH = "snapshot_identity_mismatch"
-REASON_CONTEXT_MARKET_MISMATCH = "context_market_mismatch"
 REASON_DECISION_REPLACE_CONFLICT = "decision_replace_conflict"
 REASON_DECISION_REPLACE_OLDER = "decision_replace_older"
-REASON_POSITION_IDENTITY_MISMATCH = "position_identity_mismatch"
 REASON_QUOTE_UNAVAILABLE = "quote_unavailable"
-REASON_CONTEXT_AS_OF_MISMATCH = "context_as_of_mismatch"
-REASON_CONTEXT_POSITION_VALUE_MISMATCH = "context_position_value_mismatch"
-REASON_POSITION_SOURCE_ERROR = "position_source_error"
+REASON_PORTFOLIO_CONTEXT_BUILD_ERROR = "portfolio_context_build_error"
 REASON_RISK_INPUT_BUILD_ERROR = "risk_input_build_error"
 
 
@@ -98,15 +100,6 @@ class CoordinatorResult:
     order_result: OrderResult | None = None
 
 
-@runtime_checkable
-class PositionSource(Protocol):
-    """현재 PAPER 포지션 조회 계약(PaperBrokerAdapter / SQLiteLedger 가 만족)."""
-
-    def get_position(
-        self, symbol: str, market: Market, account_role: AccountRole
-    ) -> Position | None: ...
-
-
 # BridgeOutcome → CoordinatorStatus 매핑.
 _BRIDGE_OUTCOME_MAP: dict[BridgeOutcome, CoordinatorStatus] = {
     BridgeOutcome.ABORTED: CoordinatorStatus.TRIGGERED_ABORTED,
@@ -123,6 +116,10 @@ class PaperExecutionCoordinator:
     engine 은 발화 상태기계를 in-memory 로 보유하므로 동일 인스턴스를 per-tick 으로 재사용한다.
     영속 멱등성/재시작 복구는 bridge 가 호출하는 SQLite 저널/원장이 책임진다(engine 이 재시작으로
     상태를 잃어도 journal/ledger 가 중복 실행을 막는다).
+
+    canonical 포트폴리오 컨텍스트는 주입된 PaperPortfolioContextService 가 ledger truth +
+    최신 스냅샷에서 *evaluate 이전에* 계산한다. 컨텍스트/의존성 실패는 fire budget 을 소비하지
+    않고 FAILED_CLOSED 로 닫힌다.
     """
 
     def __init__(
@@ -130,11 +127,11 @@ class PaperExecutionCoordinator:
         *,
         engine: TriggerEngine,
         bridge: TriggerOrderBridge,
-        position_source: PositionSource,
+        portfolio_context_service: PaperPortfolioContextService,
     ) -> None:
         self._engine = engine
         self._bridge = bridge
-        self._position_source = position_source
+        self._context_service = portfolio_context_service
 
     # ------------------------------------------------------------------ process
     def process(
@@ -144,7 +141,7 @@ class PaperExecutionCoordinator:
         snapshot: LatestMarketStateSnapshot,
         permission: TradingPermission | None,
         allocator_decision: AllocatorDecision,
-        risk_context: RiskFilterContext,
+        portfolio_policy: PaperPortfolioPolicy,
         now: datetime,
         indicators: IndicatorContext | None = None,
     ) -> CoordinatorResult:
@@ -158,16 +155,58 @@ class PaperExecutionCoordinator:
         if indicators is not None and indicators.evaluated_at != now:
             return self._failed(REASON_INDICATOR_AS_OF_MISMATCH)
 
-        # 2) snapshot / context 식별자 정합(plan 이 있을 때만 — HOLD 는 engine 이 SUPPRESS).
-        #    bundle 내부(plan↔decision) 정합은 DecisionTriggerBundle 검증기가 이미 강제한다.
+        # 2) plan 이 없으면 HOLD 다 — 컨텍스트를 만들지 않고 replace+evaluate 만 수행한다.
+        #    evaluate 는 HOLD 를 항상 비발화(SUPPRESSED)로 처리하므로 fire 소비가 없다.
         plan = bundle.plan
+        market_price: MarketPrice | None = None
+        valuation: PaperPortfolioValuation | None = None
         if plan is not None:
+            # 2a) snapshot 식별자 정합(plan↔decision 정합은 bundle 검증기가 이미 강제).
             if snapshot.market != plan.market or snapshot.symbol != plan.symbol:
                 return self._failed(REASON_SNAPSHOT_IDENTITY_MISMATCH)
-            if risk_context.market is not None and risk_context.market != plan.market:
-                return self._failed(REASON_CONTEXT_MARKET_MISMATCH)
 
-        # 3) engine active bundle 동기화(idempotent). 동일 결정이면 UNCHANGED(상태 보존),
+            # 3) 실행 MarketPrice 를 발화 전에 구성한다(BUY=ask, SELL=bid). 임의 fallback 금지.
+            #    quote 가 없으면 실행 차단(engine 이 보통 먼저 막지만 방어적으로 한 번 더).
+            quote = snapshot.quote
+            if quote is None:
+                return self._failed(REASON_QUOTE_UNAVAILABLE)
+            price = quote.ask_price if plan.action is AnalysisAction.BUY else quote.bid_price
+            market_price = MarketPrice(
+                symbol=snapshot.symbol,
+                market=snapshot.market,
+                currency=quote.currency,
+                price=price,
+                as_of=quote.quote_at,
+            )
+
+            # 4) canonical 컨텍스트를 발화 전에 계산한다(ledger + 최신 스냅샷). 모든 의존성 조회를
+            #    여기서 끝내므로, 실패해도 evaluate 의 fire budget 을 소비하지 않는다.
+            try:
+                valuation = self._context_service.build_context(
+                    symbol=plan.symbol,
+                    market=plan.market,
+                    proposed_price=market_price,
+                    policy=portfolio_policy,
+                    now=now,
+                )
+            except PaperPortfolioContextError as exc:
+                return self._failed(exc.reason_code)
+            except Exception:
+                return self._failed(REASON_PORTFOLIO_CONTEXT_BUILD_ERROR)
+
+            # 5) RiskFilterInput 구조 검증을 발화 전에 1회 수행한다(correlation_id 는 아직 없음).
+            #    스키마/타입 위반을 fire 소비 전에 닫는다. 실제 dispatch 용 input 은 발화 후 재구성.
+            try:
+                RiskFilterInput(
+                    allocator_decision=allocator_decision,
+                    analysis_decision=bundle.decision,
+                    context=valuation.risk_filter_context,
+                    correlation_id=None,
+                )
+            except Exception:
+                return self._failed(REASON_RISK_INPUT_BUILD_ERROR)
+
+        # 6) engine active bundle 동기화(idempotent). 동일 결정이면 UNCHANGED(상태 보존),
         #    더 새로운 결정이면 REPLACED(re-arm). 더 오래됐거나 충돌이면 fail-closed.
         replace = self._engine.replace_bundle(bundle, now=now)
         if replace.status is ReplaceStatus.REJECTED_CONFLICT:
@@ -175,7 +214,7 @@ class PaperExecutionCoordinator:
         if replace.status is ReplaceStatus.REJECTED_OLDER:
             return self._failed(REASON_DECISION_REPLACE_OLDER)
 
-        # 4) 결정론적 평가. 비발화는 예외가 아니라 typed SUPPRESSED 로 반환(journal/broker 0).
+        # 7) 결정론적 평가. 비발화는 예외가 아니라 typed SUPPRESSED 로 반환(journal/broker 0).
         evaluation = self._engine.evaluate(
             snapshot, permission, now=now, indicators=indicators
         )
@@ -187,92 +226,20 @@ class PaperExecutionCoordinator:
             )
         signal = evaluation.signal
 
-        # 5) 동일 frozen snapshot 의 quote 로 MarketPrice 생성. BUY=ask, SELL=bid.
-        #    임의 fallback(LAST trade) 금지 — quote 가 없으면 실행 차단(engine 이 보통
-        #    먼저 막지만 방어적으로 한 번 더). as_of 는 사용한 quote 의 quote_at.
-        #    가격은 포지션 정합 검증에도 필요하므로 ledger 조회보다 먼저 만든다.
-        quote = snapshot.quote
-        if quote is None:
+        # 발화했는데 plan/valuation 이 없다면 계약 위반이다(HOLD 는 발화하지 않는다). fail-closed.
+        if valuation is None or market_price is None:
             return self._failed(
-                REASON_QUOTE_UNAVAILABLE, signal=signal, trigger_status=evaluation.status
-            )
-        price = quote.ask_price if signal.action is AnalysisAction.BUY else quote.bid_price
-        market_price = MarketPrice(
-            symbol=snapshot.symbol,
-            market=snapshot.market,
-            currency=quote.currency,
-            price=price,
-            as_of=quote.quote_at,
-        )
-
-        # 6) 현재 PAPER 포지션 수량을 ledger/broker 에서 조회한다(외부 scalar 주입 금지).
-        #    조회 자체가 던지면 typed FAILED_CLOSED 로 변환(예외 전파 금지).
-        #    반드시 signal 의 종목/시장/PAPER 계좌 포지션이어야 한다 — 다른 종목 수량이
-        #    sizing 에 흘러들면 fail-closed. 포지션이 없으면 ledger truth 는 0 이다
-        #    (None 을 흘려보내 caller context value 로 fallback 되게 두지 않는다).
-        try:
-            position = self._position_source.get_position(
-                signal.symbol, signal.market, AccountRole.PAPER
-            )
-        except Exception:
-            return self._failed(
-                REASON_POSITION_SOURCE_ERROR,
-                signal=signal,
-                trigger_status=evaluation.status,
-            )
-        if position is not None and (
-            position.symbol != signal.symbol
-            or position.market != signal.market
-            or position.account_role is not AccountRole.PAPER
-        ):
-            return self._failed(
-                REASON_POSITION_IDENTITY_MISMATCH,
-                signal=signal,
-                trigger_status=evaluation.status,
-            )
-        ledger_quantity: Decimal = (
-            position.quantity if position is not None else Decimal("0")
-        )
-
-        # 7) caller 가 넘긴 RiskFilterContext 가 ledger truth 와 정합하는지 강제한다.
-        #    coordinator 는 단일 종목 snapshot 으로 전체 NAV/cash/invested 를 재구성할 수
-        #    없으므로(추정 금지) 검증 가능한 차원만 fail-closed 로 닫는다:
-        #    (a) as-of 동일성(created_at == now),
-        #    (b) current_symbol_market_value == ledger_quantity × reference price
-        #        (통화 일치 포함). 불일치면 stale/위조 context 이므로 실행 차단.
-        if risk_context.created_at != now:
-            return self._failed(
-                REASON_CONTEXT_AS_OF_MISMATCH,
-                signal=signal,
-                trigger_status=evaluation.status,
-            )
-        expected_symbol_value = ledger_quantity * price
-        symbol_value = risk_context.current_symbol_market_value
-        if symbol_value is None:
-            actual_symbol_value = Decimal("0")
-        else:
-            if symbol_value.currency != quote.currency:
-                return self._failed(
-                    REASON_CONTEXT_POSITION_VALUE_MISMATCH,
-                    signal=signal,
-                    trigger_status=evaluation.status,
-                )
-            actual_symbol_value = symbol_value.amount
-        if actual_symbol_value != expected_symbol_value:
-            return self._failed(
-                REASON_CONTEXT_POSITION_VALUE_MISMATCH,
+                REASON_PORTFOLIO_CONTEXT_BUILD_ERROR,
                 signal=signal,
                 trigger_status=evaluation.status,
             )
 
-        # 8) RiskFilterInput 을 신규 구성한다(caller 가 만든 임의 risk input 을 신뢰하지 않는다).
-        #    analysis_decision 은 bundle.decision, correlation_id 는 발화 idempotency_key.
-        #    구성 자체가 던지면(타입/검증 위반) typed FAILED_CLOSED 로 변환.
+        # 8) 발화 idempotency_key 로 RiskFilterInput 을 재구성한다(correlation 추적).
         try:
             risk_input = RiskFilterInput(
                 allocator_decision=allocator_decision,
                 analysis_decision=bundle.decision,
-                context=risk_context,
+                context=valuation.risk_filter_context,
                 correlation_id=signal.idempotency_key,
             )
         except Exception:
@@ -282,14 +249,14 @@ class PaperExecutionCoordinator:
                 trigger_status=evaluation.status,
             )
 
-        # 9) 발화→주문 경계로 위임. bridge 가 reserve/generate/resolve/ledger truth 를 책임진다.
-        #    현재 포지션 수량은 ledger truth(Decimal, 0 포함) 만 전달한다 — None 금지.
+        # 9) 발화→주문 경계로 위임. 현재 포지션 수량은 canonical valuation 의 ledger truth 만
+        #    전달한다(Decimal, 0 포함 — None/외부 scalar 금지).
         bridge_result = self._bridge.dispatch(
             signal=signal,
             bundle=bundle,
             risk_input=risk_input,
             market_price=market_price,
-            current_position_quantity=ledger_quantity,
+            current_position_quantity=valuation.position_quantity,
             now=now,
         )
         return self._from_bridge(signal, evaluation.status, bridge_result)
@@ -340,15 +307,10 @@ __all__ = [
     "CoordinatorResult",
     "CoordinatorStatus",
     "PaperExecutionCoordinator",
-    "PositionSource",
-    "REASON_CONTEXT_AS_OF_MISMATCH",
-    "REASON_CONTEXT_MARKET_MISMATCH",
-    "REASON_CONTEXT_POSITION_VALUE_MISMATCH",
     "REASON_DECISION_REPLACE_CONFLICT",
     "REASON_DECISION_REPLACE_OLDER",
     "REASON_INDICATOR_AS_OF_MISMATCH",
-    "REASON_POSITION_IDENTITY_MISMATCH",
-    "REASON_POSITION_SOURCE_ERROR",
+    "REASON_PORTFOLIO_CONTEXT_BUILD_ERROR",
     "REASON_QUOTE_UNAVAILABLE",
     "REASON_RISK_INPUT_BUILD_ERROR",
     "REASON_SNAPSHOT_AS_OF_MISMATCH",
