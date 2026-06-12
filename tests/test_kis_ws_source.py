@@ -53,8 +53,19 @@ def _pingpong() -> str:
     return json.dumps({"header": {"tr_id": "PINGPONG", "datetime": "20260612100000"}, "body": {}})
 
 
-def _ack(tr_id: str, rt_cd: str = "0") -> str:
-    return json.dumps({"header": {"tr_id": tr_id}, "body": {"rt_cd": rt_cd, "msg1": "x"}})
+def _ack(tr_id: str, *, tr_key: str = "005930", rt_cd: str = "0") -> str:
+    return json.dumps(
+        {"header": {"tr_id": tr_id, "tr_key": tr_key}, "body": {"rt_cd": rt_cd, "msg1": "x"}}
+    )
+
+
+def _ack_missing_rt_cd(tr_id: str, *, tr_key: str = "005930") -> str:
+    return json.dumps({"header": {"tr_id": tr_id, "tr_key": tr_key}, "body": {"msg1": "x"}})
+
+
+def _acks() -> list[str]:
+    """양쪽 구독(H0STCNT0/H0STASP0|005930)을 성공 ack로 모두 푸는 프레임 쌍."""
+    return [_ack("H0STCNT0"), _ack("H0STASP0")]
 
 
 class _Cancel:
@@ -67,6 +78,7 @@ class _FakeWebSocket:
         self.sent: list[str] = []
         self.pongs: list[bytes] = []
         self.closed = False
+        self.close_count = 0
 
     async def send(self, message: str) -> None:
         self.sent.append(message)
@@ -86,6 +98,7 @@ class _FakeWebSocket:
 
     async def close(self) -> None:
         self.closed = True
+        self.close_count += 1
 
 
 class _BlockingWebSocket(_FakeWebSocket):
@@ -130,7 +143,7 @@ async def _drain(source: KisWsMarketEventSource, limit: int) -> list:
 
 
 def test_subscribe_messages_sent_for_each_subscription() -> None:
-    ws = _FakeWebSocket([_trade_frame()])
+    ws = _FakeWebSocket([*_acks(), _trade_frame()])
     source = _source(ws, max_events=1)
     asyncio.run(_drain(source, 1))
     # first two sends are the subscribe messages (before unsubscribe in finally).
@@ -144,7 +157,7 @@ def test_subscribe_messages_sent_for_each_subscription() -> None:
 
 
 def test_data_frames_parsed_and_yielded() -> None:
-    ws = _FakeWebSocket([_trade_frame(), _quote_frame()])
+    ws = _FakeWebSocket([*_acks(), _trade_frame(), _quote_frame()])
     source = _source(ws, max_events=2)
     events = asyncio.run(_drain(source, 2))
     assert isinstance(events[0], NormalizedTradeTick)
@@ -153,7 +166,7 @@ def test_data_frames_parsed_and_yielded() -> None:
 
 
 def test_pingpong_triggers_pong_and_heartbeat() -> None:
-    ws = _FakeWebSocket([_pingpong(), _trade_frame()])
+    ws = _FakeWebSocket([_pingpong(), *_acks(), _trade_frame()])
     source = _source(ws, max_events=2)
     events = asyncio.run(_drain(source, 2))
     assert isinstance(events[0], MarketHeartbeat)
@@ -162,17 +175,63 @@ def test_pingpong_triggers_pong_and_heartbeat() -> None:
     assert isinstance(events[1], NormalizedTradeTick)
 
 
-def test_subscribe_ack_success_is_ignored() -> None:
-    ws = _FakeWebSocket([_ack("H0STCNT0", "0"), _trade_frame()])
+def test_data_frame_accepted_after_all_acks() -> None:
+    ws = _FakeWebSocket([*_acks(), _trade_frame()])
     source = _source(ws, max_events=1)
     events = asyncio.run(_drain(source, 1))
     assert isinstance(events[0], NormalizedTradeTick)
+    kinds = [e.kind for e in source._transport_log]  # type: ignore[attr-defined]
+    assert "all_subscribed" in kinds
+
+
+def test_data_frame_before_any_ack_is_rejected() -> None:
+    ws = _FakeWebSocket([_trade_frame()])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="before all subscriptions were acked"):
+        asyncio.run(_drain(source, 5))
+
+
+def test_data_frame_after_partial_ack_is_rejected() -> None:
+    # 한쪽 구독만 ack된 상태에서 들어온 시세 frame은 배리어가 거부한다.
+    ws = _FakeWebSocket([_ack("H0STCNT0"), _trade_frame()])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="before all subscriptions were acked"):
+        asyncio.run(_drain(source, 5))
 
 
 def test_subscribe_ack_failure_fails_closed() -> None:
-    ws = _FakeWebSocket([_ack("H0STCNT0", "1")])
+    ws = _FakeWebSocket([_ack("H0STCNT0", rt_cd="1")])
     source = _source(ws)
-    with pytest.raises(KisWsSubscriptionError, match="rt_cd=1"):
+    with pytest.raises(KisWsSubscriptionError, match="rt_cd missing or non-zero"):
+        asyncio.run(_drain(source, 5))
+
+
+def test_ack_missing_rt_cd_fails_closed() -> None:
+    ws = _FakeWebSocket([_ack_missing_rt_cd("H0STCNT0")])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="rt_cd missing or non-zero"):
+        asyncio.run(_drain(source, 5))
+
+
+def test_ack_for_unrequested_subscription_is_rejected() -> None:
+    ws = _FakeWebSocket([_ack("H0STCNT0", tr_key="999999")])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="unrequested subscription"):
+        asyncio.run(_drain(source, 5))
+
+
+def test_duplicate_ack_is_rejected() -> None:
+    ws = _FakeWebSocket([_ack("H0STCNT0"), _ack("H0STCNT0")])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="duplicate ack"):
+        asyncio.run(_drain(source, 5))
+
+
+def test_unsubscribed_symbol_frame_is_rejected() -> None:
+    # 모든 구독이 ack됐어도, 구독하지 않은 종목 시세 frame은 fail-closed로 거부한다.
+    ws = _FakeWebSocket([*_acks(), _trade_frame(symbol="000660")])
+    source = _source(ws)
+    with pytest.raises(KisWsSubscriptionError, match="unsubscribed channel"):
         asyncio.run(_drain(source, 5))
 
 
@@ -181,14 +240,19 @@ def test_cancellation_cleans_up_and_reraises() -> None:
     source = _source(ws)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(_drain(source, 5))
+    # cleanup runs exactly once (single finally path; no duplicate except-branch cleanup).
     assert ws.closed is True
-    # unsubscribe (tr_type "2") sent for each subscription during cleanup.
+    assert ws.close_count == 1
+    # unsubscribe (tr_type "2") sent exactly once per subscription during cleanup.
     unsub = [json.loads(m) for m in ws.sent if json.loads(m)["header"]["tr_type"] == "2"]
-    assert {u["body"]["input"]["tr_id"] for u in unsub} == {"H0STCNT0", "H0STASP0"}
+    assert [u["body"]["input"]["tr_id"] for u in unsub] == ["H0STCNT0", "H0STASP0"]
+    disconnects = [e for e in source._transport_log if e.kind == "disconnect"]  # type: ignore[attr-defined]
+    assert len(disconnects) == 1
+    assert disconnects[0].detail == "cancelled"
 
 
 def test_clean_disconnect_unsubscribes_and_closes() -> None:
-    ws = _FakeWebSocket([_trade_frame()])
+    ws = _FakeWebSocket([*_acks(), _trade_frame()])
     source = _source(ws, max_events=1)
     asyncio.run(_drain(source, 1))
     assert ws.closed is True
@@ -197,15 +261,21 @@ def test_clean_disconnect_unsubscribes_and_closes() -> None:
 
 
 def test_transport_events_emitted() -> None:
-    ws = _FakeWebSocket([_pingpong(), _trade_frame()])
+    ws = _FakeWebSocket([_pingpong(), *_acks(), _trade_frame()])
     source = _source(ws, max_events=2)
     asyncio.run(_drain(source, 2))
-    kinds = [e.kind for e in source._transport_log]  # type: ignore[attr-defined]
+    log = source._transport_log  # type: ignore[attr-defined]
+    kinds = [e.kind for e in log]
     assert kinds[0] == "connected"
     assert "subscription_sent" in kinds
+    assert "ack" in kinds
+    assert "subscribed" in kinds
+    assert "all_subscribed" in kinds
     assert "ping_received" in kinds
     assert "pong_sent" in kinds
     assert kinds[-1] == "disconnect"
+    # every emitted transport event carries a source-clock timestamp.
+    assert all(e.at == _NOW for e in log)
 
 
 def test_receive_timeout_raises_for_monitor_drop() -> None:

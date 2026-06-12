@@ -8,6 +8,20 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
+
+KIS_WS_ALLOWED_ENVIRONMENTS = frozenset({"prod", "vps"})
+
+
+def _require_url(value: str, *, schemes: tuple[str, ...], field_name: str) -> None:
+    """URL scheme/host를 fail-closed로 검증한다. 자격증명·시세 endpoint 오설정을 막는다."""
+    parsed = urlsplit(value)
+    if parsed.scheme not in schemes:
+        raise SettingsError(
+            f"broker.kis_ws_read_only.{field_name} must use scheme in {sorted(schemes)} (got {parsed.scheme!r})."
+        )
+    if not parsed.hostname:
+        raise SettingsError(f"broker.kis_ws_read_only.{field_name} must include a host.")
 
 
 ENV_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
@@ -111,6 +125,22 @@ class KisWsReadOnlySettings:
     max_subscriptions: int = 4
     confirmation_env_var: str = "KIS_WS_READONLY_CONFIRM"
     confirmation_phrase: str = "ENABLE_KIS_WS_READONLY"
+
+    def __post_init__(self) -> None:
+        if self.environment not in KIS_WS_ALLOWED_ENVIRONMENTS:
+            raise SettingsError(
+                "broker.kis_ws_read_only.environment must be one of "
+                f"{sorted(KIS_WS_ALLOWED_ENVIRONMENTS)} (got {self.environment!r})."
+            )
+        # approval은 자격증명을 보내므로 https만, websocket은 ws/wss만 허용한다.
+        _require_url(self.approval_base_url, schemes=("https",), field_name="approval_base_url")
+        _require_url(self.websocket_url, schemes=("ws", "wss"), field_name="websocket_url")
+        if self.max_subscriptions < 1:
+            raise SettingsError("broker.kis_ws_read_only.max_subscriptions must be >= 1.")
+        if self.connect_timeout_seconds <= 0:
+            raise SettingsError("broker.kis_ws_read_only.connect_timeout_seconds must be > 0.")
+        if self.receive_timeout_seconds <= 0:
+            raise SettingsError("broker.kis_ws_read_only.receive_timeout_seconds must be > 0.")
 
 
 @dataclass(frozen=True)

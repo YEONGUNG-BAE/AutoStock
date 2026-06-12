@@ -9,6 +9,7 @@ the new epoch so the restarted sequence is accepted.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -38,6 +39,12 @@ def _trade_frame(prpr: str) -> str:
     record[13] = "123456"
     record[33] = "20260612"
     return f"0|H0STCNT0|1|{'^'.join(record)}"
+
+
+def _ack(tr_id: str = "H0STCNT0", tr_key: str = "005930") -> str:
+    return json.dumps(
+        {"header": {"tr_id": tr_id, "tr_key": tr_key}, "body": {"rt_cd": "0", "msg1": "x"}}
+    )
 
 
 class _ScriptedWebSocket:
@@ -70,8 +77,8 @@ async def _noop_sleep(_seconds: float) -> None:
 def test_source_through_monitor_applies_and_reconnects() -> None:
     transport_events: list[KisWsTransportEvent] = []
     sockets = [
-        _ScriptedWebSocket([_trade_frame("70000")]),  # epoch 1: one trade then drop
-        _ScriptedWebSocket([_trade_frame("70100")]),  # epoch 2: one trade then budget stop
+        _ScriptedWebSocket([_ack(), _trade_frame("70000")]),  # epoch 1: ack, one trade, drop
+        _ScriptedWebSocket([_ack(), _trade_frame("70100")]),  # epoch 2: ack, one trade, stop
     ]
     connects = iter(sockets)
 

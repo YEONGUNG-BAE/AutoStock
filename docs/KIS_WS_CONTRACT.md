@@ -44,8 +44,34 @@
 ```
 
 - `tr_type`: subscribe = `"1"`, unsubscribe = `"2"`.
-- ack 응답(JSON)에서 `body.rt_cd != "0"`이면 구독 실패로 보고 fail-closed.
-  (ack 메시지의 raw 본문/메시지는 그대로 싣지 않고 sanitized code/symbol만 남긴다.)
+
+### 2.1 구독 ACK 응답 envelope (server → client, JSON text frame)
+
+공식 KIS 샘플(`backtester/kis_backtest/providers/kis/websocket.py`,
+SHA `33e0e1e65cd1c8c8b639531483ec0b327087bab1`)에서 검증한 응답 구조:
+
+```
+{
+  "header": {
+    "tr_id": "H0STASP0",        // 어떤 구독에 대한 ack인지
+    "tr_key": "005930"          // 종목코드 (없을 수 있음 → .get)
+  },
+  "body": {
+    "rt_cd": "0",               // "0" = 성공, 그 외 = 실패
+    "msg1": "SUBSCRIBE SUCCESS",
+    "output": {                  // (선택) 암호화 키 — 평문 시세에서는 미사용
+      "iv": "...",
+      "key": "..."
+    }
+  }
+}
+```
+
+- ACK 배리어는 `(header.tr_id, header.tr_key)` 단위로 구독 성공을 추적한다.
+  **모든** 요청 구독이 성공 ACK(`body.rt_cd == "0"`)를 받기 전에는 시세 frame을 수용하지 않는다.
+- fail-closed 거부: `rt_cd` 누락/비문자/non-zero, `tr_id`/`tr_key` 누락(신원 검증 불가),
+  요청하지 않은 `(tr_id, tr_key)` ACK, 중복 ACK.
+- ACK 메시지의 raw 본문/메시지는 그대로 싣지 않고 sanitized code/symbol만 남긴다.
 
 ## 3. PINGPONG (server → client, JSON text frame)
 
@@ -122,11 +148,15 @@
 
 ## 9. 건강(health) 신호 분리
 
-- transport-health: connected / subscription_sent / ack / ping_received / pong_sent /
-  disconnect / unsubscribe_sent / connection_duration.
-- market-data-health: trade/quote received / parsed / applied / malformed / stale /
-  sequence-order / last-event-time.
+- transport-health: connected / subscription_sent / ack / subscribed / all_subscribed /
+  ping_received / pong_sent / unsubscribe_sent / disconnect. 각 evidence는 source-clock
+  `at` 타임스탬프를 갖고, run summary는 connection_duration_seconds 와
+  subscriptions_expected / subscriptions_acked 를 함께 보고한다.
+- market-data-health: trade/quote parsed / applied / heartbeat_count / last_market_event_at.
+  heartbeat는 parsed/applied에 섞지 않고 별도 카운트한다.
 - 두 계열은 서로 다른 typed 스냅샷/evidence로 분리한다(혼합 금지).
+- run PASS 조건 = 모든 구독 ACK 성공(all_subscribed) AND quote_applied >= 1.
+  heartbeat-only(quote_applied == 0)는 FAIL이다(false PASS 방지).
 
 ## 10. 경계 (RTM-6 범위 밖)
 

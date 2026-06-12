@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
 
@@ -20,6 +20,7 @@ _UNSUBSCRIBE = "2"
 _SUPPORTED_TR_IDS = frozenset({TR_QUOTE, TR_TRADE})
 _PINGPONG_TR_ID = "PINGPONG"
 _PINGPONG_CHANNEL = "PINGPONG"
+_ACK_SUCCESS = "0"
 
 
 class KisWsSourceError(Exception):
@@ -27,7 +28,7 @@ class KisWsSourceError(Exception):
 
 
 class KisWsSubscriptionError(KisWsSourceError):
-    """구독 ack가 실패(rt_cd != 0)했거나 구독 설정이 잘못된 경우."""
+    """구독 ack가 실패(rt_cd != 0)했거나 구독 설정/순서가 잘못된 경우."""
 
 
 class WebSocketLike(Protocol):
@@ -46,7 +47,10 @@ class WebSocketLike(Protocol):
 class KisWsTransportEvent:
     """transport-health evidence 한 건. raw frame/token/account는 절대 담지 않는다.
 
-    market-data-health(trade/quote/parsed/applied)와 분리된 신호다.
+    market-data-health(trade/quote/parsed/applied)와 분리된 신호다. kind 예:
+    connected / subscription_sent / ack / subscribed / all_subscribed /
+    ping_received / pong_sent / unsubscribe_sent / disconnect. `at`은 source clock으로
+    찍은 시각(연결 지속시간 산출용)이며 `_emit`에서 자동 부여된다.
     """
 
     kind: str
@@ -54,6 +58,7 @@ class KisWsTransportEvent:
     symbol: str | None = None
     rt_cd: str | None = None
     detail: str | None = None
+    at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -71,11 +76,16 @@ class KisWsSubscription:
 class KisWsMarketEventSource:
     """KIS 국내 실시간 read-only websocket MarketEventSource.
 
-    경계: connect 1회 → subscribe → event yield → disconnect만 한다. 내부 reconnect/
-    backoff/heartbeat-timeout 루프가 없다(그 책임은 MarketMonitor 단독). 단절·iterator
-    오류는 MarketMonitor가 drop으로 받아 source_factory로 새 source(=새 sequence epoch)를
-    만들어 재구독한다. broker/ledger/paper execution을 import·호출하지 않으며 raw frame을
-    로깅하지 않는다. asyncio.CancelledError는 정리 후 재전파한다.
+    경계: connect 1회 → subscribe → (모든 구독 ack 확인) → event yield → disconnect만
+    한다. 내부 reconnect/backoff/heartbeat-timeout 루프가 없다(그 책임은 MarketMonitor
+    단독). 단절·iterator 오류는 MarketMonitor가 drop으로 받아 source_factory로 새
+    source(=새 sequence epoch)를 만들어 재구독한다. broker/ledger/paper execution을
+    import·호출하지 않으며 raw frame을 로깅하지 않는다. asyncio.CancelledError는 정리 후
+    재전파한다.
+
+    ack 배리어: 모든 요청 구독이 성공 ack(rt_cd=="0")을 받기 전에는 시세 frame을 수용하지
+    않는다. ack는 `(tr_id, tr_key)` 단위로 추적하며 누락 rt_cd / 알 수 없는 식별자 / 중복
+    ack는 fail-closed로 거부한다. 구독하지 않은 `(tr_id, symbol)` 시세 frame도 거부한다.
     """
 
     def __init__(
@@ -105,11 +115,19 @@ class KisWsMarketEventSource:
         self._max_events = max_events
         self._on_transport_event = on_transport_event
         self._parser = KisOfficialWsFrameParser()
+        self._subscribed_keys = frozenset((s.tr_id, s.symbol) for s in self._subscriptions)
+        self._subscribed_channels = frozenset(f"{s.tr_id}|{s.symbol}" for s in self._subscriptions)
+        self._pending_acks: set[tuple[str, str]] = set()
+        self._acked: set[tuple[str, str]] = set()
 
     async def events(self) -> AsyncIterator[MarketEvent]:
+        # 새 epoch마다 ack 상태를 초기화한다(fresh source가 정석이지만 방어적으로 리셋).
+        self._pending_acks = set(self._subscribed_keys)
+        self._acked = set()
         connection = await self._connect()
         self._emit(KisWsTransportEvent(kind="connected"))
         emitted = 0
+        cancelled = False
         try:
             for subscription in self._subscriptions:
                 await connection.send(self._subscribe_message(subscription, _SUBSCRIBE))
@@ -132,21 +150,32 @@ class KisWsMarketEventSource:
                     if self._max_events is not None and emitted >= self._max_events:
                         return
         except asyncio.CancelledError:
-            await self._safe_unsubscribe(connection)
-            await _safe_close(connection)
-            self._emit(KisWsTransportEvent(kind="disconnect", detail="cancelled"))
+            cancelled = True
             raise
         finally:
+            # 정확히 한 번만 정리한다(취소 경로도 finally 단일 경로로 수렴).
             await self._safe_unsubscribe(connection)
             await _safe_close(connection)
-            self._emit(KisWsTransportEvent(kind="disconnect"))
+            self._emit(
+                KisWsTransportEvent(kind="disconnect", detail="cancelled" if cancelled else None)
+            )
 
     async def _handle_message(
         self, connection: WebSocketLike, message: str
     ) -> AsyncIterator[MarketEvent]:
         if message and message[0] in ("0", "1"):
+            # ack 배리어: 모든 구독이 확인되기 전에는 시세 frame을 수용하지 않는다.
+            if self._pending_acks:
+                raise KisWsSubscriptionError(
+                    "market frame received before all subscriptions were acked."
+                )
             received_at = self._clock()
             for event in self._parser.parse_frame(message, received_at=received_at):
+                channel = _event_channel(event)
+                if channel not in self._subscribed_channels:
+                    raise KisWsSubscriptionError(
+                        f"received market frame for unsubscribed channel {channel}."
+                    )
                 yield event
             return
         # 제어(JSON) frame: PINGPONG 또는 구독 ack.
@@ -167,11 +196,35 @@ class KisWsMarketEventSource:
         self._handle_ack(control, tr_id)
 
     def _handle_ack(self, control: dict, tr_id: str | None) -> None:
+        header = control.get("header")
+        tr_key = header.get("tr_key") if isinstance(header, dict) else None
         body = control.get("body")
         rt_cd = body.get("rt_cd") if isinstance(body, dict) else None
-        self._emit(KisWsTransportEvent(kind="ack", tr_id=tr_id, rt_cd=rt_cd if isinstance(rt_cd, str) else None))
-        if isinstance(rt_cd, str) and rt_cd != "0":
-            raise KisWsSubscriptionError(f"subscription ack failed for tr_id={tr_id} rt_cd={rt_cd}.")
+        self._emit(
+            KisWsTransportEvent(
+                kind="ack",
+                tr_id=tr_id if isinstance(tr_id, str) else None,
+                symbol=tr_key if isinstance(tr_key, str) else None,
+                rt_cd=rt_cd if isinstance(rt_cd, str) else None,
+            )
+        )
+        # 누락/비-문자/non-zero rt_cd 모두 실패로 본다(fail-closed). missing rt_cd 통과 금지.
+        if not isinstance(rt_cd, str) or rt_cd != _ACK_SUCCESS:
+            raise KisWsSubscriptionError(
+                f"subscription ack not successful for tr_id={tr_id} (rt_cd missing or non-zero)."
+            )
+        if not isinstance(tr_id, str) or not isinstance(tr_key, str):
+            raise KisWsSubscriptionError("subscription ack missing tr_id/tr_key identity.")
+        identity = (tr_id, tr_key)
+        if identity not in self._subscribed_keys:
+            raise KisWsSubscriptionError(f"ack for an unrequested subscription tr_id={tr_id}.")
+        if identity in self._acked:
+            raise KisWsSubscriptionError(f"duplicate ack for tr_id={tr_id}.")
+        self._acked.add(identity)
+        self._pending_acks.discard(identity)
+        self._emit(KisWsTransportEvent(kind="subscribed", tr_id=tr_id, symbol=tr_key))
+        if not self._pending_acks:
+            self._emit(KisWsTransportEvent(kind="all_subscribed"))
 
     def _parse_control(self, message: str) -> dict:
         try:
@@ -212,7 +265,17 @@ class KisWsMarketEventSource:
     def _emit(self, event: KisWsTransportEvent) -> None:
         if self._on_transport_event is None:
             return
-        self._on_transport_event(event)
+        stamped = event if event.at is not None else replace(event, at=self._clock())
+        self._on_transport_event(stamped)
+
+
+def _event_channel(event: MarketEvent) -> str:
+    sequence = getattr(event, "provider_sequence", None)
+    channel = getattr(sequence, "channel", None)
+    if not isinstance(channel, str):
+        # 시세 path는 항상 provider_sequence를 갖는다. 없으면 계약 위반이므로 fail-closed.
+        raise KisWsSubscriptionError("market event missing provider_sequence channel.")
+    return channel
 
 
 def _control_tr_id(control: dict) -> str | None:

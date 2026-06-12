@@ -33,6 +33,7 @@ _spec.loader.exec_module(smoke)
 _KST = ZoneInfo("Asia/Seoul")
 _NOW = datetime(2026, 6, 12, 10, 0, 0, tzinfo=_KST)
 _TRADE_LEN = 46
+_QUOTE_LEN = 59
 
 
 def _trade_frame(*, symbol: str = "005930", prpr: str = "70000") -> str:
@@ -44,6 +45,23 @@ def _trade_frame(*, symbol: str = "005930", prpr: str = "70000") -> str:
     record[13] = "123456"
     record[33] = "20260612"
     return f"0|H0STCNT0|1|{'^'.join(record)}"
+
+
+def _quote_frame(*, symbol: str = "005930") -> str:
+    record = ["0"] * _QUOTE_LEN
+    record[0] = symbol
+    record[1] = "095959"
+    record[3] = "70100"
+    record[13] = "69900"
+    record[23] = "120"
+    record[33] = "0"
+    return f"0|H0STASP0|1|{'^'.join(record)}"
+
+
+def _ack(tr_id: str, *, tr_key: str = "005930") -> str:
+    return json.dumps(
+        {"header": {"tr_id": tr_id, "tr_key": tr_key}, "body": {"rt_cd": "0", "msg1": "x"}}
+    )
 
 
 class _FakeWebSocket:
@@ -269,7 +287,10 @@ def test_validate_evidence_path_accepts_under_runtime() -> None:
 
 
 def test_execute_run_drives_bounded_run_with_fakes(tmp_path: Path) -> None:
-    ws = _FakeWebSocket([_trade_frame(prpr="70000"), _trade_frame(prpr="70100")])
+    # 두 구독 모두 success ack를 받은 뒤 trade 1 + quote 1을 흘려 PASS(quote applied>=1)를 검증한다.
+    ws = _FakeWebSocket(
+        [_ack("H0STCNT0"), _ack("H0STASP0"), _trade_frame(prpr="70000"), _quote_frame()]
+    )
 
     async def connect() -> _FakeWebSocket:
         return ws
@@ -280,7 +301,10 @@ def test_execute_run_drives_bounded_run_with_fakes(tmp_path: Path) -> None:
     result = smoke.execute_run(
         ws_settings=_ws_settings(),
         environ={"KIS_LIVE_APP_KEY": "APPKEY", "KIS_LIVE_APP_SECRET": "APPSECRET"},
-        subscriptions=[KisWsSubscription(tr_id="H0STCNT0", symbol="005930")],
+        subscriptions=[
+            KisWsSubscription(tr_id="H0STCNT0", symbol="005930"),
+            KisWsSubscription(tr_id="H0STASP0", symbol="005930"),
+        ],
         max_events=2,
         duration_seconds=None,
         connect=connect,
@@ -291,11 +315,17 @@ def test_execute_run_drives_bounded_run_with_fakes(tmp_path: Path) -> None:
 
     assert result["outcome"] == "PASS"
     assert result["applied"] == 2
+    assert result["market_health"]["quote_applied"] == 1
+    assert result["market_health"]["trade_applied"] == 1
+    assert result["market_health"]["heartbeat_count"] == 0
+    assert result["subscriptions_expected"] == 2
+    assert result["subscriptions_acked"] == 2
     assert result["orders_called"] is False
     assert result["network_called"] is True
     # transport-health evidence is recorded separately from market-data health.
     assert result["transport_health"]["connected"] == 1
     assert result["transport_health"]["subscription_sent"] >= 1
+    assert result["transport_health"]["all_subscribed"] == 1
     # approval request was issued exactly once via the injected transport.
     assert len(transport.calls) == 1
     # evidence file written under runtime/, JSONL, no raw frame fields.
@@ -305,6 +335,57 @@ def test_execute_run_drives_bounded_run_with_fakes(tmp_path: Path) -> None:
         record = json.loads(line)
         assert "raw" not in record
         assert "frame" not in record
+
+
+def _pingpong() -> str:
+    return json.dumps({"header": {"tr_id": "PINGPONG", "datetime": "20260612100000"}, "body": {}})
+
+
+def test_execute_run_heartbeat_only_is_fail(tmp_path: Path) -> None:
+    # 모든 ack는 성공했지만 시세(quote)가 한 건도 applied되지 않으면 PASS가 아니다.
+    ws = _FakeWebSocket([_ack("H0STCNT0"), _ack("H0STASP0"), _pingpong()])
+
+    async def connect() -> _FakeWebSocket:
+        return ws
+
+    transport = _RecordingTransport(_FakeResponse(200, {"approval_key": "APV-XYZ"}))
+    result = smoke.execute_run(
+        ws_settings=_ws_settings(),
+        environ={"KIS_LIVE_APP_KEY": "APPKEY", "KIS_LIVE_APP_SECRET": "APPSECRET"},
+        subscriptions=[
+            KisWsSubscription(tr_id="H0STCNT0", symbol="005930"),
+            KisWsSubscription(tr_id="H0STASP0", symbol="005930"),
+        ],
+        max_events=1,
+        duration_seconds=None,
+        connect=connect,
+        approval_transport=transport,
+        clock=lambda: _NOW,
+    )
+
+    assert result["outcome"] == "FAIL"
+    assert result["market_health"]["quote_applied"] == 0
+    assert result["market_health"]["heartbeat_count"] >= 1
+
+
+def test_resolve_symbols_rejects_non_krx_code() -> None:
+    with pytest.raises(smoke.SmokeInputError, match="6-digit KRX code"):
+        smoke._resolve_symbols(["AAPL"])
+    with pytest.raises(smoke.SmokeInputError, match="6-digit KRX code"):
+        smoke._resolve_symbols(["12345"])
+
+
+def test_resolve_symbols_dedupes_preserving_order() -> None:
+    assert smoke._resolve_symbols(["005930", "000660", "005930"]) == ["005930", "000660"]
+
+
+def test_build_subscriptions_dedupes_repeated_pairs() -> None:
+    subs = smoke.build_subscriptions(["005930", "005930"], max_subscriptions=4)
+    assert {(s.tr_id, s.symbol) for s in subs} == {
+        ("H0STCNT0", "005930"),
+        ("H0STASP0", "005930"),
+    }
+    assert len(subs) == 2
 
 
 def test_bad_subscription_tr_id_rejected_at_construction() -> None:

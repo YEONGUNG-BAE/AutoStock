@@ -100,7 +100,7 @@ def test_kis_ws_read_only_overrides(tmp_path: Path) -> None:
         """
 [broker.kis_ws_read_only]
 enabled = true
-environment = "test"
+environment = "vps"
 websocket_url = "ws://example.invalid:21000"
 max_subscriptions = 2
 receive_timeout_seconds = 12
@@ -109,10 +109,58 @@ receive_timeout_seconds = 12
     settings = load_settings(config_path)
     ws = settings.broker.kis_ws_read_only
     assert ws.enabled is True
-    assert ws.environment == "test"
+    assert ws.environment == "vps"
     assert ws.websocket_url == "ws://example.invalid:21000"
     assert ws.max_subscriptions == 2
     assert ws.receive_timeout_seconds == 12.0
+
+
+def test_kis_ws_read_only_rejects_unknown_environment(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+environment = "test"
+""",
+    )
+    with pytest.raises(SettingsError, match="environment must be one of"):
+        load_settings(config_path)
+
+
+def test_kis_ws_read_only_rejects_non_https_approval_url(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+approval_base_url = "http://openapi.koreainvestment.com:9443"
+""",
+    )
+    with pytest.raises(SettingsError, match="approval_base_url"):
+        load_settings(config_path)
+
+
+def test_kis_ws_read_only_rejects_non_ws_websocket_url(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+websocket_url = "https://ops.koreainvestment.com:21000"
+""",
+    )
+    with pytest.raises(SettingsError, match="websocket_url"):
+        load_settings(config_path)
+
+
+def test_kis_ws_read_only_rejects_url_without_host(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+websocket_url = "ws://"
+""",
+    )
+    with pytest.raises(SettingsError, match="websocket_url"):
+        load_settings(config_path)
 
 
 def test_kis_ws_read_only_rejects_unknown_key(tmp_path: Path) -> None:

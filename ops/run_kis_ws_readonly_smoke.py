@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -36,7 +37,7 @@ from data.kis_ws_source import (
 )
 from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
 from market_data.latest_state import LatestMarketStateStore
-from market_data.monitor import MarketMonitor, MonitorSummary
+from market_data.monitor import MarketMonitor, MonitorEvidence, MonitorSummary
 from market_data.protocols import MarketEventSource
 
 DEFAULT_CONFIG_PATH = "config/config.toml.example"
@@ -44,6 +45,7 @@ _KST = ZoneInfo("Asia/Seoul")
 _DEFAULT_SYMBOL = "005930"
 # 두 TR(체결/호가)을 한 종목에 구독한다. 1 종목 권장.
 _TR_IDS = (TR_TRADE, TR_QUOTE)
+_KRX_SYMBOL_RE = re.compile(r"^\d{6}$")
 
 
 class SmokeInputError(Exception):
@@ -86,18 +88,30 @@ def _build_parser() -> argparse.ArgumentParser:
 def _resolve_symbols(raw: Sequence[str] | None) -> list[str]:
     symbols = list(raw) if raw else [_DEFAULT_SYMBOL]
     cleaned: list[str] = []
+    seen: set[str] = set()
     for symbol in symbols:
         value = symbol.strip()
         if not value:
             raise SmokeInputError("symbol must be non-empty.")
+        if not _KRX_SYMBOL_RE.match(value):
+            raise SmokeInputError("symbol must be a 6-digit KRX code.")
+        if value in seen:
+            continue  # 중복 종목은 조용히 제거(같은 구독 중복 방지).
+        seen.add(value)
         cleaned.append(value)
     return cleaned
 
 
 def build_subscriptions(symbols: Sequence[str], *, max_subscriptions: int) -> list[KisWsSubscription]:
-    subscriptions = [
-        KisWsSubscription(tr_id=tr_id, symbol=symbol) for symbol in symbols for tr_id in _TR_IDS
-    ]
+    subscriptions: list[KisWsSubscription] = []
+    seen: set[tuple[str, str]] = set()
+    for symbol in symbols:
+        for tr_id in _TR_IDS:
+            key = (tr_id, symbol)
+            if key in seen:
+                continue  # (tr_id, symbol) 중복 구독 제거.
+            seen.add(key)
+            subscriptions.append(KisWsSubscription(tr_id=tr_id, symbol=symbol))
     if len(subscriptions) > max_subscriptions:
         raise SmokeInputError(
             f"requested {len(subscriptions)} subscriptions exceeds max_subscriptions={max_subscriptions}."
@@ -183,6 +197,7 @@ def execute_run(
     approval_key = provider.issue_approval_key()
 
     transport_events: list[KisWsTransportEvent] = []
+    evidence_log: list[MonitorEvidence] = []
     run_clock = clock or (lambda: datetime.now(tz=_KST))
 
     def source_factory() -> MarketEventSource:
@@ -204,27 +219,90 @@ def execute_run(
         session_id="kis-ws-readonly-smoke",
         max_events=max_events,
         max_runtime_seconds=duration_seconds,
+        on_evidence=evidence_log.append,
     )
+    started_at = run_clock()
     summary = asyncio.run(monitor.run())
+    duration_seconds_observed = (run_clock() - started_at).total_seconds()
 
     health = Counter(event.kind for event in transport_events)
-    result = _run_summary(summary, health)
+    market_health = _tally_market_health(evidence_log)
+    result = _run_summary(
+        summary,
+        health,
+        market_health=market_health,
+        subscriptions=subscriptions,
+        connection_duration_seconds=duration_seconds_observed,
+    )
     if evidence_out is not None:
         _write_evidence(evidence_out, result, transport_events)
     return result
 
 
-def _run_summary(summary: MonitorSummary, health: Counter) -> dict[str, Any]:
+def _tally_market_health(evidence: Sequence[MonitorEvidence]) -> dict[str, Any]:
+    """trade/quote parsed·applied, heartbeat 수, 마지막 시세 이벤트 시각을 집계한다.
+
+    transport-health(connected/subscribed…)와 분리된 market-data health다. heartbeat는
+    parsed/applied에 섞지 않고 별도 카운트한다(heartbeat-only false PASS 방지의 근거)."""
+    trade_parsed = trade_applied = 0
+    quote_parsed = quote_applied = 0
+    heartbeat = 0
+    last_market_event_at: datetime | None = None
+    for ev in evidence:
+        applied = ev.apply_status == "applied"
+        if ev.event_type == "trade":
+            trade_parsed += 1
+            trade_applied += int(applied)
+        elif ev.event_type == "best_bid_ask":
+            quote_parsed += 1
+            quote_applied += int(applied)
+        elif ev.event_type == "heartbeat":
+            heartbeat += 1
+            continue  # heartbeat는 시세 이벤트가 아니므로 last_market_event_at 갱신에서 제외.
+        else:
+            continue
+        if last_market_event_at is None or ev.timestamp > last_market_event_at:
+            last_market_event_at = ev.timestamp
     return {
-        "outcome": "PASS" if summary.applied > 0 else "FAIL",
+        "trade_parsed": trade_parsed,
+        "trade_applied": trade_applied,
+        "quote_parsed": quote_parsed,
+        "quote_applied": quote_applied,
+        "heartbeat_count": heartbeat,
+        "last_market_event_at": (
+            last_market_event_at.isoformat() if last_market_event_at is not None else None
+        ),
+    }
+
+
+def _run_summary(
+    summary: MonitorSummary,
+    health: Counter,
+    *,
+    market_health: Mapping[str, Any],
+    subscriptions: Sequence[KisWsSubscription],
+    connection_duration_seconds: float,
+) -> dict[str, Any]:
+    # PASS = 모든 구독 ack(all_subscribed) AND quote applied >= 1.
+    # heartbeat-only(quote_applied == 0)는 FAIL로 떨어진다.
+    all_subscribed = health.get("all_subscribed", 0) >= 1
+    quote_applied = int(market_health["quote_applied"])
+    passed = all_subscribed and quote_applied >= 1
+    return {
+        "outcome": "PASS" if passed else "FAIL",
         "mode": "run",
         "final_state": summary.final_state.value,
         "connection_attempts": summary.connection_attempts,
+        "connection_duration_seconds": connection_duration_seconds,
+        "subscriptions_expected": len(subscriptions),
+        "subscriptions_acked": health.get("subscribed", 0),
+        "all_subscribed_epochs": health.get("all_subscribed", 0),
         "applied": summary.applied,
         "duplicate": summary.duplicate,
         "out_of_order": summary.out_of_order,
         "stream_mismatch": summary.stream_mismatch,
         "future_event_error": summary.future_event_error,
+        "market_health": dict(market_health),
         "transport_health": dict(health),
         "orders_called": False,
         "network_called": True,
@@ -241,6 +319,7 @@ def _write_evidence(path: Path, summary: dict[str, Any], events: Sequence[KisWsT
                 "symbol": event.symbol,
                 "rt_cd": event.rt_cd,
                 "detail": event.detail,
+                "at": event.at.isoformat() if event.at is not None else None,
             }
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         handle.write(json.dumps({"summary": summary}, ensure_ascii=False) + "\n")
