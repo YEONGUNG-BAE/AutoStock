@@ -56,6 +56,7 @@ REASON_COHERENCE_FAILED = "coherence_failed"
 REASON_GENERATION_EXCEPTION = "generation_exception"
 REASON_SIZING_EXCEPTION = "sizing_exception"
 REASON_LEDGER_PREFLIGHT_EXCEPTION = "ledger_preflight_exception"
+REASON_LEDGER_POSTFLIGHT_EXCEPTION = "ledger_postflight_exception"
 REASON_BROKER_EXCEPTION = "broker_exception"
 REASON_DISPATCH_OUTCOME_MISSING = "dispatch_outcome_missing"
 REASON_DISPATCH_OUTCOME_NONTERMINAL = "dispatch_outcome_nonterminal"
@@ -312,7 +313,18 @@ class TriggerOrderBridge:
             return self._reconcile_after_broker_exception(key, order_id, now)
 
         # 8) ledger 가 source of truth. broker 반환값을 신뢰하지 않는다.
-        durable_post = self._ledger.get_order_result(order_id)
+        #    이 시점에 journal 은 이미 DISPATCHING(broker 호출 완료)이므로, postflight 조회가
+        #    예외를 던지면 ABORTED 가 아니라 UNCERTAIN 으로 안전 종결한다(raw 예외 비노출,
+        #    broker 재호출 금지, broker 반환값만으로 COMMIT 금지). 결과 불명확 fail-closed.
+        try:
+            durable_post = self._ledger.get_order_result(order_id)
+        except Exception:  # noqa: BLE001 — 결과 불명확은 UNCERTAIN 으로 fail-closed
+            record = self._journal.mark_uncertain(
+                key, REASON_LEDGER_POSTFLIGHT_EXCEPTION, now
+            )
+            return BridgeResult(
+                BridgeOutcome.UNCERTAIN, record, REASON_LEDGER_POSTFLIGHT_EXCEPTION, None
+            )
         return self._finalize_from_durable(key, durable_post, now)
 
     # ------------------------------------------------------------------ reconcile

@@ -43,6 +43,12 @@ from execution.trigger_order_bridge import (
     FireRiskInput,
     TriggerOrderBridge,
 )
+from execution.paper_execution_coordinator import (
+    CoordinatorResult,
+    CoordinatorStatus,
+    PaperExecutionCoordinator,
+    PositionSource,
+)
 
 __all__ = [
     "BridgeCoherenceError",
@@ -51,6 +57,10 @@ __all__ = [
     "BridgeOutcome",
     "BridgePreflightError",
     "BridgeResult",
+    "CoordinatorResult",
+    "CoordinatorStatus",
+    "PaperExecutionCoordinator",
+    "PositionSource",
     "FireBroker",
     "FireBundle",
     "FireDecision",

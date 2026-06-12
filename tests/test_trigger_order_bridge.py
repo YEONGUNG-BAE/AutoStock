@@ -735,6 +735,54 @@ def test_broker_exception_without_ledger_record_uncertain(tmp_path: Path) -> Non
     assert journal.get(_IDEM).state is JournalState.UNCERTAIN
 
 
+# --------------------------------------------------------------------- post-broker ledger postflight exception
+def test_post_broker_ledger_postflight_exception_marks_uncertain(tmp_path: Path) -> None:
+    """broker 정상 반환 후 postflight ledger 조회가 예외를 던지면 UNCERTAIN 으로 안전 종결한다.
+
+    journal 은 이미 DISPATCHING 이므로 ABORTED 가 아니라 UNCERTAIN, raw 예외 비노출,
+    broker 반환값만으로 COMMIT 금지, 재dispatch 시 broker 재호출 없음."""
+
+    class _PostflightRaisingLedger:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def has_processed_order(self, order_id: str) -> bool:
+            return False
+
+        def get_order_result(self, order_id: str):
+            self.reads += 1
+            if self.reads == 1:
+                return None  # preflight: 미존재
+            raise RuntimeError("postflight ledger boom")
+
+    ledger = _PostflightRaisingLedger()
+    journal = _journal(tmp_path)
+    # broker 는 정상 반환(자체 _FakeLedger 에만 기록; bridge 는 postflight ledger 로 읽는다).
+    broker = _FakeBroker(ledger=_FakeLedger(), result=_order_result(OrderStatus.FILLED))
+    bridge = TriggerOrderBridge(
+        journal=journal,
+        generator=_FakeGenerator(
+            _GenResult(OrderGenerationStatus.GENERATED, _generated_target_weight_intent())
+        ),
+        resolver=_FakeResolver(
+            _ResolveResult(QuantityResolutionStatus.RESOLVED, _executable_intent())
+        ),
+        broker=broker,
+        ledger=ledger,
+    )
+    result = _dispatch(bridge)  # raw 예외가 노출되지 않는다(raises 하지 않음)
+    assert result.outcome is BridgeOutcome.UNCERTAIN
+    assert result.reason_code == "ledger_postflight_exception"
+    assert result.order_result is None  # broker 반환값으로 COMMIT 하지 않는다
+    assert journal.get(_IDEM).state is JournalState.UNCERTAIN
+    assert broker.calls == 1
+
+    # 재dispatch: journal 이 terminal(UNCERTAIN) → SKIPPED_TERMINAL, broker 재호출 없음.
+    result2 = _dispatch(bridge, now=_later(1))
+    assert result2.outcome is BridgeOutcome.SKIPPED_TERMINAL
+    assert broker.calls == 1
+
+
 # --------------------------------------------------------------------- full-stack integration
 def test_integration_full_stack_filled(tmp_path: Path, sample_risk_input_factory) -> None:
     """real OrderIntentGenerator + QuantityResolver + PaperBrokerAdapter + SQLiteLedger +
