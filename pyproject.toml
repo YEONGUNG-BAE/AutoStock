@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.13.4",
     "yfinance>=1.4.1",
+    "websockets>=15.0",
 ]
 
 [dependency-groups]

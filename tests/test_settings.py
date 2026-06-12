@@ -79,6 +79,84 @@ temperature = 1
         load_settings(config_path)
 
 
+def test_kis_ws_read_only_defaults(tmp_path: Path) -> None:
+    settings = load_settings(write_config(tmp_path, ""))
+    ws = settings.broker.kis_ws_read_only
+    assert ws.enabled is False
+    assert ws.environment == "prod"
+    assert ws.websocket_url == "ws://ops.koreainvestment.com:21000"
+    assert ws.app_key_env == "KIS_LIVE_APP_KEY"
+    assert ws.app_secret_env == "KIS_LIVE_APP_SECRET"
+    assert ws.connect_timeout_seconds == 10.0
+    assert ws.receive_timeout_seconds == 30.0
+    assert ws.max_subscriptions == 4
+    assert ws.confirmation_env_var == "KIS_WS_READONLY_CONFIRM"
+    assert ws.confirmation_phrase == "ENABLE_KIS_WS_READONLY"
+
+
+def test_kis_ws_read_only_overrides(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+enabled = true
+environment = "test"
+websocket_url = "ws://example.invalid:21000"
+max_subscriptions = 2
+receive_timeout_seconds = 12
+""",
+    )
+    settings = load_settings(config_path)
+    ws = settings.broker.kis_ws_read_only
+    assert ws.enabled is True
+    assert ws.environment == "test"
+    assert ws.websocket_url == "ws://example.invalid:21000"
+    assert ws.max_subscriptions == 2
+    assert ws.receive_timeout_seconds == 12.0
+
+
+def test_kis_ws_read_only_rejects_unknown_key(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+allow_orders = true
+""",
+    )
+    with pytest.raises(SettingsError, match="config.broker.kis_ws_read_only"):
+        load_settings(config_path)
+
+
+def test_kis_ws_read_only_rejects_non_positive_max_subscriptions(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[broker.kis_ws_read_only]
+max_subscriptions = 0
+""",
+    )
+    with pytest.raises(SettingsError, match="config.broker.kis_ws_read_only.max_subscriptions"):
+        load_settings(config_path)
+
+
+def test_kis_ws_read_only_enabled_allowed_in_paper_mode(tmp_path: Path) -> None:
+    # read-only WS는 주문이 없으므로 paper gate를 위반하지 않는다.
+    config_path = write_config(
+        tmp_path,
+        """
+[trading]
+mode = "paper"
+allow_live_trading = false
+
+[broker.kis_ws_read_only]
+enabled = true
+""",
+    )
+    settings = load_settings(config_path)
+    assert settings.broker.kis_ws_read_only.enabled is True
+    assert settings.trading.allow_live_trading is False
+
+
 def test_missing_config_file_fails_without_fallback(tmp_path: Path) -> None:
     missing_path = tmp_path / "missing-config.toml"
 

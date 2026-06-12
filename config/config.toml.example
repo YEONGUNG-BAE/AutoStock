@@ -44,6 +44,21 @@ cash_buffer_account_env = "KIS_CMA_ACCOUNT"
 enabled = false
 timeout_seconds = 10
 
+[broker.kis_ws_read_only]
+# KIS domestic real-time websocket read-only path (public quote/trade only).
+# No orders, no balances; separate confirmation gate from live trading.
+enabled = false
+environment = "prod"
+approval_base_url = "https://openapi.koreainvestment.com:9443"
+websocket_url = "ws://ops.koreainvestment.com:21000"
+app_key_env = "KIS_LIVE_APP_KEY"
+app_secret_env = "KIS_LIVE_APP_SECRET"
+connect_timeout_seconds = 10
+receive_timeout_seconds = 30
+max_subscriptions = 4
+confirmation_env_var = "KIS_WS_READONLY_CONFIRM"
+confirmation_phrase = "ENABLE_KIS_WS_READONLY"
+
 [broker.live]
 # Environment variable names only — set values in .env or your shell, not in Git.
 account_env = "KIS_LIVE_ACCOUNT"

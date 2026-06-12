@@ -110,6 +110,23 @@ class PortfolioMarketStateSource(Protocol):
     ) -> LatestMarketStateSnapshot | None: ...
 
 
+def _deep_freeze(value: Any) -> Any:
+    """metadata 를 재귀적으로 변이 불가능한 구조로 고정한다.
+
+    Mapping → MappingProxyType(deep-frozen), list/tuple → tuple(deep-frozen),
+    set/frozenset → frozenset(deep-frozen), 그 외(str/int/Decimal 등 scalar) → 그대로.
+    이로써 중첩된 dict/list 값까지 외부에서 변이할 수 없다(aliasing 차단). 원본은
+    복사되므로 호출자가 이후 원본을 바꿔도 정책 스냅샷에 영향이 없다.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class PaperPortfolioPolicy:
     """valuation 외에 RiskFilterContext 가 요구하는 정책/모드 입력.
@@ -130,7 +147,9 @@ class PaperPortfolioPolicy:
 
     def __post_init__(self) -> None:
         # frozen dataclass 의 metadata 를 외부 변이 불가능한 read-only view 로 고정한다.
-        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        # 얕은 MappingProxyType 만으로는 중첩 dict/list 값이 여전히 변이 가능하므로
+        # (호출자가 nested 값을 바꿔 정책에 영향을 줄 수 있음) 재귀적으로 deep-freeze 한다.
+        object.__setattr__(self, "metadata", _deep_freeze(self.metadata))
 
 
 @dataclass(frozen=True)

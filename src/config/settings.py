@@ -92,11 +92,34 @@ class KisReadOnlySettings:
 
 
 @dataclass(frozen=True)
+class KisWsReadOnlySettings:
+    """KIS 국내 실시간 websocket read-only 경로 설정.
+
+    공개 호가/체결 시세만 구독한다. 주문/체결통보/잔고와 연결되지 않으며 live-order
+    flag(allow_live_trading)와 완전히 분리된 confirmation gate를 쓴다. 자격증명은 env var
+    이름만 보관한다(실제 값은 환경변수에서만 읽는다).
+    """
+
+    enabled: bool = False
+    environment: str = "prod"
+    approval_base_url: str = "https://openapi.koreainvestment.com:9443"
+    websocket_url: str = "ws://ops.koreainvestment.com:21000"
+    app_key_env: str = "KIS_LIVE_APP_KEY"
+    app_secret_env: str = "KIS_LIVE_APP_SECRET"
+    connect_timeout_seconds: float = 10.0
+    receive_timeout_seconds: float = 30.0
+    max_subscriptions: int = 4
+    confirmation_env_var: str = "KIS_WS_READONLY_CONFIRM"
+    confirmation_phrase: str = "ENABLE_KIS_WS_READONLY"
+
+
+@dataclass(frozen=True)
 class BrokerSettings:
     adapter: BrokerAdapterName = BrokerAdapterName.PAPER
     live: KisLiveSettings = field(default_factory=KisLiveSettings)
     account_roles: BrokerAccountRoleSettings = field(default_factory=BrokerAccountRoleSettings)
     kis_read_only: KisReadOnlySettings = field(default_factory=KisReadOnlySettings)
+    kis_ws_read_only: KisWsReadOnlySettings = field(default_factory=KisWsReadOnlySettings)
 
 
 @dataclass(frozen=True)
@@ -188,6 +211,9 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
     live_section = _optional_table(broker_section, "live", "config.broker.live")
     account_roles_section = _optional_table(broker_section, "account_roles", "config.broker.account_roles")
     kis_read_only_section = _optional_table(broker_section, "kis_read_only", "config.broker.kis_read_only")
+    kis_ws_read_only_section = _optional_table(
+        broker_section, "kis_ws_read_only", "config.broker.kis_ws_read_only"
+    )
     llm_section = _optional_table(config, "llm", "config.llm")
 
     _assert_allowed_keys(
@@ -205,7 +231,7 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
     )
     _assert_allowed_keys(
         broker_section,
-        allowed_keys={"adapter", "live", "account_roles", "kis_read_only"},
+        allowed_keys={"adapter", "live", "account_roles", "kis_read_only", "kis_ws_read_only"},
         field_path="config.broker",
     )
     _assert_allowed_keys(
@@ -228,6 +254,23 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
         kis_read_only_section,
         allowed_keys={"enabled", "timeout_seconds"},
         field_path="config.broker.kis_read_only",
+    )
+    _assert_allowed_keys(
+        kis_ws_read_only_section,
+        allowed_keys={
+            "enabled",
+            "environment",
+            "approval_base_url",
+            "websocket_url",
+            "app_key_env",
+            "app_secret_env",
+            "connect_timeout_seconds",
+            "receive_timeout_seconds",
+            "max_subscriptions",
+            "confirmation_env_var",
+            "confirmation_phrase",
+        },
+        field_path="config.broker.kis_ws_read_only",
     )
     _assert_allowed_keys(
         llm_section,
@@ -332,6 +375,54 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
                 timeout_seconds=_parse_positive_number(
                     kis_read_only_section.get("timeout_seconds", 10.0),
                     field_path="config.broker.kis_read_only.timeout_seconds",
+                ),
+            ),
+            kis_ws_read_only=KisWsReadOnlySettings(
+                enabled=_parse_bool(
+                    kis_ws_read_only_section.get("enabled", False),
+                    field_path="config.broker.kis_ws_read_only.enabled",
+                ),
+                environment=_parse_str(
+                    kis_ws_read_only_section.get("environment", "prod"),
+                    field_path="config.broker.kis_ws_read_only.environment",
+                ),
+                approval_base_url=_parse_str(
+                    kis_ws_read_only_section.get(
+                        "approval_base_url", "https://openapi.koreainvestment.com:9443"
+                    ),
+                    field_path="config.broker.kis_ws_read_only.approval_base_url",
+                ),
+                websocket_url=_parse_str(
+                    kis_ws_read_only_section.get("websocket_url", "ws://ops.koreainvestment.com:21000"),
+                    field_path="config.broker.kis_ws_read_only.websocket_url",
+                ),
+                app_key_env=_parse_str(
+                    kis_ws_read_only_section.get("app_key_env", "KIS_LIVE_APP_KEY"),
+                    field_path="config.broker.kis_ws_read_only.app_key_env",
+                ),
+                app_secret_env=_parse_str(
+                    kis_ws_read_only_section.get("app_secret_env", "KIS_LIVE_APP_SECRET"),
+                    field_path="config.broker.kis_ws_read_only.app_secret_env",
+                ),
+                connect_timeout_seconds=_parse_positive_number(
+                    kis_ws_read_only_section.get("connect_timeout_seconds", 10.0),
+                    field_path="config.broker.kis_ws_read_only.connect_timeout_seconds",
+                ),
+                receive_timeout_seconds=_parse_positive_number(
+                    kis_ws_read_only_section.get("receive_timeout_seconds", 30.0),
+                    field_path="config.broker.kis_ws_read_only.receive_timeout_seconds",
+                ),
+                max_subscriptions=_parse_positive_int(
+                    kis_ws_read_only_section.get("max_subscriptions", 4),
+                    field_path="config.broker.kis_ws_read_only.max_subscriptions",
+                ),
+                confirmation_env_var=_parse_str(
+                    kis_ws_read_only_section.get("confirmation_env_var", "KIS_WS_READONLY_CONFIRM"),
+                    field_path="config.broker.kis_ws_read_only.confirmation_env_var",
+                ),
+                confirmation_phrase=_parse_str(
+                    kis_ws_read_only_section.get("confirmation_phrase", "ENABLE_KIS_WS_READONLY"),
+                    field_path="config.broker.kis_ws_read_only.confirmation_phrase",
                 ),
             ),
         ),

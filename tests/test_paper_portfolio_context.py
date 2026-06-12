@@ -272,6 +272,28 @@ def test_policy_metadata_is_read_only() -> None:
         policy.metadata["k2"] = "v2"  # type: ignore[index]
 
 
+def test_policy_metadata_is_deeply_immutable() -> None:
+    # 중첩된 dict/list 값까지 변이 불가능해야 한다(얕은 MappingProxyType 만으로는 부족).
+    nested = {"d": {"a": 1}, "l": [1, 2]}
+    policy = _policy(metadata=nested)
+    assert policy.metadata["d"]["a"] == 1
+    assert policy.metadata["l"] == (1, 2)
+    with pytest.raises(TypeError):
+        policy.metadata["d"]["a"] = 99  # type: ignore[index]
+    with pytest.raises(TypeError):
+        policy.metadata["l"][0] = 99  # type: ignore[index]
+
+
+def test_policy_metadata_does_not_alias_source() -> None:
+    # 원본을 이후 변이해도 정책 스냅샷에 영향이 없어야 한다(deep copy on freeze).
+    source = {"d": {"a": 1}}
+    policy = _policy(metadata=source)
+    source["d"]["a"] = 99
+    source["new"] = "x"
+    assert policy.metadata["d"]["a"] == 1
+    assert "new" not in policy.metadata
+
+
 def test_marks_keyed_by_market_symbol_and_reference_prices_symbol_keyed() -> None:
     # 내부 marks 는 (market, symbol) 튜플 키, RiskFilter.reference_prices 는 symbol 단독 키.
     val = _service(_FakeLedger(), _FakeMarket()).build_context(

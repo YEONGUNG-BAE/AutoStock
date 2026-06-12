@@ -25,6 +25,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pydantic" },
+    { name = "websockets" },
     { name = "yfinance" },
 ]
 
@@ -36,6 +37,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "websockets", specifier = ">=15.0" },
     { name = "yfinance", specifier = ">=1.4.1" },
 ]
 
