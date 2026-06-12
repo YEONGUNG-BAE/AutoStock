@@ -56,11 +56,15 @@ from market_data.trigger_engine import (
 
 from broker.paper_broker import PaperBrokerAdapter
 from execution.paper_execution_coordinator import (
+    REASON_CONTEXT_AS_OF_MISMATCH,
     REASON_CONTEXT_MARKET_MISMATCH,
+    REASON_CONTEXT_POSITION_VALUE_MISMATCH,
     REASON_DECISION_REPLACE_CONFLICT,
     REASON_DECISION_REPLACE_OLDER,
     REASON_INDICATOR_AS_OF_MISMATCH,
     REASON_POSITION_IDENTITY_MISMATCH,
+    REASON_POSITION_SOURCE_ERROR,
+    REASON_RISK_INPUT_BUILD_ERROR,
     REASON_SNAPSHOT_AS_OF_MISMATCH,
     REASON_SNAPSHOT_IDENTITY_MISMATCH,
     CoordinatorStatus,
@@ -143,9 +147,14 @@ def _bundle(
     action: AnalysisAction = AnalysisAction.BUY,
     symbol: str = "005930",
     correlation_id: str = "idem-1",
-    current_symbol_market_value: str = "3000000",
+    current_symbol_market_value: str = "0",
+    cumulative_buy_cost: str = "0",
 ):
-    """factory 로 RiskFilterInput 을 만들고 동일 AnalysisDecision 으로 bundle 을 조립한다."""
+    """factory 로 RiskFilterInput 을 만들고 동일 AnalysisDecision 으로 bundle 을 조립한다.
+
+    기본값은 *빈 ledger 와 정합*하는 컨텍스트다(현재 종목 시가 0, 누적 매수원금 0).
+    포지션을 seed 한 테스트는 ledger 수량 × 가격과 일치하도록 값을 명시 전달한다.
+    """
     ri = factory(
         action=action,
         target_weight_percent=Percent("4"),
@@ -153,7 +162,7 @@ def _bundle(
         correlation_id=correlation_id,
         context_overrides={
             "current_symbol_market_value": Money.from_str(current_symbol_market_value, Currency.KRW),
-            "current_symbol_cumulative_buy_cost": Money.from_str("1000000", Currency.KRW),
+            "current_symbol_cumulative_buy_cost": Money.from_str(cumulative_buy_cost, Currency.KRW),
         },
     )
     analysis = ri.analysis_decision
@@ -477,6 +486,88 @@ def test_triggered_dispatches_with_ask_market_price(sample_risk_input_factory) -
     risk_input = call["risk_input"]
     assert risk_input.correlation_id == result.signal.idempotency_key
     assert risk_input.analysis_decision is bundle.decision
+    # 포지션이 없으면 ledger truth = 0(Decimal). None 을 흘려보내지 않는다.
+    assert call["current_position_quantity"] == Decimal("0")
+
+
+def test_context_as_of_mismatch_fails_closed_no_dispatch(sample_risk_input_factory) -> None:
+    ri, bundle = _bundle(sample_risk_input_factory)
+    bridge = _ok_bridge()
+    coord = _coordinator(TriggerEngine(), bridge, _FakePositionSource())
+    stale_ctx = ri.context.model_copy(update={"created_at": NOW - DAY})  # != now
+    result = coord.process(
+        bundle=bundle,
+        snapshot=_snap(),
+        permission=_permission(),
+        allocator_decision=ri.allocator_decision,
+        risk_context=stale_ctx,
+        now=NOW,
+    )
+    assert result.status is CoordinatorStatus.FAILED_CLOSED
+    assert result.reason_code == REASON_CONTEXT_AS_OF_MISMATCH
+    assert result.signal is not None  # 발화 후 sizing 전 차단
+    assert bridge.dispatch_calls == []
+
+
+def test_context_position_value_mismatch_fails_closed_no_dispatch(sample_risk_input_factory) -> None:
+    # ledger 포지션 0 인데 context 가 3M 시가를 주장 → ledger truth 와 불일치 → 차단.
+    ri, bundle = _bundle(sample_risk_input_factory, current_symbol_market_value="3000000")
+    bridge = _ok_bridge()
+    coord = _coordinator(TriggerEngine(), bridge, _FakePositionSource())  # position=None → qty 0
+    result = coord.process(
+        bundle=bundle,
+        snapshot=_snap(),
+        permission=_permission(),
+        allocator_decision=ri.allocator_decision,
+        risk_context=ri.context,
+        now=NOW,
+    )
+    assert result.status is CoordinatorStatus.FAILED_CLOSED
+    assert result.reason_code == REASON_CONTEXT_POSITION_VALUE_MISMATCH
+    assert result.signal is not None
+    assert bridge.dispatch_calls == []
+
+
+def test_position_source_error_fails_closed_no_dispatch(sample_risk_input_factory) -> None:
+    ri, bundle = _bundle(sample_risk_input_factory)
+    bridge = _ok_bridge()
+
+    class _RaisingPositionSource:
+        def get_position(self, symbol, market, account_role):
+            raise RuntimeError("ledger unavailable")
+
+    coord = _coordinator(TriggerEngine(), bridge, _RaisingPositionSource())
+    result = coord.process(
+        bundle=bundle,
+        snapshot=_snap(),
+        permission=_permission(),
+        allocator_decision=ri.allocator_decision,
+        risk_context=ri.context,
+        now=NOW,
+    )
+    assert result.status is CoordinatorStatus.FAILED_CLOSED
+    assert result.reason_code == REASON_POSITION_SOURCE_ERROR
+    assert result.signal is not None
+    assert bridge.dispatch_calls == []
+
+
+def test_risk_input_build_error_fails_closed_no_dispatch(sample_risk_input_factory) -> None:
+    # 잘못된 타입의 allocator_decision → RiskFilterInput 구성이 ValidationError → typed 차단.
+    ri, bundle = _bundle(sample_risk_input_factory)
+    bridge = _ok_bridge()
+    coord = _coordinator(TriggerEngine(), bridge, _FakePositionSource())
+    result = coord.process(
+        bundle=bundle,
+        snapshot=_snap(),
+        permission=_permission(),
+        allocator_decision="not-an-allocator-decision",  # type: ignore[arg-type]
+        risk_context=ri.context,
+        now=NOW,
+    )
+    assert result.status is CoordinatorStatus.FAILED_CLOSED
+    assert result.reason_code == REASON_RISK_INPUT_BUILD_ERROR
+    assert result.signal is not None
+    assert bridge.dispatch_calls == []
 
 
 def test_recover_delegates_to_bridge(sample_risk_input_factory) -> None:
@@ -574,11 +665,12 @@ def test_integration_valid_buy_filled_db_invariants(tmp_path: Path, sample_risk_
     # ledger: 정확히 하나의 order result + 하나의 fill.
     assert ledger.get_order_result(order_id).status is OrderStatus.FILLED
     assert ledger.get_fill_by_order_id(order_id) is not None
-    # 포지션이 생기고 현금이 줄었다.
+    # ledger truth 기반 정확한 sizing: 빈 계좌 + target 4% of 100M = 4M / 70000 = 57주(내림).
     position = broker.get_position("005930", Market.KR, AccountRole.PAPER)
-    assert position is not None and position.quantity > 0
+    assert position is not None
+    assert position.quantity == Decimal("57")
     cash = broker.get_cash(Currency.KRW, AccountRole.PAPER)
-    assert cash.amount < Decimal("100000000")
+    assert cash.amount == Decimal("96010000")  # 100M - 57*70000
 
 
 def test_integration_same_signal_reprocess_no_increase(tmp_path: Path, sample_risk_input_factory) -> None:
@@ -628,9 +720,17 @@ def test_integration_restart_reopen_same_db_no_duplicate(tmp_path: Path, sample_
     coord2 = PaperExecutionCoordinator(
         engine=TriggerEngine(), bridge=bridge2, position_source=broker2
     )
+    # 재시작 후 ledger 에는 이미 57주가 있다 → coherence gate 통과를 위해 context 도
+    # post-fill ledger truth(57 × 70000 = 3,990,000)와 정합해야 한다. journal terminal
+    # skip 은 gate 통과 후 bridge.reserve 단계에서 일어난다.
+    ri2, _ = _bundle(
+        sample_risk_input_factory,
+        correlation_id="idem-restart",
+        current_symbol_market_value="3990000",
+    )
     again = coord2.process(
         bundle=bundle, snapshot=_snap(), permission=_permission(),
-        allocator_decision=ri.allocator_decision, risk_context=ri.context, now=NOW,
+        allocator_decision=ri2.allocator_decision, risk_context=ri2.context, now=NOW,
     )
     assert again.status is CoordinatorStatus.SKIPPED_TERMINAL
     qty2 = broker2.get_position("005930", Market.KR, AccountRole.PAPER).quantity
@@ -642,7 +742,12 @@ def test_integration_sizing_noop_aborts(tmp_path: Path, sample_risk_input_factor
     # 이미 target(4% of 100M = 4M)을 초과하는 포지션 보유 → BUY delta 0 → NOOP → ABORTED.
     coord, _, _, broker, ledger, journal = _real_stack(tmp_path)
     _seed_position(broker, quantity="100")  # 100*70000 = 7M > 4M
-    ri, bundle = _bundle(sample_risk_input_factory, correlation_id="idem-noop")
+    # context 는 ledger truth(100주 × 70000 = 7M)와 정합해야 coherence gate 통과.
+    ri, bundle = _bundle(
+        sample_risk_input_factory,
+        correlation_id="idem-noop",
+        current_symbol_market_value="7000000",
+    )
     result = coord.process(
         bundle=bundle, snapshot=_snap(), permission=_permission(),
         allocator_decision=ri.allocator_decision, risk_context=ri.context, now=NOW,
@@ -658,15 +763,21 @@ def test_integration_valid_sell_filled(tmp_path: Path, sample_risk_input_factory
     # 100주 보유(7M) 상태에서 target 4%(4M)로 줄이는 SELL → 3M 매도 → 42주 FILLED.
     coord, _, _, broker, ledger, journal = _real_stack(tmp_path)
     _seed_position(broker, quantity="100")
-    ri, bundle = _bundle(sample_risk_input_factory, action=AnalysisAction.SELL, correlation_id="idem-sell")
+    ri, bundle = _bundle(
+        sample_risk_input_factory,
+        action=AnalysisAction.SELL,
+        correlation_id="idem-sell",
+        current_symbol_market_value="7000000",  # 100주 × 70000, ledger 정합
+    )
     result = coord.process(
         bundle=bundle, snapshot=_snap(), permission=_permission(),
         allocator_decision=ri.allocator_decision, risk_context=ri.context, now=NOW,
     )
     assert result.status is CoordinatorStatus.COMMITTED
     assert result.order_result.status is OrderStatus.FILLED
+    # target 4%(4M)로 축소: (7M-4M)=3M / 70000 = 42주 매도 → 100-42=58주 잔여.
     position = broker.get_position("005930", Market.KR, AccountRole.PAPER)
-    assert position.quantity < Decimal("100")  # 일부 매도됨
+    assert position.quantity == Decimal("58")
 
 
 def test_integration_stale_snapshot_no_broker_write(tmp_path: Path, sample_risk_input_factory) -> None:
@@ -721,6 +832,31 @@ def test_integration_position_identity_mismatch_no_broker_write(
     order_id = f"order-{bundle.decision.decision_id.value}"
     assert ledger.get_order_result(order_id) is None
     assert journal.get("idem-posid") is None
+
+
+def test_integration_context_divergence_blocks_no_broker_write(
+    tmp_path: Path, sample_risk_input_factory
+) -> None:
+    # BLOCKER 회귀: ledger 포지션 0 인데 caller context 가 3M 시가를 주장 → coherence gate 가
+    # broker/journal write *전에* fail-closed. (예전 버그: resolver 가 3M fallback → 1M 만 매수.)
+    coord, _, _, broker, ledger, journal = _real_stack(tmp_path)
+    ri, bundle = _bundle(
+        sample_risk_input_factory,
+        correlation_id="idem-divergence",
+        current_symbol_market_value="3000000",  # ledger 0 과 불일치
+    )
+    result = coord.process(
+        bundle=bundle, snapshot=_snap(), permission=_permission(),
+        allocator_decision=ri.allocator_decision, risk_context=ri.context, now=NOW,
+    )
+    assert result.status is CoordinatorStatus.FAILED_CLOSED
+    assert result.reason_code == REASON_CONTEXT_POSITION_VALUE_MISMATCH
+    order_id = f"order-{bundle.decision.decision_id.value}"
+    assert ledger.get_order_result(order_id) is None
+    assert journal.get("idem-divergence") is None
+    # 포지션/현금 불변.
+    assert broker.get_position("005930", Market.KR, AccountRole.PAPER) is None
+    assert broker.get_cash(Currency.KRW, AccountRole.PAPER).amount == Decimal("100000000")
 
 
 def test_integration_recover_reserved_aborts(tmp_path: Path, sample_risk_input_factory) -> None:

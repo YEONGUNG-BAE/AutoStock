@@ -67,6 +67,10 @@ REASON_DECISION_REPLACE_CONFLICT = "decision_replace_conflict"
 REASON_DECISION_REPLACE_OLDER = "decision_replace_older"
 REASON_POSITION_IDENTITY_MISMATCH = "position_identity_mismatch"
 REASON_QUOTE_UNAVAILABLE = "quote_unavailable"
+REASON_CONTEXT_AS_OF_MISMATCH = "context_as_of_mismatch"
+REASON_CONTEXT_POSITION_VALUE_MISMATCH = "context_position_value_mismatch"
+REASON_POSITION_SOURCE_ERROR = "position_source_error"
+REASON_RISK_INPUT_BUILD_ERROR = "risk_input_build_error"
 
 
 class CoordinatorStatus(StrEnum):
@@ -183,29 +187,10 @@ class PaperExecutionCoordinator:
             )
         signal = evaluation.signal
 
-        # 5) 현재 PAPER 포지션 수량을 ledger/broker 에서 조회한다(외부 scalar 주입 금지).
-        #    반드시 signal 의 종목/시장/PAPER 계좌 포지션이어야 한다 — 다른 종목 수량이
-        #    sizing 에 흘러들면 fail-closed.
-        position = self._position_source.get_position(
-            signal.symbol, signal.market, AccountRole.PAPER
-        )
-        position_quantity: Decimal | None = None
-        if position is not None:
-            if (
-                position.symbol != signal.symbol
-                or position.market != signal.market
-                or position.account_role is not AccountRole.PAPER
-            ):
-                return self._failed(
-                    REASON_POSITION_IDENTITY_MISMATCH,
-                    signal=signal,
-                    trigger_status=evaluation.status,
-                )
-            position_quantity = position.quantity
-
-        # 6) 동일 frozen snapshot 의 quote 로 MarketPrice 생성. BUY=ask, SELL=bid.
+        # 5) 동일 frozen snapshot 의 quote 로 MarketPrice 생성. BUY=ask, SELL=bid.
         #    임의 fallback(LAST trade) 금지 — quote 가 없으면 실행 차단(engine 이 보통
         #    먼저 막지만 방어적으로 한 번 더). as_of 는 사용한 quote 의 quote_at.
+        #    가격은 포지션 정합 검증에도 필요하므로 ledger 조회보다 먼저 만든다.
         quote = snapshot.quote
         if quote is None:
             return self._failed(
@@ -220,22 +205,91 @@ class PaperExecutionCoordinator:
             as_of=quote.quote_at,
         )
 
-        # 7) RiskFilterInput 을 신규 구성한다(caller 가 만든 임의 risk input 을 신뢰하지 않는다).
-        #    analysis_decision 은 bundle.decision, correlation_id 는 발화 idempotency_key.
-        risk_input = RiskFilterInput(
-            allocator_decision=allocator_decision,
-            analysis_decision=bundle.decision,
-            context=risk_context,
-            correlation_id=signal.idempotency_key,
+        # 6) 현재 PAPER 포지션 수량을 ledger/broker 에서 조회한다(외부 scalar 주입 금지).
+        #    조회 자체가 던지면 typed FAILED_CLOSED 로 변환(예외 전파 금지).
+        #    반드시 signal 의 종목/시장/PAPER 계좌 포지션이어야 한다 — 다른 종목 수량이
+        #    sizing 에 흘러들면 fail-closed. 포지션이 없으면 ledger truth 는 0 이다
+        #    (None 을 흘려보내 caller context value 로 fallback 되게 두지 않는다).
+        try:
+            position = self._position_source.get_position(
+                signal.symbol, signal.market, AccountRole.PAPER
+            )
+        except Exception:
+            return self._failed(
+                REASON_POSITION_SOURCE_ERROR,
+                signal=signal,
+                trigger_status=evaluation.status,
+            )
+        if position is not None and (
+            position.symbol != signal.symbol
+            or position.market != signal.market
+            or position.account_role is not AccountRole.PAPER
+        ):
+            return self._failed(
+                REASON_POSITION_IDENTITY_MISMATCH,
+                signal=signal,
+                trigger_status=evaluation.status,
+            )
+        ledger_quantity: Decimal = (
+            position.quantity if position is not None else Decimal("0")
         )
 
-        # 8) 발화→주문 경계로 위임. bridge 가 reserve/generate/resolve/ledger truth 를 책임진다.
+        # 7) caller 가 넘긴 RiskFilterContext 가 ledger truth 와 정합하는지 강제한다.
+        #    coordinator 는 단일 종목 snapshot 으로 전체 NAV/cash/invested 를 재구성할 수
+        #    없으므로(추정 금지) 검증 가능한 차원만 fail-closed 로 닫는다:
+        #    (a) as-of 동일성(created_at == now),
+        #    (b) current_symbol_market_value == ledger_quantity × reference price
+        #        (통화 일치 포함). 불일치면 stale/위조 context 이므로 실행 차단.
+        if risk_context.created_at != now:
+            return self._failed(
+                REASON_CONTEXT_AS_OF_MISMATCH,
+                signal=signal,
+                trigger_status=evaluation.status,
+            )
+        expected_symbol_value = ledger_quantity * price
+        symbol_value = risk_context.current_symbol_market_value
+        if symbol_value is None:
+            actual_symbol_value = Decimal("0")
+        else:
+            if symbol_value.currency != quote.currency:
+                return self._failed(
+                    REASON_CONTEXT_POSITION_VALUE_MISMATCH,
+                    signal=signal,
+                    trigger_status=evaluation.status,
+                )
+            actual_symbol_value = symbol_value.amount
+        if actual_symbol_value != expected_symbol_value:
+            return self._failed(
+                REASON_CONTEXT_POSITION_VALUE_MISMATCH,
+                signal=signal,
+                trigger_status=evaluation.status,
+            )
+
+        # 8) RiskFilterInput 을 신규 구성한다(caller 가 만든 임의 risk input 을 신뢰하지 않는다).
+        #    analysis_decision 은 bundle.decision, correlation_id 는 발화 idempotency_key.
+        #    구성 자체가 던지면(타입/검증 위반) typed FAILED_CLOSED 로 변환.
+        try:
+            risk_input = RiskFilterInput(
+                allocator_decision=allocator_decision,
+                analysis_decision=bundle.decision,
+                context=risk_context,
+                correlation_id=signal.idempotency_key,
+            )
+        except Exception:
+            return self._failed(
+                REASON_RISK_INPUT_BUILD_ERROR,
+                signal=signal,
+                trigger_status=evaluation.status,
+            )
+
+        # 9) 발화→주문 경계로 위임. bridge 가 reserve/generate/resolve/ledger truth 를 책임진다.
+        #    현재 포지션 수량은 ledger truth(Decimal, 0 포함) 만 전달한다 — None 금지.
         bridge_result = self._bridge.dispatch(
             signal=signal,
             bundle=bundle,
             risk_input=risk_input,
             market_price=market_price,
-            current_position_quantity=position_quantity,
+            current_position_quantity=ledger_quantity,
             now=now,
         )
         return self._from_bridge(signal, evaluation.status, bridge_result)
@@ -287,12 +341,16 @@ __all__ = [
     "CoordinatorStatus",
     "PaperExecutionCoordinator",
     "PositionSource",
+    "REASON_CONTEXT_AS_OF_MISMATCH",
     "REASON_CONTEXT_MARKET_MISMATCH",
+    "REASON_CONTEXT_POSITION_VALUE_MISMATCH",
     "REASON_DECISION_REPLACE_CONFLICT",
     "REASON_DECISION_REPLACE_OLDER",
     "REASON_INDICATOR_AS_OF_MISMATCH",
     "REASON_POSITION_IDENTITY_MISMATCH",
+    "REASON_POSITION_SOURCE_ERROR",
     "REASON_QUOTE_UNAVAILABLE",
+    "REASON_RISK_INPUT_BUILD_ERROR",
     "REASON_SNAPSHOT_AS_OF_MISMATCH",
     "REASON_SNAPSHOT_IDENTITY_MISMATCH",
 ]
