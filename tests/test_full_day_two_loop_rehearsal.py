@@ -470,11 +470,10 @@ class TwoLoopHarness:
                 self.adapter.forward_monitor_evidence(evidence, self.tracker)
 
         def on_applied(update: AppliedMarketUpdate) -> None:
-            # integration 계약: health tracker는 orchestrator gate 직전에 최신 apply를 반영해야 한다.
-            et = "trade" if update.event_type.value == "trade" else "best_bid_ask"
-            self.tracker.record_market_event(
-                event_type=et, at=update.applied_at, now=update.applied_at
-            )
+            # integration 계약: health tracker는 on_evidence apply 경로(adapter→tracker)가
+            # 단일 출처다. apply evidence는 post-apply hook 직전에 emit되므로 gate가 이미
+            # 최신 tracker 상태를 본다. 여기서 tracker를 다시 기록하면 동일 event가
+            # 이중 집계된다(RTM-7c.4 runtime composition 전 필수 hardening).
             self.orchestrator_results.append(self.orchestrator.handle_applied_update(update))
 
         return on_evidence, on_applied
@@ -495,7 +494,7 @@ class TwoLoopHarness:
 
     def run_monitor_reconnect(
         self, first: MarketEvent, second_events: list[MarketEvent]
-    ) -> None:
+    ) -> Any:
         on_evidence, on_applied = self._monitor_callbacks()
         sources = iter([_DropAfterFirst(first), ReplayMarketEventSource(second_events)])
 
@@ -514,7 +513,7 @@ class TwoLoopHarness:
             on_evidence=on_evidence,
             on_applied_update=on_applied,
         )
-        asyncio.run(monitor.run())
+        return asyncio.run(monitor.run())
 
     def apply_quote_trade(self) -> None:
         at = self.clock()
@@ -602,11 +601,16 @@ def test_full_day_two_loop_rehearsal(tmp_path: Path, sample_risk_input_factory) 
     assert qty_after_fill == Decimal("57")
     assert cash_after_fill == Decimal("96010000")
 
-    # 09:32 additional ticks → duplicate fill 0
+    # 09:32 additional ticks → duplicate fill 0. 동일 arming(같은 engine/activation_epoch)
+    # 내 중복 발화는 engine의 fire budget(max_fires)으로 차단된다(SUPPRESSED/max_fires_reached).
+    # journal reserve 단계에 도달하기 전에 막히므로 새 journal 행이 생기지 않는다.
     h.clock.set(_at(9, 32))
     fills_before = len(h.committed_results())
+    journal_rows_before_dup = h.journal_rows()
     h.apply_quote_trade()
     assert len(h.committed_results()) == fills_before
+    assert h.orchestrator_results[-1].reason_code == "max_fires_reached"
+    assert h.journal_rows() == journal_rows_before_dup  # 비발화 → journal 행 불변
     assert h.fill_count() == 1
 
     # 10:00 transport drop + 10:00:02 reconnect epoch reset — duplicate 0
@@ -616,19 +620,52 @@ def test_full_day_two_loop_rehearsal(tmp_path: Path, sample_risk_input_factory) 
     h.record_transport("connected")
     h.record_transport("all_subscribed")
     at_reconnect = h.clock()
+    # reset 검증용으로 drop 직전 quote stream의 stored sequence를 캡처한다.
+    quote_seq_before = h.latest.peek(
+        Market.KR, "005930", now=at_reconnect
+    ).quote.provider_sequence.sequence
     seq_q = h._next_seq()
     seq_t = h._next_seq()
-    h.run_monitor_reconnect(
+    reconnect_summary = h.run_monitor_reconnect(
         _trade(sequence=seq_q, at=at_reconnect),
         [_quote(sequence=1, at=at_reconnect), _trade(sequence=1, at=at_reconnect)],
     )
+    # epoch reset 직접 검증. 이 시나리오의 _DropAfterFirst는 drop 전에 trade 한 건만
+    # 흘리므로, 재접속 시 epoch reset은 *trade stream에만* 적용된다(monitor는 직전
+    # attempt에서 본 stream만 pending_reset 한다). 따라서:
+    #   - trade stream: reset 후 새 epoch trade(seq=1) APPLIED → 최신 trade sequence==1
+    #   - quote stream: drop 전 미관측 → reset 안 됨 → 낮은 seq=1 quote는 stale stored
+    #     sequence 대비 OUT_OF_ORDER로 정상 거부(aggressive fail-open 금지). out_of_order==1 정상.
+    # 핵심 증명: 새 epoch trade가 silently 전부 거부되지 않고 APPLIED 되며 중복 체결이 없다.
+    assert reconnect_summary.stream_mismatch == 0
+    assert reconnect_summary.future_event_error == 0
+    assert reconnect_summary.applied == 2  # drop 전 trade(seq_q) + 재접속 trade(seq=1)
+    assert reconnect_summary.out_of_order == 1  # 미리셋 quote stream의 seq=1 거부(정상)
+    assert reconnect_summary.duplicate == 0
+    snap = h.latest.peek(Market.KR, "005930", now=at_reconnect)
+    assert snap.trade is not None and snap.trade.provider_sequence.sequence == 1
+    # quote stream은 reset되지 않았으므로 stored sequence가 그대로 유지된다.
+    assert snap.quote is not None and snap.quote.provider_sequence.sequence == quote_seq_before
     assert h.fill_count() == 1
     assert h.position_qty() == qty_after_fill
 
-    # 10:30 fast-loop process restart — journal blocks duplicate
+    # 10:30 fast-loop process restart — 중복 체결이 차단되는 *실제* 메커니즘을 직접 증명한다.
+    # 10:30 시점 active는 여전히 s1-buy(s2는 11:00 게시)이고 70000<=70000 조건이 참이라
+    # 재구성된 engine이 재무장(replace_bundle)되어 다시 발화한다. 그러나 idempotency_key는
+    # in-memory activation_epoch를 포함하므로(restart로 리셋) journal은 *재시작 간* 동일 키로
+    # dedup하지 못한다 — 새 키로 reserve가 성공한다. 중복 체결을 막는 진짜 경계는 ledger
+    # 포지션 상태다: 이미 목표 비중(57주)을 채워 QuantityResolver가 실행 가능 수량 0을 반환,
+    # TRIGGERED_ABORTED(no_executable_quantity)로 종료되어 broker 주문이 발생하지 않는다.
+    # journal에는 ABORTED 행이 1개 추가된다(COMMITTED 1 + ABORTED 1 = 2).
     h.clock.set(_at(10, 30))
+    journal_rows_before_restart = h.journal_rows()
     h.restart_fast_loop_stack()
     h.apply_quote_trade()
+    restart_result = h.orchestrator_results[-1]
+    assert restart_result.status is FastLoopExecutionStatus.TRIGGERED_ABORTED
+    assert restart_result.reason_code == "no_executable_quantity"
+    assert restart_result.coordinator_status == "triggered_aborted"
+    assert h.journal_rows() == journal_rows_before_restart + 1  # ABORTED 행만 추가
     assert h.fill_count() == 1
     assert h.position_qty() == qty_after_fill
     assert h.cash_amount() == cash_after_fill
@@ -708,9 +745,12 @@ def test_full_day_two_loop_rehearsal(tmp_path: Path, sample_risk_input_factory) 
     assert restart_summary.slots_run == 0
     assert h.fast_loop_store.read_active(Market.KR, "005930").decision_id == "s4-buy-false"
 
-    # fast-loop final counts
+    # fast-loop final counts. 체결은 단 1회(COMMITTED). journal에는 정확히 2개 행이 남는다:
+    #   - 09:31 COMMITTED 1건
+    #   - 10:30 restart 재발화의 ABORTED(no_executable_quantity) 1건
+    # 그 외 모든 tick은 HOLD/조건거짓/stale/max_fires/held로 비발화하여 journal을 건드리지 않는다.
     assert len(h.committed_results()) == 1
-    assert h.journal_rows() >= 1
+    assert h.journal_rows() == 2
 
 
 def test_supervisor_post_close_stops_monitor(tmp_path: Path, sample_risk_input_factory) -> None:
