@@ -32,6 +32,7 @@ from market_data.market_session import (
 from orchestration.active_decision_store import (
     ActiveDecisionStore,
     DecisionPublicationCandidate,
+    SlotState,
 )
 from orchestration.decision_refresh_scheduler import (
     DecisionRefreshScheduler,
@@ -141,6 +142,20 @@ class _ClosedCalendar:
 
     def is_trading_day(self, market: Market, day: date) -> bool:
         return False
+
+
+class _PostCloseTradingCalendar:
+    """거래일이며 세션이 종료(POST_CLOSE)된 상태를 모사한다(early/normal close 이후)."""
+
+    def session_at(self, market: Market, instant: datetime):  # noqa: ANN201
+        from market_data.market_session import MarketSession, MarketSessionState
+
+        return MarketSession(
+            market=market, state=MarketSessionState.POST_CLOSE, as_of=instant
+        )
+
+    def is_trading_day(self, market: Market, day: date) -> bool:
+        return True
 
 
 class _SequencedClock:
@@ -305,3 +320,110 @@ def test_cancellation_leaks_no_tasks(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     assert runner.calls == 0
+
+
+def test_durable_slot_not_rerun_after_restart(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    # 1차 인스턴스가 s1을 실행/게시한다.
+    run1 = _HoldRunner()
+    asyncio.run(
+        _scheduler(
+            calendar=_open_calendar(),
+            runner=run1,
+            store=store,
+            clock=_SequencedClock([_at(time(9, 30))]),
+            max_ticks=1,
+        ).run()
+    )
+    assert run1.calls == ["s1"]
+    assert store.slot_states(Market.KR, _DAY)["s1"] is SlotState.PUBLISHED
+
+    # 2차 인스턴스(재시작): in-memory 상태 없음. durable journal로 s1 재실행 금지.
+    run2 = _NeverRunner()
+    summary = asyncio.run(
+        _scheduler(
+            calendar=_open_calendar(),
+            runner=run2,
+            store=store,
+            clock=_SequencedClock([_at(time(9, 30), second=30)]),
+            max_ticks=1,
+            slot_grace_seconds=600.0,
+        ).run()
+    )
+    assert run2.calls == 0
+    assert summary.slots_run == 0
+
+
+def test_dangling_reserved_reconciled_not_rerun(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    # 직전 프로세스가 s1을 예약만 하고 죽음(RESERVED 잔존)을 모사한다.
+    store.reserve_slot(
+        market=Market.KR,
+        session_date=_DAY,
+        slot_id="s1",
+        scheduled_at=_at(time(9, 30), second=0),
+        now=_at(time(9, 30)),
+    )
+    runner = _NeverRunner()
+    summary = asyncio.run(
+        _scheduler(
+            calendar=_open_calendar(),
+            runner=runner,
+            store=store,
+            clock=_SequencedClock([_at(time(9, 30), second=30)]),
+            max_ticks=1,
+            slot_grace_seconds=600.0,
+        ).run()
+    )
+    # 잔존 RESERVED는 UNCERTAIN으로 reconcile되고 재실행되지 않는다(fail-closed).
+    assert runner.calls == 0
+    assert summary.slots_reconciled == 1
+    assert store.slot_states(Market.KR, _DAY)["s1"] is SlotState.UNCERTAIN
+
+
+def test_evidence_sink_failure_is_terminal_failed_closed(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    runner = _HoldRunner()
+
+    def _boom_sink(_evidence: object) -> None:
+        raise RuntimeError("super-secret-payload-or-credential")
+
+    sup = DecisionRefreshScheduler(
+        market=Market.KR,
+        calendar=_open_calendar(),
+        runner=runner,
+        store=store,
+        slots=_SLOTS,
+        timezone=_KST,
+        clock=_SequencedClock([_at(time(14, 50), second=30)]),
+        sleep=_fake_sleep,
+        poll_interval_seconds=0.01,
+        slot_grace_seconds=600.0,
+        max_ticks=3,
+        on_evidence=_boom_sink,
+    )
+    summary = asyncio.run(sup.run())
+    assert summary.final_state is SchedulerState.FAILED_CLOSED
+    # 원시 예외 문자열이 evidence에 누출되지 않는다.
+    for ev in summary.evidence:
+        assert ev.reason is None or "secret" not in ev.reason
+
+
+def test_early_close_marks_session_closed(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    runner = _NeverRunner()
+    # 거래일이며 세션 종료(POST_CLOSE), 모든 slot 시각이 지났음.
+    sup = _scheduler(
+        calendar=_PostCloseTradingCalendar(),
+        runner=runner,
+        store=store,
+        clock=_SequencedClock([_at(time(15, 45))]),
+        max_ticks=1,
+    )
+    summary = asyncio.run(sup.run())
+    assert runner.calls == 0
+    assert summary.slots_run == 0
+    assert summary.slots_missed_session_closed == 4
+    states = store.slot_states(Market.KR, _DAY)
+    assert all(s is SlotState.MISSED_SESSION_CLOSED for s in states.values())
+    assert len(states) == 4

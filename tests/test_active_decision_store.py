@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,8 @@ from orchestration.active_decision_store import (
     DecisionPublicationCandidate,
     PublicationError,
     PublicationStatus,
+    SlotReservationStatus,
+    SlotState,
 )
 
 NOW = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
@@ -215,7 +217,8 @@ def test_older_decision_cannot_replace_newer(tmp_path: Path) -> None:
 
 def test_expired_candidate_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    decision = _decision(action=AnalysisAction.HOLD)
+    # decision.created_at <= valid_from을 만족시켜 validity-binding이 아닌 만료 경로를 탄다.
+    decision = _decision(action=AnalysisAction.HOLD, created_at=NOW - timedelta(hours=3))
     result = store.publish(
         _candidate(
             decision=decision,
@@ -355,3 +358,147 @@ def test_concurrent_writers_one_winner(tmp_path: Path) -> None:
     assert results.count(PublicationStatus.PUBLISHED) == 1
     assert results.count(PublicationStatus.IDEMPOTENT) == 1
     assert len(store.list_history(Market.KR, "005930")) == 1
+
+
+# --- BLOCKER 4: candidate↔plan validity binding ------------------------------
+
+
+def test_candidate_plan_validity_mismatch_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    # plan validity = [NOW, NOW+DAY]; candidate validity diverges → fail-closed.
+    result = store.publish(
+        _candidate(
+            decision=_decision(action=AnalysisAction.BUY),
+            plan=_plan(action=AnalysisAction.BUY),
+            valid_from=NOW + timedelta(minutes=1),
+            expires_at=NOW + DAY,
+        ),
+        now=NOW,
+    )
+    assert result.status is PublicationStatus.REJECTED_INVALID_BUNDLE
+    assert store.read_active(Market.KR, "005930") is None
+
+
+def test_decision_created_after_valid_from_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    # HOLD(plan 없음)이라도 decision.created_at > valid_from이면 거부.
+    decision = _decision(action=AnalysisAction.HOLD, created_at=NOW)
+    result = store.publish(
+        _candidate(
+            decision=decision,
+            plan=None,
+            valid_from=NOW - timedelta(hours=1),
+            expires_at=NOW + DAY,
+        ),
+        now=NOW,
+    )
+    assert result.status is PublicationStatus.REJECTED_INVALID_BUNDLE
+
+
+# --- BLOCKER 3: read-time integrity (hash + identity) ------------------------
+
+
+def test_read_time_identity_tamper_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.publish(_candidate(plan=_plan()), now=NOW)
+    # identity 컬럼(market)을 변조 → 저장 hash/publication_id 재계산과 불일치 → fail-closed.
+    store._conn.execute(  # type: ignore[attr-defined]
+        "UPDATE decision_bundle_versions SET market = 'US'"
+    )
+    store._conn.commit()  # type: ignore[attr-defined]
+    with pytest.raises(PublicationError):
+        store.read_active(Market.KR, "005930")
+
+
+# --- BLOCKER 2: cross-connection writer ordering -----------------------------
+
+
+def test_cross_connection_older_cannot_cover_newer(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    store_b = ActiveDecisionStore(path)
+    new_at = NOW + timedelta(hours=1)
+    # store_a가 최신 결정을 먼저 게시.
+    assert (
+        store_a.publish(
+            _candidate(
+                decision=_decision(decision_id="d-new", created_at=new_at),
+                plan=_plan(decision_id="d-new", created_at=new_at),
+                valid_from=new_at,
+                expires_at=new_at + DAY,
+            ),
+            now=new_at,
+        ).status
+        is PublicationStatus.PUBLISHED
+    )
+    # 다른 connection(store_b)이 더 오래된 결정으로 덮으려 해도 거부된다.
+    older = store_b.publish(
+        _candidate(
+            decision=_decision(decision_id="d-old", created_at=NOW),
+            plan=_plan(decision_id="d-old", created_at=NOW),
+        ),
+        now=new_at,
+    )
+    assert older.status is PublicationStatus.REJECTED_OLDER
+    # 양쪽 connection 모두 최신 결정을 final pointer로 본다.
+    a = store_a.read_active(Market.KR, "005930")
+    b = store_b.read_active(Market.KR, "005930")
+    assert a is not None and a.decision_id == "d-new"
+    assert b is not None and b.decision_id == "d-new"
+    store_a.close()
+    store_b.close()
+
+
+# --- BLOCKER 1: durable slot journal -----------------------------------------
+
+_SD = date(2026, 5, 22)
+
+
+def test_slot_reserve_then_finalize_is_terminal_across_instances(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    r1 = store_a.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+    )
+    assert r1.status is SlotReservationStatus.RESERVED
+    store_a.finalize_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        state=SlotState.PUBLISHED, now=NOW, outcome="published", publication_id="p1",
+    )
+    store_a.close()
+
+    # 재시작(새 인스턴스)에서도 종료 상태가 유지되어 재실행되지 않는다.
+    store_b = ActiveDecisionStore(path)
+    r2 = store_b.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+    )
+    assert r2.status is SlotReservationStatus.ALREADY_TERMINAL
+    assert r2.existing_state is SlotState.PUBLISHED
+    assert store_b.slot_states(Market.KR, _SD)["s1"] is SlotState.PUBLISHED
+    store_b.close()
+
+
+def test_dangling_reserved_detected_across_instances(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    store_a.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+    )
+    store_a.close()  # finalize 없이 종료(크래시 모사) → RESERVED 잔존.
+
+    store_b = ActiveDecisionStore(path)
+    r = store_b.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+    )
+    assert r.status is SlotReservationStatus.DANGLING_RESERVED
+    assert r.existing_state is SlotState.RESERVED
+    store_b.close()
+
+
+def test_finalize_requires_terminal_state(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(PublicationError):
+        store.finalize_slot(
+            market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+            state=SlotState.RESERVED, now=NOW,
+        )
