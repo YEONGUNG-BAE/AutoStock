@@ -68,6 +68,10 @@ _RUNNER_DEPENDENCY_ERROR = "runner_dependency_error"
 _PUBLICATION_DEPENDENCY_ERROR = "publication_dependency_error"
 _DANGLING_RESERVED = "dangling_reserved_reconciled"
 _SESSION_CLOSED = "session_closed"
+# runner가 게시 직전 예약(lease/token)을 잃음 → 게시 안 됨(pointer 불변), terminal fail-closed.
+_RESERVATION_LOST = "reservation_lost"
+# runner는 완료됐으나 완료 시점에 세션이 닫힘 → 게시 금지, 직전 bundle 유지.
+_COMPLETED_OUTSIDE_SESSION = "completed_outside_session"
 
 
 class SchedulerError(Exception):
@@ -242,8 +246,7 @@ class DecisionRefreshScheduler:
         session_date = now.astimezone(self._tz).date()
 
         if session.state is MarketSessionState.OPEN:
-            await self._tick_open(session_date, now, summary)
-            return False
+            return await self._tick_open(session_date, now, summary)
 
         if session.state in (MarketSessionState.POST_CLOSE, MarketSessionState.CLOSED):
             # 거래일인데 세션이 종료된 뒤 남은 due slot → MISSED_SESSION_CLOSED.
@@ -258,11 +261,12 @@ class DecisionRefreshScheduler:
 
     async def _tick_open(
         self, session_date: date, now: datetime, summary: RefreshSummary
-    ) -> None:
+    ) -> bool:
+        """OPEN tick 처리. terminal(FAILED_CLOSED)이면 True를 반환한다."""
         states = self._reconcile_dangling(session_date, now, summary)
         due = self._due_slots(session_date, now, states)
         if not due:
-            return
+            return False
 
         # 가장 최근 due slot만 실행 후보. 나머지는 catch-up 금지로 MISSED.
         most_recent_at, most_recent = due[-1]
@@ -272,9 +276,11 @@ class DecisionRefreshScheduler:
         if (now - most_recent_at).total_seconds() > self._grace:
             # 가장 최근 slot조차 grace를 넘겨 stale → 실행하지 않고 MISSED.
             self._mark_missed(session_date, most_recent, most_recent_at, now, summary)
-            return
+            return False
 
-        await self._run_slot(session_date, most_recent, most_recent_at, now, summary)
+        return await self._run_slot(
+            session_date, most_recent, most_recent_at, now, summary
+        )
 
     def _reconcile_dangling(
         self, session_date: date, now: datetime, summary: RefreshSummary
@@ -399,7 +405,12 @@ class DecisionRefreshScheduler:
         scheduled_at: datetime,
         now: datetime,
         summary: RefreshSummary,
-    ) -> None:
+    ) -> bool:
+        """slot을 실행/게시한다. terminal(FAILED_CLOSED)이면 True를 반환한다.
+
+        runner 완료 후 (1) 완료 시각 재독, (2) 완료 시각 세션 재검증(닫혔으면 게시 금지),
+        (3) 게시+slot 종료를 store의 단일 트랜잭션(`publish_reserved_slot`)으로 원자 수행한다.
+        lease/token을 잃었으면(다른 인스턴스가 reconcile) 게시되지 않으며 terminal fail-closed."""
         # runner 호출 전에 durable 예약(owner+lease+token). 이미 종료/타 owner 실행 중이면
         # 재실행하지 않는다. lease 만료 잔존이면 reconcile만 하고 재실행하지 않는다.
         reservation = self._store.reserve_slot(
@@ -416,10 +427,10 @@ class DecisionRefreshScheduler:
             SlotReservationStatus.ALREADY_TERMINAL,
             SlotReservationStatus.ACTIVE_ELSEWHERE,
         ):
-            return
+            return False
         if status is SlotReservationStatus.DANGLING_RESERVED:
             self._reconcile_one(session_date, slot.slot_id, scheduled_at, now, summary)
-            return
+            return False
 
         token = reservation.token
         assert token is not None  # RESERVED는 항상 token을 동반한다.
@@ -436,30 +447,75 @@ class DecisionRefreshScheduler:
             raise
         except Exception:  # noqa: BLE001 - runner 실패는 slot 종료 + 직전 bundle 유지
             # runner가 LLM/network로 오래 걸렸을 수 있으므로 완료 시각을 다시 읽는다.
-            self._complete_failure(
+            completed = self._complete_failure(
                 session_date, slot, scheduled_at, token, self._now(), summary,
                 outcome=RefreshSlotOutcome.RUNNER_FAILED,
                 reason=_RUNNER_DEPENDENCY_ERROR,
             )
             summary.runner_failures += 1
-            return
+            if not completed:
+                # 예약을 잃음(lease 만료 후 타 인스턴스가 reconcile) → fail-closed.
+                summary.final_state = SchedulerState.FAILED_CLOSED
+                return True
+            return False
 
-        # runner 완료 시각을 다시 읽어 publish/finalize/evidence에 사용한다(stale now 방지).
+        # runner 완료 시각을 다시 읽어 세션 재검증/게시/evidence에 사용한다(stale now 방지).
         completion_now = self._now()
+
+        # 완료 시점 세션 재검증: runner가 LLM/network로 오래 걸려 장이 닫혔을 수 있다.
+        # 닫힌 뒤에는 게시하지 않는다(장 마감 후 게시 금지, 직전 bundle 유지).
         try:
-            result = self._store.publish(
-                candidate, now=completion_now, expected_market=self._market
+            completion_session = self._calendar.session_at(self._market, completion_now)
+        except Exception:  # noqa: BLE001 - calendar provider 예외는 terminal fail-closed
+            return True
+        if completion_session.state is not MarketSessionState.OPEN:
+            return self._complete_outside_session(
+                session_date, slot, scheduled_at, token, completion_now, summary
+            )
+
+        # 게시 + slot 종료를 단일 트랜잭션으로 원자 수행(crash window/ownership 경합 제거).
+        try:
+            result = self._store.publish_reserved_slot(
+                candidate,
+                now=completion_now,
+                market=self._market,
+                session_date=session_date,
+                slot_id=slot.slot_id,
+                token=token,
+                expected_market=self._market,
             )
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - 게시 예외는 slot 종료 + 직전 bundle 유지
-            self._complete_failure(
+        except Exception:  # noqa: BLE001 - 게시 예외는 트랜잭션 롤백 → slot 별도 FAILED 종료
+            completed = self._complete_failure(
                 session_date, slot, scheduled_at, token, completion_now, summary,
                 outcome=RefreshSlotOutcome.PUBLISH_FAILED,
                 reason=_PUBLICATION_DEPENDENCY_ERROR,
             )
             summary.publish_failures += 1
-            return
+            if not completed:
+                summary.final_state = SchedulerState.FAILED_CLOSED
+                return True
+            return False
+
+        if result.status is PublicationStatus.REJECTED_RESERVATION_LOST:
+            # lease/token을 잃어 게시되지 않음(active pointer 불변) → terminal fail-closed.
+            summary.publish_failures += 1
+            self.last_outcome = RefreshSlotOutcome.PUBLISH_FAILED
+            self._record(
+                summary,
+                SchedulerEvidence(
+                    at=completion_now,
+                    session_date=session_date,
+                    slot_id=slot.slot_id,
+                    scheduled_at=scheduled_at,
+                    outcome=RefreshSlotOutcome.PUBLISH_FAILED,
+                    publication_status=result.status,
+                    reason=_RESERVATION_LOST,
+                ),
+            )
+            summary.final_state = SchedulerState.FAILED_CLOSED
+            return True
 
         published_ok = result.status in (
             PublicationStatus.PUBLISHED,
@@ -471,30 +527,12 @@ class DecisionRefreshScheduler:
                 summary.slots_published += 1
             self.last_outcome = RefreshSlotOutcome.RAN
             outcome = RefreshSlotOutcome.RAN
-            self._store.complete_slot(
-                market=self._market,
-                session_date=session_date,
-                slot_id=slot.slot_id,
-                state=SlotState.PUBLISHED,
-                token=token,
-                now=completion_now,
-                outcome=result.status.value,
-                publication_id=result.publication_id,
-            )
         else:
             # 게시 거부(conflict/older/expired/invalid/market mismatch)는 성공 위장 금지.
+            # publish_reserved_slot이 이미 slot을 FAILED로 종료했다.
             summary.publish_failures += 1
             self.last_outcome = RefreshSlotOutcome.PUBLISH_FAILED
             outcome = RefreshSlotOutcome.PUBLISH_FAILED
-            self._store.complete_slot(
-                market=self._market,
-                session_date=session_date,
-                slot_id=slot.slot_id,
-                state=SlotState.FAILED,
-                token=token,
-                now=completion_now,
-                outcome=result.status.value,
-            )
         self._record(
             summary,
             SchedulerEvidence(
@@ -508,6 +546,58 @@ class DecisionRefreshScheduler:
                 reason=result.reason,
             ),
         )
+        return False
+
+    def _complete_outside_session(
+        self,
+        session_date: date,
+        slot: SlotConfig,
+        scheduled_at: datetime,
+        token: str,
+        completion_now: datetime,
+        summary: RefreshSummary,
+    ) -> bool:
+        """runner는 완료됐으나 완료 시점 세션이 닫힘 → 게시 금지, slot을 MISSED_SESSION_CLOSED로
+        종료한다(직전 active pointer 유지). CAS 실패(예약 상실)면 terminal fail-closed."""
+        completed = self._store.complete_slot(
+            market=self._market,
+            session_date=session_date,
+            slot_id=slot.slot_id,
+            state=SlotState.MISSED_SESSION_CLOSED,
+            token=token,
+            now=completion_now,
+            outcome=_COMPLETED_OUTSIDE_SESSION,
+        )
+        if not completed:
+            self.last_outcome = RefreshSlotOutcome.PUBLISH_FAILED
+            self._record(
+                summary,
+                SchedulerEvidence(
+                    at=completion_now,
+                    session_date=session_date,
+                    slot_id=slot.slot_id,
+                    scheduled_at=scheduled_at,
+                    outcome=RefreshSlotOutcome.PUBLISH_FAILED,
+                    reason=_RESERVATION_LOST,
+                ),
+            )
+            summary.publish_failures += 1
+            summary.final_state = SchedulerState.FAILED_CLOSED
+            return True
+        summary.slots_missed_session_closed += 1
+        self.last_outcome = RefreshSlotOutcome.MISSED_SESSION_CLOSED
+        self._record(
+            summary,
+            SchedulerEvidence(
+                at=completion_now,
+                session_date=session_date,
+                slot_id=slot.slot_id,
+                scheduled_at=scheduled_at,
+                outcome=RefreshSlotOutcome.MISSED_SESSION_CLOSED,
+                reason=_COMPLETED_OUTSIDE_SESSION,
+            ),
+        )
+        return False
 
     def _reconcile_one(
         self,
@@ -551,9 +641,12 @@ class DecisionRefreshScheduler:
         *,
         outcome: RefreshSlotOutcome,
         reason: str,
-    ) -> None:
-        self.last_outcome = outcome
-        self._store.complete_slot(
+    ) -> bool:
+        """slot을 FAILED로 종료(CAS)하고 evidence를 남긴다. 반환값은 CAS 성공 여부.
+
+        CAS 실패는 lease 만료 후 다른 인스턴스가 reconcile(UNCERTAIN)했다는 뜻이므로
+        성공 evidence를 남기지 않는다(호출자가 terminal fail-closed 처리)."""
+        completed = self._store.complete_slot(
             market=self._market,
             session_date=session_date,
             slot_id=slot.slot_id,
@@ -562,6 +655,21 @@ class DecisionRefreshScheduler:
             now=now,
             outcome=reason,
         )
+        if not completed:
+            self.last_outcome = RefreshSlotOutcome.PUBLISH_FAILED
+            self._record(
+                summary,
+                SchedulerEvidence(
+                    at=now,
+                    session_date=session_date,
+                    slot_id=slot.slot_id,
+                    scheduled_at=scheduled_at,
+                    outcome=RefreshSlotOutcome.PUBLISH_FAILED,
+                    reason=_RESERVATION_LOST,
+                ),
+            )
+            return False
+        self.last_outcome = outcome
         self._record(
             summary,
             SchedulerEvidence(
@@ -573,6 +681,7 @@ class DecisionRefreshScheduler:
                 reason=reason,
             ),
         )
+        return True
 
     def _record(self, summary: RefreshSummary, evidence: SchedulerEvidence) -> None:
         summary.evidence.append(evidence)

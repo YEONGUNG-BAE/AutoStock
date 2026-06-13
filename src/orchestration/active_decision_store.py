@@ -71,6 +71,7 @@ class PublicationStatus(StrEnum):
     REJECTED_CONFLICT = "rejected_conflict"
     REJECTED_OLDER = "rejected_older"
     REJECTED_EXPIRED = "rejected_expired"
+    REJECTED_RESERVATION_LOST = "rejected_reservation_lost"
 
 
 class SlotState(StrEnum):
@@ -198,6 +199,23 @@ class _PointerView:
     bundle_hash: str
 
 
+@dataclass(frozen=True)
+class _Prepared:
+    """검증을 통과한 게시 후보의 파생값. `publish`/`publish_reserved_slot`이 공유한다."""
+
+    market: str
+    symbol: str
+    decision_id: str
+    decision_created_at: datetime
+    plan_id: str | None
+    valid_from: datetime
+    expires_at: datetime
+    bundle_json: str
+    bundle_hash: str
+    source_payload_hash: str
+    publication_id: str
+
+
 class ActiveDecisionStore:
     """원자적 decision bundle 게시 저장소. version 이력은 append-only, pointer만 교체한다.
 
@@ -263,6 +281,48 @@ class ActiveDecisionStore:
         `expected_market`이 주어지면 후보 decision의 market과 정확히 일치해야 한다
         (scheduler↔candidate market binding: KR 스케줄러가 US 후보를 게시하지 못하게 함).
         """
+        prepared = self._validate_and_prepare(
+            candidate, now=now, expected_market=expected_market
+        )
+        if isinstance(prepared, PublicationResult):
+            return prepared
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._read_pointer_view(prepared.market, prepared.symbol)
+                result = self._publish_decision(
+                    current=current,
+                    decision_id=prepared.decision_id,
+                    decision_created_at=prepared.decision_created_at,
+                    bundle_hash=prepared.bundle_hash,
+                    expires_at=prepared.expires_at,
+                    now=now,
+                    publication_id=prepared.publication_id,
+                    market=prepared.market,
+                    symbol=prepared.symbol,
+                    plan_id=prepared.plan_id,
+                    valid_from=prepared.valid_from,
+                    bundle_json=prepared.bundle_json,
+                    source_payload_hash=prepared.source_payload_hash,
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+            return result
+
+    def _validate_and_prepare(
+        self,
+        candidate: DecisionPublicationCandidate,
+        *,
+        now: datetime,
+        expected_market: Market | str | None,
+    ) -> _Prepared | PublicationResult:
+        """후보를 검증하고 게시 파생값을 계산한다. 정상 거부는 `PublicationResult`로 반환한다.
+
+        DB를 만지지 않는 순수 검증 단계이므로 `publish`와 `publish_reserved_slot`이
+        동일한 게시 정책을 공유한다(중복 구현 금지)."""
         require_timezone_aware_datetime(now, field_name="now")
         valid_from = require_timezone_aware_datetime(
             candidate.valid_from, field_name="valid_from"
@@ -308,45 +368,183 @@ class ActiveDecisionStore:
                     reason="candidate validity must equal plan validity for BUY/SELL",
                 )
 
+        bundle_json = _bundle_to_json(bundle, valid_from=valid_from, expires_at=expires_at)
+        bundle_hash = payload_sha256(json.loads(bundle_json))
         market = decision.market
         symbol = decision.symbol
         decision_id = decision.decision_id.value
-        plan_id = bundle.plan.plan_id if bundle.plan is not None else None
-        bundle_json = _bundle_to_json(bundle, valid_from=valid_from, expires_at=expires_at)
-        bundle_hash = payload_sha256(json.loads(bundle_json))
-        source_payload_hash = candidate.snapshot.payload_hash
-        publication_id = _publication_id(
+        return _Prepared(
             market=market,
             symbol=symbol,
             decision_id=decision_id,
             decision_created_at=decision_created_at,
+            plan_id=bundle.plan.plan_id if bundle.plan is not None else None,
+            valid_from=valid_from,
+            expires_at=expires_at,
+            bundle_json=bundle_json,
             bundle_hash=bundle_hash,
+            source_payload_hash=candidate.snapshot.payload_hash,
+            publication_id=_publication_id(
+                market=market,
+                symbol=symbol,
+                decision_id=decision_id,
+                decision_created_at=decision_created_at,
+                bundle_hash=bundle_hash,
+            ),
         )
+
+    def publish_reserved_slot(
+        self,
+        candidate: DecisionPublicationCandidate,
+        *,
+        now: datetime,
+        market: Market | str,
+        session_date: date,
+        slot_id: str,
+        token: str,
+        expected_market: Market | str | None = None,
+    ) -> PublicationResult:
+        """예약 토큰을 보유한 owner가 단일 트랜잭션에서 게시 + slot 종료를 원자적으로 수행한다.
+
+        같은 `BEGIN IMMEDIATE` 안에서:
+          1) 예약 가드: slot이 여전히 RESERVED + 동일 token + lease 유효해야 한다.
+             아니면 ROLLBACK + REJECTED_RESERVATION_LOST (active pointer 절대 불변).
+          2) 검증 거부(invalid/conflict/older/expired)면 slot을 FAILED로 종료(pointer 불변).
+          3) 정상 게시면 version insert + active pointer update + slot PUBLISHED를 함께 커밋.
+
+        publish와 complete_slot을 별도 트랜잭션으로 두던 crash window와, lease 만료 후에도
+        게시되던 ownership 경합을 단일 트랜잭션으로 닫는다."""
+        prepared = self._validate_and_prepare(
+            candidate, now=now, expected_market=expected_market
+        )
+        market_value = _market_value(market)
+        sd = session_date.isoformat()
 
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                current = self._read_pointer_view(market, symbol)
+                # 1) 예약 가드(CAS): RESERVED + token 일치 + lease 유효.
+                row = self._conn.execute(
+                    "SELECT state, reservation_token, lease_expires_at "
+                    "FROM decision_refresh_slots "
+                    "WHERE market = ? AND session_date = ? AND slot_id = ?",
+                    (market_value, sd, slot_id),
+                ).fetchone()
+                if not self._reservation_held(row, token=token, now=now):
+                    self._conn.execute("ROLLBACK")
+                    return PublicationResult(
+                        PublicationStatus.REJECTED_RESERVATION_LOST,
+                        reason="slot reservation lost (state/token/lease changed).",
+                    )
+
+                # 2) 검증 거부: slot을 FAILED로 종료하되 active pointer는 건드리지 않는다.
+                if isinstance(prepared, PublicationResult):
+                    self._finalize_slot_in_tx(
+                        market_value=market_value,
+                        sd=sd,
+                        slot_id=slot_id,
+                        token=token,
+                        state=SlotState.FAILED,
+                        now=now,
+                        outcome=prepared.status.value,
+                        publication_id=prepared.publication_id,
+                    )
+                    self._conn.execute("COMMIT")
+                    return prepared
+
+                # 3) 게시.
+                current = self._read_pointer_view(prepared.market, prepared.symbol)
                 result = self._publish_decision(
                     current=current,
-                    decision_id=decision_id,
-                    decision_created_at=decision_created_at,
-                    bundle_hash=bundle_hash,
-                    expires_at=expires_at,
+                    decision_id=prepared.decision_id,
+                    decision_created_at=prepared.decision_created_at,
+                    bundle_hash=prepared.bundle_hash,
+                    expires_at=prepared.expires_at,
                     now=now,
-                    publication_id=publication_id,
-                    market=market,
-                    symbol=symbol,
-                    plan_id=plan_id,
-                    valid_from=valid_from,
-                    bundle_json=bundle_json,
-                    source_payload_hash=source_payload_hash,
+                    publication_id=prepared.publication_id,
+                    market=prepared.market,
+                    symbol=prepared.symbol,
+                    plan_id=prepared.plan_id,
+                    valid_from=prepared.valid_from,
+                    bundle_json=prepared.bundle_json,
+                    source_payload_hash=prepared.source_payload_hash,
+                )
+                slot_state = (
+                    SlotState.PUBLISHED
+                    if result.status
+                    in (PublicationStatus.PUBLISHED, PublicationStatus.IDEMPOTENT)
+                    else SlotState.FAILED
+                )
+                self._finalize_slot_in_tx(
+                    market_value=market_value,
+                    sd=sd,
+                    slot_id=slot_id,
+                    token=token,
+                    state=slot_state,
+                    now=now,
+                    outcome=result.status.value,
+                    publication_id=result.publication_id,
                 )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
             return result
+
+    @staticmethod
+    def _reservation_held(
+        row: sqlite3.Row | None, *, token: str, now: datetime
+    ) -> bool:
+        """slot row가 여전히 RESERVED + 동일 token + lease 유효한지(소유권 유지) 검사."""
+        if row is None or SlotState(row["state"]) is not SlotState.RESERVED:
+            return False
+        if row["reservation_token"] != token:
+            return False
+        lease = (
+            _parse(row["lease_expires_at"])
+            if row["lease_expires_at"] is not None
+            else None
+        )
+        return lease is not None and lease > now
+
+    def _finalize_slot_in_tx(
+        self,
+        *,
+        market_value: str,
+        sd: str,
+        slot_id: str,
+        token: str,
+        state: SlotState,
+        now: datetime,
+        outcome: str | None,
+        publication_id: str | None,
+    ) -> None:
+        """진행 중인 트랜잭션 안에서 RESERVED slot을 종료 상태로 전이한다(CAS).
+
+        호출 전 예약 가드를 이미 통과했으므로 정확히 1행이 갱신되어야 한다 — 아니면 예약
+        불변식이 깨진 것이므로 fail-closed."""
+        cur = self._conn.execute(
+            """
+            UPDATE decision_refresh_slots
+            SET state = ?, finished_at = ?, outcome = ?, publication_id = ?
+            WHERE market = ? AND session_date = ? AND slot_id = ?
+              AND state = 'reserved' AND reservation_token = ?
+            """,
+            (
+                state.value,
+                now.isoformat(),
+                outcome,
+                publication_id,
+                market_value,
+                sd,
+                slot_id,
+                token,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise PublicationError(
+                "reserved slot disappeared mid-transaction (reservation invariant broken)."
+            )
 
     def _publish_decision(
         self,

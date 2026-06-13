@@ -339,12 +339,18 @@ def test_reader_sees_old_or_new_never_partial(tmp_path: Path) -> None:
 def test_concurrent_writers_one_winner(tmp_path: Path) -> None:
     store = _store(tmp_path)
     results: list[PublicationStatus] = []
+    thread_errors: list[BaseException] = []
     lock = threading.Lock()
     start = threading.Barrier(2)
 
     def _worker() -> None:
         start.wait()
-        res = store.publish(_candidate(plan=_plan()), now=NOW)
+        try:
+            res = store.publish(_candidate(plan=_plan()), now=NOW)
+        except BaseException as exc:  # noqa: BLE001 - 스레드 예외를 수집해 표면화
+            with lock:
+                thread_errors.append(exc)
+            return
         with lock:
             results.append(res.status)
 
@@ -354,6 +360,9 @@ def test_concurrent_writers_one_winner(tmp_path: Path) -> None:
     for t in threads:
         t.join()
 
+    # 어떤 스레드도 예외(예: "database is locked")를 외부로 표면화하지 않아야 한다.
+    assert thread_errors == []
+    assert len(results) == 2
     # exactly one PUBLISHED winner; the other is idempotent; one version row.
     assert results.count(PublicationStatus.PUBLISHED) == 1
     assert results.count(PublicationStatus.IDEMPOTENT) == 1
@@ -641,3 +650,117 @@ def test_concurrent_writers_newer_is_final_pointer(tmp_path: Path) -> None:
     assert PublicationStatus.PUBLISHED in results
     store_a.close()
     store_b.close()
+
+
+# --- round-3: atomic publish_reserved_slot (publish + slot 종료 단일 트랜잭션) -----
+
+
+def test_publish_reserved_slot_atomic_publish_and_complete(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=600.0,
+    )
+    assert r.token is not None
+    result = store.publish_reserved_slot(
+        _candidate(plan=_plan()),
+        now=NOW,
+        market=Market.KR,
+        session_date=_SD,
+        slot_id="s1",
+        token=r.token,
+        expected_market=Market.KR,
+    )
+    assert result.status is PublicationStatus.PUBLISHED
+    # 게시와 slot 종료가 같은 트랜잭션에서 함께 커밋된다.
+    active = store.read_active(Market.KR, "005930")
+    assert active is not None and active.publication_id == result.publication_id
+    assert store.slot_states(Market.KR, _SD)["s1"] is SlotState.PUBLISHED
+
+
+def test_publish_reserved_slot_reservation_lost_does_not_publish(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=60.0,
+    )
+    assert r.token is not None
+    # lease 만료 후 다른 인스턴스가 reconcile했다고 모사(RESERVED→UNCERTAIN).
+    after = NOW + timedelta(seconds=120)
+    assert store.reconcile_expired_reservation(
+        market=Market.KR, session_date=_SD, slot_id="s1", now=after, outcome="dangling"
+    )
+    # 예약을 잃은 owner가 뒤늦게 게시 시도 → 게시 안 됨(pointer 불변), 거부 상태 반환.
+    result = store.publish_reserved_slot(
+        _candidate(plan=_plan()),
+        now=after,
+        market=Market.KR,
+        session_date=_SD,
+        slot_id="s1",
+        token=r.token,
+        expected_market=Market.KR,
+    )
+    assert result.status is PublicationStatus.REJECTED_RESERVATION_LOST
+    assert store.read_active(Market.KR, "005930") is None
+    assert store.list_history(Market.KR, "005930") == ()
+    # slot은 reconcile된 UNCERTAIN 그대로 유지된다(뒤늦은 owner가 덮지 못함).
+    assert store.slot_states(Market.KR, _SD)["s1"] is SlotState.UNCERTAIN
+
+
+def test_publish_reserved_slot_invalid_bundle_marks_failed_keeps_pointer(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    # 직전 활성 bundle을 먼저 게시(이후 게시 실패가 이를 덮지 않아야 함).
+    store.publish(_candidate(plan=_plan()), now=NOW)
+    before = store.read_active(Market.KR, "005930")
+    assert before is not None
+
+    new_at = NOW + timedelta(hours=1)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=date(2026, 5, 23), slot_id="s2",
+        scheduled_at=new_at, owner_id="A", now=new_at, lease_seconds=600.0,
+    )
+    assert r.token is not None
+    # BUY인데 plan 누락 → 검증 거부. slot은 FAILED로 종료되되 active pointer는 불변.
+    result = store.publish_reserved_slot(
+        _candidate(plan=None),
+        now=new_at,
+        market=Market.KR,
+        session_date=date(2026, 5, 23),
+        slot_id="s2",
+        token=r.token,
+        expected_market=Market.KR,
+    )
+    assert result.status is PublicationStatus.REJECTED_INVALID_BUNDLE
+    after = store.read_active(Market.KR, "005930")
+    assert after is not None and after.publication_id == before.publication_id
+    assert store.slot_states(Market.KR, date(2026, 5, 23))["s2"] is SlotState.FAILED
+
+
+def test_publish_reserved_slot_fault_rolls_back_publish_and_slot(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=600.0,
+    )
+    assert r.token is not None
+
+    def _boom() -> None:
+        raise RuntimeError("simulated mid-transaction failure")
+
+    store._fault_after_version_insert = _boom  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError):
+        store.publish_reserved_slot(
+            _candidate(plan=_plan()),
+            now=NOW,
+            market=Market.KR,
+            session_date=_SD,
+            slot_id="s1",
+            token=r.token,
+            expected_market=Market.KR,
+        )
+    # version insert 후 fault → 전체 롤백: pointer 없음, slot은 RESERVED로 남는다.
+    assert store.read_active(Market.KR, "005930") is None
+    assert store.list_history(Market.KR, "005930") == ()
+    assert store.slot_states(Market.KR, _SD)["s1"] is SlotState.RESERVED

@@ -503,3 +503,113 @@ def test_scheduler_candidate_market_mismatch_fails_closed(tmp_path: Path) -> Non
     assert store.read_active(Market.KR, "005930") is None
     assert store.read_active("US", "005930") is None
     assert store.slot_states(Market.KR, _DAY)["s1"] is SlotState.FAILED
+
+
+class _LeaseStealingRunner:
+    """runner 실행 도중 다른 인스턴스가 lease 만료를 보고 reconcile했다고 모사한다.
+
+    refresh() 안에서 같은 db에 두 번째 store를 열어 예약을 UNCERTAIN으로 reconcile한다 →
+    완료 후 게시 시점에 owner는 더 이상 예약을 보유하지 않는다(REJECTED_RESERVATION_LOST)."""
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self.calls: list[str] = []
+
+    async def refresh(
+        self, *, market: Market, session_date: date, slot_id: str, scheduled_at: datetime
+    ) -> DecisionPublicationCandidate:
+        self.calls.append(slot_id)
+        other = ActiveDecisionStore(self._db_path)
+        try:
+            # lease가 만료된 것으로 보이게 충분히 미래 시각으로 reconcile.
+            other.reconcile_expired_reservation(
+                market=market,
+                session_date=session_date,
+                slot_id=slot_id,
+                now=scheduled_at + timedelta(hours=2),
+                outcome="stolen",
+            )
+        finally:
+            other.close()
+        decision = _hold_decision(f"d-{slot_id}", scheduled_at)
+        snapshot = DecisionSnapshot.create(
+            decision_id=decision.decision_id,
+            created_at=decision.created_at,
+            schema_name=ANALYSIS_DECISION_SCHEMA,
+            raw_payload=decision.model_dump(mode="json"),
+            validation_result=ValidationResult(
+                passed=True, issues=(), schema_name=ANALYSIS_DECISION_SCHEMA
+            ),
+        )
+        return DecisionPublicationCandidate(
+            snapshot=snapshot,
+            plan=None,
+            valid_from=scheduled_at,
+            expires_at=scheduled_at + DAY_DELTA,
+        )
+
+
+def test_lease_lost_during_runner_blocks_publish_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "a.sqlite3"
+    store = ActiveDecisionStore(path)
+    runner = _LeaseStealingRunner(path)
+    # tick now(9:30) + completion 재읽기(9:30). reconcile는 runner 내부에서 미래 시각으로 수행.
+    clock = _SequencedClock([_at(time(9, 30)), _at(time(9, 30))])
+    sup = _scheduler(
+        calendar=_open_calendar(), runner=runner, store=store, clock=clock, max_ticks=1
+    )
+    summary = asyncio.run(sup.run())
+    # runner는 호출됐지만 예약을 잃어 게시되지 않는다(active pointer 불변) → terminal fail-closed.
+    assert runner.calls == ["s1"]
+    assert summary.slots_run == 0
+    assert summary.slots_published == 0
+    assert summary.publish_failures == 1
+    assert summary.final_state is SchedulerState.FAILED_CLOSED
+    assert store.read_active(Market.KR, "005930") is None
+    # slot은 reconcile된 UNCERTAIN 그대로(뒤늦은 owner가 덮지 못함), 중복 게시 없음.
+    assert store.slot_states(Market.KR, _DAY)["s1"] is SlotState.UNCERTAIN
+    assert store.list_history(Market.KR, "005930") == ()
+    store.close()
+
+
+class _CloseAfterOpenCalendar:
+    """tick 시점엔 OPEN, runner 완료 후 재검증 시점엔 CLOSED를 반환한다(장 마감 후 완료 모사)."""
+
+    def __init__(self, close_after: datetime) -> None:
+        self._close_after = close_after
+
+    def session_at(self, market: Market, instant: datetime):  # noqa: ANN201
+        from market_data.market_session import MarketSession, MarketSessionState
+
+        state = (
+            MarketSessionState.OPEN
+            if instant < self._close_after
+            else MarketSessionState.CLOSED
+        )
+        return MarketSession(market=market, state=state, as_of=instant)
+
+    def is_trading_day(self, market: Market, day: date) -> bool:
+        return True
+
+
+def test_completion_after_close_does_not_publish(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    runner = _HoldRunner()
+    # tick now=14:51(OPEN, s4@14:50 grace 내), runner 완료 시각=15:40(>15:30 → CLOSED) → 게시 금지.
+    clock = _SequencedClock([_at(time(14, 51)), _at(time(15, 40))])
+    sup = _scheduler(
+        calendar=_CloseAfterOpenCalendar(_at(time(15, 30))),
+        runner=runner,
+        store=store,
+        clock=clock,
+        max_ticks=1,
+    )
+    summary = asyncio.run(sup.run())
+    # runner는 완료됐지만 완료 시점 장이 닫혀 게시하지 않는다(직전 bundle 유지: 여기선 없음).
+    assert runner.calls == ["s4"]  # 14:51에 가장 최근 due slot은 s4(14:50).
+    assert summary.slots_run == 0
+    assert summary.slots_published == 0
+    assert summary.slots_missed_session_closed == 1
+    assert store.read_active(Market.KR, "005930") is None
+    assert store.slot_states(Market.KR, _DAY)["s4"] is SlotState.MISSED_SESSION_CLOSED
+    assert store.list_history(Market.KR, "005930") == ()
