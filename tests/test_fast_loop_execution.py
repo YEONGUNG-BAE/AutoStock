@@ -495,8 +495,45 @@ def _seed_latest(at: datetime) -> LatestMarketStateStore:
     return store
 
 
+@pytest.mark.parametrize("bad_update", [object(), _BadUpdate()])
+def test_malformed_wrong_object_type_rejected_no_dependencies(
+    sample_risk_input_factory, bad_update: object
+) -> None:
+    """AppliedMarketUpdate가 아닌 객체는 첫 isinstance 검사에서만 거부된다."""
+    gate = _TrackingGate()
+    reader = _TrackingReader()
+    coord = _FakeCoordinator()
+    orch = FastLoopExecutionOrchestrator(
+        active_reader=reader,
+        latest_store=_seed_latest(NOW),
+        execution_gate=gate,
+        execution_inputs_provider=_inputs_provider(sample_risk_input_factory),
+        coordinator=coord,  # type: ignore[arg-type]
+    )
+    result = orch.handle_applied_update(bad_update)  # type: ignore[arg-type]
+    assert result.status is FastLoopExecutionStatus.MALFORMED_UPDATE
+    assert gate.calls == 0
+    assert reader.calls == 0
+    assert coord.calls == 0
+
+
+def _malformed_applied_update(**overrides: object) -> AppliedMarketUpdate:
+    """유효 기본값 위에 field-level 오류만 주입한다(type: ignore로 pydantic 우회)."""
+    base: dict[str, object] = {
+        "market": Market.KR,
+        "symbol": "005930",
+        "event_type": MarketEventType.TRADE,
+        "provider": "kis",
+        "channel": "t",
+        "sequence": 1,
+        "applied_at": NOW,
+    }
+    base.update(overrides)
+    return AppliedMarketUpdate(**base)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
-    "attrs",
+    "overrides",
     [
         {"market": "KR"},
         {"event_type": "trade"},
@@ -512,9 +549,10 @@ def _seed_latest(at: datetime) -> LatestMarketStateStore:
         {"applied_at": "timestamp"},
     ],
 )
-def test_malformed_update_rejected_no_dependencies(
-    sample_risk_input_factory, attrs: dict[str, object]
+def test_malformed_field_level_rejected_no_dependencies(
+    sample_risk_input_factory, overrides: dict[str, object]
 ) -> None:
+    """실제 AppliedMarketUpdate 인스턴스의 field branch를 각각 검증한다."""
     gate = _TrackingGate()
     reader = _TrackingReader()
     coord = _FakeCoordinator()
@@ -525,7 +563,7 @@ def test_malformed_update_rejected_no_dependencies(
         execution_inputs_provider=_inputs_provider(sample_risk_input_factory),
         coordinator=coord,  # type: ignore[arg-type]
     )
-    result = orch.handle_applied_update(_bad(**attrs))
+    result = orch.handle_applied_update(_malformed_applied_update(**overrides))
     assert result.status is FastLoopExecutionStatus.MALFORMED_UPDATE
     assert gate.calls == 0
     assert reader.calls == 0

@@ -33,6 +33,7 @@ from execution.sqlite_trigger_journal import SqliteTriggerJournal
 from execution.trigger_order_bridge import TriggerOrderBridge
 from ledger.sqlite_ledger import SQLiteLedger
 from market_data.conditions import Comparator, ConditionClause, Metric
+from market_data.indicators import IndicatorWindowSpec
 from market_data.health_policy import HealthThresholds, MarketHealthTracker, provisional_thresholds
 from market_data.latest_state import LatestMarketStateStore
 from market_data.market_session import FixtureMarketCalendar
@@ -211,6 +212,12 @@ def _stack(tmp_path: Path, sample_risk_input_factory) -> dict[str, Any]:
         ),
         coordinator=coordinator,
     )
+    inputs = StaticExecutionInputsProvider(
+        allocator_decision=ri.allocator_decision.model_copy(
+            update={"universe": "KR_LARGE", "created_at": T0}
+        ),
+        portfolio_policy=PaperPortfolioPolicy(mode=RiskMode.REBALANCING),
+    )
     results: list[object] = []
 
     def _on_applied(update: AppliedMarketUpdate) -> None:
@@ -285,6 +292,12 @@ def _stack(tmp_path: Path, sample_risk_input_factory) -> dict[str, Any]:
         "publish_buy": _publish_buy,
         "publish_hold": _publish_hold,
         "run": _run,
+        "gate": gate,
+        "tracker": tracker,
+        "coordinator": coordinator,
+        "inputs": inputs,
+        "latest": latest,
+        "rolling": rolling,
     }
 
 
@@ -300,6 +313,164 @@ def test_integration_buy_fill_once_no_duplicate(tmp_path: Path, sample_risk_inpu
     assert ctx["ledger"].get_fill_by_order_id(order_id) is not None
     row_count = ctx["journal"]._conn.execute("SELECT COUNT(*) FROM trigger_fire_journal").fetchone()[0]
     assert row_count >= 1
+
+
+def _rolling_stack(
+    tmp_path: Path,
+    sample_risk_input_factory,
+    *,
+    rolling_store: RollingTradeHistoryStore | None,
+    threshold: str = "1",
+    lookback_events: int = 2,
+    min_events: int = 2,
+) -> dict[str, Any]:
+    """rolling rule이 있는 real paper stack — MarketMonitor 경유 store 동기화."""
+    ctx = _stack(tmp_path, sample_risk_input_factory)
+    spec = IndicatorWindowSpec(
+        lookback_events=lookback_events,
+        min_events=min_events,
+        freshness_max_age_seconds=Decimal("3600"),
+    )
+    now = ctx["clock"]()
+    analysis = _analysis_decision(
+        action=AnalysisAction.BUY, decision_id="buy-roll", created_at=now
+    )
+    plan = TriggerPlan(
+        plan_id="plan-roll",
+        decision_id=analysis.decision_id,
+        created_at=now,
+        valid_from=now,
+        expires_at=now + DAY,
+        universe=analysis.universe,
+        market=Market.KR,
+        symbol=analysis.symbol,
+        action=AnalysisAction.BUY,
+        rules=(
+            ConditionClause(
+                metric=Metric.SMA_PRICE,
+                comparator=Comparator.GTE,
+                threshold=threshold,
+                window=spec,
+            ),
+        ),
+    )
+    store = ActiveDecisionStore(tmp_path / "active.sqlite3")
+    store.publish(
+        DecisionPublicationCandidate(
+            snapshot=_decision_snapshot(analysis),
+            plan=plan,
+            valid_from=now,
+            expires_at=now + DAY,
+        ),
+        now=now,
+    )
+    rolling = rolling_store
+    latest = LatestMarketStateStore()
+    orch = FastLoopExecutionOrchestrator(
+        active_reader=store,
+        latest_store=latest,
+        rolling_store=rolling,
+        execution_gate=ctx["gate"],  # type: ignore[index]
+        execution_inputs_provider=ctx["inputs"],  # type: ignore[index]
+        coordinator=ctx["coordinator"],  # type: ignore[index]
+    )
+    results: list[object] = []
+
+    def _on_applied(update: AppliedMarketUpdate) -> None:
+        et = "trade" if update.event_type.value == "trade" else "best_bid_ask"
+        ctx["tracker"].record_market_event(event_type=et, at=update.applied_at, now=update.applied_at)  # type: ignore[index]
+        results.append(orch.handle_applied_update(update))
+
+    def _run(events: list) -> None:
+        monitor = MarketMonitor(
+            store=latest,
+            rolling_store=rolling,
+            source_factory=lambda: ReplayMarketEventSource(events),
+            clock=ctx["clock"],
+            session_id="roll",
+            max_events=len(events),
+            on_applied_update=_on_applied,
+        )
+        asyncio.run(monitor.run())
+
+    ctx.update(
+        {
+            "rolling": rolling,
+            "latest": latest,
+            "orch_results": results,
+            "run_rolling": _run,
+            "rolling_store": rolling_store,
+        }
+    )
+    return ctx
+
+
+def test_integration_rolling_ready_committed_once_no_duplicate(
+    tmp_path: Path, sample_risk_input_factory
+) -> None:
+    """READY rolling: 두 trade 후 COMMITTED 1회, 추가 tick duplicate 0."""
+    rolling = RollingTradeHistoryStore(
+        retention=RollingRetentionPolicy(hard_max_events=1000, hard_max_age_seconds=Decimal("86400"))
+    )
+    ctx = _rolling_stack(tmp_path, sample_risk_input_factory, rolling_store=rolling)
+    ctx["run_rolling"]([_quote(sequence=1), _trade(sequence=1)])
+    warming = ctx["orch_results"][-1]
+    assert warming.status is FastLoopExecutionStatus.SUPPRESSED
+    pos = ctx["broker"].get_position("005930", Market.KR, AccountRole.PAPER)
+    assert pos is None or pos.quantity == Decimal("0")
+
+    ctx["clock"].advance(timedelta(seconds=1))
+    ctx["run_rolling"]([_quote(sequence=2), _trade(sequence=2)])
+    committed = [r for r in ctx["orch_results"] if r.status is FastLoopExecutionStatus.COMMITTED]
+    assert len(committed) == 1
+    assert ctx["broker"].get_position("005930", Market.KR, AccountRole.PAPER).quantity == Decimal("57")
+
+    ctx["clock"].advance(timedelta(seconds=1))
+    before_fills = len(
+        [r for r in ctx["orch_results"] if r.status is FastLoopExecutionStatus.COMMITTED]
+    )
+    ctx["run_rolling"]([_quote(sequence=3), _trade(sequence=3)])
+    after_fills = [r for r in ctx["orch_results"] if r.status is FastLoopExecutionStatus.COMMITTED]
+    assert len(after_fills) == before_fills
+
+
+def test_integration_rolling_warming_suppressed_no_order(
+    tmp_path: Path, sample_risk_input_factory
+) -> None:
+    """WARMING: trade 1건만 → INDICATOR_WARMING, broker/ledger/journal 0."""
+    rolling = RollingTradeHistoryStore(
+        retention=RollingRetentionPolicy(hard_max_events=1000, hard_max_age_seconds=Decimal("86400"))
+    )
+    ctx = _rolling_stack(tmp_path, sample_risk_input_factory, rolling_store=rolling)
+    ctx["run_rolling"]([_quote(sequence=1), _trade(sequence=1)])
+    result = ctx["orch_results"][-1]
+    assert result.status is FastLoopExecutionStatus.SUPPRESSED
+    assert result.coordinator_status == "suppressed"
+    from market_data.trigger_engine import TriggerReason
+
+    assert result.reason_code == TriggerReason.INDICATOR_WARMING.value
+    pos = ctx["broker"].get_position("005930", Market.KR, AccountRole.PAPER)
+    assert pos is None or pos.quantity == Decimal("0")
+    row_count = ctx["journal"]._conn.execute("SELECT COUNT(*) FROM trigger_fire_journal").fetchone()[0]
+    assert row_count == 0
+    fill_count = ctx["ledger"]._conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    assert fill_count == 0
+
+
+def test_integration_rolling_store_none_missing_indicator(
+    tmp_path: Path, sample_risk_input_factory
+) -> None:
+    """rolling rule + rolling_store=None → MISSING_INDICATOR suppression, order 0."""
+    ctx = _rolling_stack(tmp_path, sample_risk_input_factory, rolling_store=None)
+    ctx["run_rolling"]([_quote(sequence=1), _trade(sequence=1), _quote(sequence=2), _trade(sequence=2)])
+    from market_data.trigger_engine import TriggerReason
+
+    suppressed = [r for r in ctx["orch_results"] if r.status is FastLoopExecutionStatus.SUPPRESSED]
+    assert len(suppressed) >= 1
+    assert any(r.reason_code == TriggerReason.MISSING_INDICATOR.value for r in suppressed)
+    assert not any(r.status is FastLoopExecutionStatus.COMMITTED for r in ctx["orch_results"])
+    pos = ctx["broker"].get_position("005930", Market.KR, AccountRole.PAPER)
+    assert pos is None or pos.quantity == Decimal("0")
 
 
 def test_integration_hold_replaces_buy_no_new_order(tmp_path: Path, sample_risk_input_factory) -> None:

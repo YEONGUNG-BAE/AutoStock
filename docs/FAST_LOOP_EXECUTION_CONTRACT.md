@@ -121,7 +121,21 @@ When `rolling_store is None`, orchestrator passes `indicators=None` and delegate
 suppression to TriggerEngine (`MISSING_INDICATOR` etc.) — orchestrator does not
 pre-fail.
 
-## Package exports
+Integration proof (RTM-7c.3 pre/rehearsal): `tests/test_fast_loop_execution_integration.py`
+exercises real `PaperExecutionCoordinator` for rolling READY (COMMITTED once),
+WARMING (`INDICATOR_WARMING`), and `rolling_store=None` (`MISSING_INDICATOR`).
+
+## Coordinator reason mapping
+
+`FastLoopExecutionResult.reason_code` prefers `CoordinatorResult.reason_code`; when
+absent, maps `CoordinatorResult.trigger_reason.value` (e.g. `indicator_warming`,
+`missing_indicator`, `hold_action`) so SUPPRESSED paths remain typed in evidence.
+
+## Two-loop offline rehearsal
+
+See `docs/TWO_LOOP_REHEARSAL_CONTRACT.md` for the deterministic `2026-06-15`
+slow+fast rehearsal (explicit four slots, separate active-store connections,
+one fill, duplicate prevention). Runtime activation remains **NO-GO**.
 
 `orchestration` lazy-exports RTM-7c.1 store types + RTM-7c.2 gate/fast-loop types.
 No eager imports; no circular dependency.

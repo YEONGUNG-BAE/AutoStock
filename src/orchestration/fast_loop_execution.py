@@ -499,9 +499,12 @@ def _map_coordinator_result(result: CoordinatorResult) -> FastLoopExecutionResul
     status = _COORDINATOR_STATUS_MAP[result.status]
     trigger_id = result.signal.trigger_id if result.signal is not None else None
     idempotency_key = result.signal.idempotency_key if result.signal is not None else None
+    reason_code = result.reason_code
+    if reason_code is None and result.trigger_reason is not None:
+        reason_code = result.trigger_reason.value
     return FastLoopExecutionResult(
         status=status,
-        reason_code=result.reason_code,
+        reason_code=reason_code,
         trigger_id=trigger_id,
         idempotency_key=idempotency_key,
         coordinator_status=result.status.value,
