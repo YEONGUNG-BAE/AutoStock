@@ -467,3 +467,150 @@ def test_config_toml_example_still_loads_as_paper() -> None:
     assert settings.trading.mode == TradingMode.PAPER
     assert settings.broker.adapter == BrokerAdapterName.PAPER
     assert settings.broker.account_roles.kr_tax_advantaged_account_env == "KIS_ISA_ACCOUNT"
+
+
+def test_runtime_paper_fast_loop_defaults(tmp_path: Path) -> None:
+    settings = load_settings(write_config(tmp_path, ""))
+    fl = settings.runtime.paper_fast_loop
+    assert fl.enabled is False
+    assert fl.market == "KR"
+    assert fl.symbol == "000000"
+    assert fl.snapshot_path == "runtime/paper_fast_loop/execution_inputs_snapshot.json"
+    assert fl.active_decision_store_path == "runtime/paper_fast_loop/active_decision_store.sqlite3"
+    assert fl.ledger_path == "runtime/paper_fast_loop/ledger.sqlite3"
+    assert fl.trigger_journal_path == "runtime/paper_fast_loop/trigger_journal.sqlite3"
+
+
+def test_runtime_paper_fast_loop_overrides(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+enabled = true
+symbol = "005930"
+ledger_path = "runtime/paper_fast_loop/custom_ledger.sqlite3"
+""",
+    )
+    fl = load_settings(config_path).runtime.paper_fast_loop
+    assert fl.enabled is True
+    assert fl.symbol == "005930"
+    assert fl.ledger_path == "runtime/paper_fast_loop/custom_ledger.sqlite3"
+
+
+def test_runtime_paper_fast_loop_config_example_loads(tmp_path: Path) -> None:
+    settings = load_settings("config/config.toml.example")
+    fl = settings.runtime.paper_fast_loop
+    assert fl.enabled is False
+    assert fl.market == "KR"
+    assert fl.symbol == "005930"
+
+
+def test_runtime_paper_fast_loop_rejects_non_kr_market(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+market = "US"
+""",
+    )
+    with pytest.raises(SettingsError, match="config.runtime.paper_fast_loop.market must be 'KR'"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_non_six_digit_symbol(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+symbol = "AAPL"
+""",
+    )
+    with pytest.raises(SettingsError, match="must be a 6-digit KRX symbol"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_absolute_path(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+ledger_path = "/etc/passwd"
+""",
+    )
+    with pytest.raises(SettingsError, match="must be a relative path under 'runtime/'"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_path_outside_runtime(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+ledger_path = "data/ledger.sqlite3"
+""",
+    )
+    with pytest.raises(SettingsError, match="must start with 'runtime/'"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_path_traversal(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+ledger_path = "runtime/../etc/ledger.sqlite3"
+""",
+    )
+    with pytest.raises(SettingsError, match="must not contain '..' path traversal"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_duplicate_paths(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+ledger_path = "runtime/paper_fast_loop/shared.sqlite3"
+trigger_journal_path = "runtime/paper_fast_loop/shared.sqlite3"
+""",
+    )
+    with pytest.raises(SettingsError, match="collides with"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_symlink_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # runtime/paper_fast_loop 의 한 컴포넌트가 심볼릭링크면 fail-closed.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "real_target").mkdir()
+    (tmp_path / "runtime" / "paper_fast_loop").symlink_to(tmp_path / "real_target")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[runtime.paper_fast_loop]
+ledger_path = "runtime/paper_fast_loop/ledger.sqlite3"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(SettingsError, match="must not traverse a symlink"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_rejects_unknown_key(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+[runtime.paper_fast_loop]
+unexpected = "x"
+""",
+    )
+    with pytest.raises(SettingsError, match="config.runtime.paper_fast_loop"):
+        load_settings(config_path)
+
+
+def test_runtime_paper_fast_loop_parse_creates_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[runtime.paper_fast_loop]\nenabled = true\n", encoding="utf-8")
+    load_settings(config_path)
+    assert not (tmp_path / "runtime").exists()

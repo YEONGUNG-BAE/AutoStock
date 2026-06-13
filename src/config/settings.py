@@ -166,11 +166,116 @@ class LlmSettings:
     retry_count: int = 0
 
 
+RUNTIME_PAPER_FAST_LOOP_MARKET = "KR"
+_RUNTIME_ROOT_DIR = "runtime"
+_KRX_SYMBOL_PATTERN = re.compile(r"\A\d{6}\Z")
+
+
+def _validate_runtime_relative_path(value: str, *, field_path: str) -> str:
+    """runtime/ 하위 상대경로만 허용한다. 경로 탈출·심볼릭링크를 fail-closed로 막고,
+    파싱 단계에서 파일이나 디렉터리를 생성하지 않는다."""
+
+    pure = Path(value)
+    if pure.is_absolute():
+        raise SettingsError(
+            f"Invalid runtime path: field_path={field_path} must be a relative path under '{_RUNTIME_ROOT_DIR}/'."
+        )
+    parts = pure.parts
+    if not parts or parts[0] != _RUNTIME_ROOT_DIR:
+        raise SettingsError(
+            f"Invalid runtime path: field_path={field_path} must start with '{_RUNTIME_ROOT_DIR}/'."
+        )
+    if any(part == ".." for part in parts):
+        raise SettingsError(
+            f"Invalid runtime path: field_path={field_path} must not contain '..' path traversal."
+        )
+    if any(part == "." for part in parts):
+        raise SettingsError(
+            f"Invalid runtime path: field_path={field_path} must not contain '.' path segments."
+        )
+    if len(parts) < 2:
+        raise SettingsError(
+            f"Invalid runtime path: field_path={field_path} must point at a file under '{_RUNTIME_ROOT_DIR}/'."
+        )
+
+    # 심볼릭 링크 컴포넌트 거부(읽기만 수행, 생성하지 않음).
+    accumulated = Path(parts[0])
+    for part in parts[1:]:
+        accumulated = accumulated / part
+        if accumulated.is_symlink():
+            raise SettingsError(
+                f"Invalid runtime path: field_path={field_path} must not traverse a symlink "
+                f"(component={accumulated})."
+            )
+
+    return os.path.normpath(value)
+
+
+@dataclass(frozen=True)
+class RuntimePaperFastLoopSettings:
+    """오프라인 paper fast-loop composition의 runtime 경로 설정.
+
+    기본 비활성(enabled=false)이며 단일 KR 6자리 종목만 허용한다. 네 개의 runtime 경로는
+    runtime/ 하위 상대경로여야 하고 경로 탈출·심볼릭링크·중복을 fail-closed로 거부한다.
+    파싱 단계에서 파일·디렉터리를 생성하지 않는다.
+    """
+
+    enabled: bool = False
+    market: str = RUNTIME_PAPER_FAST_LOOP_MARKET
+    symbol: str = "000000"
+    snapshot_path: str = "runtime/paper_fast_loop/execution_inputs_snapshot.json"
+    active_decision_store_path: str = "runtime/paper_fast_loop/active_decision_store.sqlite3"
+    ledger_path: str = "runtime/paper_fast_loop/ledger.sqlite3"
+    trigger_journal_path: str = "runtime/paper_fast_loop/trigger_journal.sqlite3"
+
+    def __post_init__(self) -> None:
+        if self.market != RUNTIME_PAPER_FAST_LOOP_MARKET:
+            raise SettingsError(
+                "Invalid runtime market: "
+                f"config.runtime.paper_fast_loop.market must be {RUNTIME_PAPER_FAST_LOOP_MARKET!r} "
+                f"(got {self.market!r})."
+            )
+        if not _KRX_SYMBOL_PATTERN.match(self.symbol):
+            raise SettingsError(
+                "Invalid runtime symbol: "
+                "config.runtime.paper_fast_loop.symbol must be a 6-digit KRX symbol "
+                f"(got {self.symbol!r})."
+            )
+
+        path_fields = {
+            "snapshot_path": self.snapshot_path,
+            "active_decision_store_path": self.active_decision_store_path,
+            "ledger_path": self.ledger_path,
+            "trigger_journal_path": self.trigger_journal_path,
+        }
+        normalized_by_field: dict[str, str] = {}
+        for name, raw in path_fields.items():
+            normalized_by_field[name] = _validate_runtime_relative_path(
+                raw, field_path=f"config.runtime.paper_fast_loop.{name}"
+            )
+
+        seen: dict[str, str] = {}
+        for name, normalized in normalized_by_field.items():
+            if normalized in seen:
+                raise SettingsError(
+                    "Invalid runtime path: "
+                    f"config.runtime.paper_fast_loop.{name} collides with "
+                    f"config.runtime.paper_fast_loop.{seen[normalized]} (both resolve to {normalized})."
+                )
+            seen[normalized] = name
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    paper_fast_loop: RuntimePaperFastLoopSettings = field(default_factory=RuntimePaperFastLoopSettings)
+
+
 @dataclass(frozen=True)
 class AppSettings:
     trading: TradingSettings = field(default_factory=TradingSettings)
     broker: BrokerSettings = field(default_factory=BrokerSettings)
     llm: LlmSettings = field(default_factory=LlmSettings)
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
 
 
 def load_settings(
@@ -245,6 +350,10 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
         broker_section, "kis_ws_read_only", "config.broker.kis_ws_read_only"
     )
     llm_section = _optional_table(config, "llm", "config.llm")
+    runtime_section = _optional_table(config, "runtime", "config.runtime")
+    paper_fast_loop_section = _optional_table(
+        runtime_section, "paper_fast_loop", "config.runtime.paper_fast_loop"
+    )
 
     _assert_allowed_keys(
         trading_section,
@@ -317,6 +426,24 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
             "retry_count",
         },
         field_path="config.llm",
+    )
+    _assert_allowed_keys(
+        runtime_section,
+        allowed_keys={"paper_fast_loop"},
+        field_path="config.runtime",
+    )
+    _assert_allowed_keys(
+        paper_fast_loop_section,
+        allowed_keys={
+            "enabled",
+            "market",
+            "symbol",
+            "snapshot_path",
+            "active_decision_store_path",
+            "ledger_path",
+            "trigger_journal_path",
+        },
+        field_path="config.runtime.paper_fast_loop",
     )
 
     return AppSettings(
@@ -481,6 +608,47 @@ def parse_settings(config: Mapping[str, Any]) -> AppSettings:
             retry_count=_parse_non_negative_int(
                 llm_section.get("retry_count", 0),
                 field_path="config.llm.retry_count",
+            ),
+        ),
+        runtime=RuntimeSettings(
+            paper_fast_loop=RuntimePaperFastLoopSettings(
+                enabled=_parse_bool(
+                    paper_fast_loop_section.get("enabled", False),
+                    field_path="config.runtime.paper_fast_loop.enabled",
+                ),
+                market=_parse_str(
+                    paper_fast_loop_section.get("market", RUNTIME_PAPER_FAST_LOOP_MARKET),
+                    field_path="config.runtime.paper_fast_loop.market",
+                ),
+                symbol=_parse_str(
+                    paper_fast_loop_section.get("symbol", "000000"),
+                    field_path="config.runtime.paper_fast_loop.symbol",
+                ),
+                snapshot_path=_parse_str(
+                    paper_fast_loop_section.get(
+                        "snapshot_path", "runtime/paper_fast_loop/execution_inputs_snapshot.json"
+                    ),
+                    field_path="config.runtime.paper_fast_loop.snapshot_path",
+                ),
+                active_decision_store_path=_parse_str(
+                    paper_fast_loop_section.get(
+                        "active_decision_store_path",
+                        "runtime/paper_fast_loop/active_decision_store.sqlite3",
+                    ),
+                    field_path="config.runtime.paper_fast_loop.active_decision_store_path",
+                ),
+                ledger_path=_parse_str(
+                    paper_fast_loop_section.get(
+                        "ledger_path", "runtime/paper_fast_loop/ledger.sqlite3"
+                    ),
+                    field_path="config.runtime.paper_fast_loop.ledger_path",
+                ),
+                trigger_journal_path=_parse_str(
+                    paper_fast_loop_section.get(
+                        "trigger_journal_path", "runtime/paper_fast_loop/trigger_journal.sqlite3"
+                    ),
+                    field_path="config.runtime.paper_fast_loop.trigger_journal_path",
+                ),
             ),
         ),
     )

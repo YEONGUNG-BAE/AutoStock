@@ -64,3 +64,16 @@ confirmation_phrase = "ENABLE_KIS_WS_READONLY"
 account_env = "KIS_LIVE_ACCOUNT"
 app_key_env = "KIS_LIVE_APP_KEY"
 app_secret_env = "KIS_LIVE_APP_SECRET"
+
+[runtime.paper_fast_loop]
+# Offline paper fast-loop composition (RTM-7c.4a). Disabled by default.
+# Single KR 6-digit KRX symbol only. All four paths must be relative paths under
+# runtime/ (no absolute paths, no '..' traversal, no symlink components, no duplicates).
+# Parsing never creates files or directories; enabling does not start any live runtime.
+enabled = false
+market = "KR"
+symbol = "005930"
+snapshot_path = "runtime/paper_fast_loop/execution_inputs_snapshot.json"
+active_decision_store_path = "runtime/paper_fast_loop/active_decision_store.sqlite3"
+ledger_path = "runtime/paper_fast_loop/ledger.sqlite3"
+trigger_journal_path = "runtime/paper_fast_loop/trigger_journal.sqlite3"
