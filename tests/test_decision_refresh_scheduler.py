@@ -117,6 +117,36 @@ class _BoomRunner:
         raise RuntimeError("runner boom")
 
 
+class _WrongMarketRunner:
+    """scheduler가 KR을 요청해도 US 후보를 반환하는 buggy runner(market binding 검증용)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def refresh(
+        self, *, market: Market, session_date: date, slot_id: str, scheduled_at: datetime
+    ) -> DecisionPublicationCandidate:
+        self.calls.append(slot_id)
+        decision = _hold_decision(f"us-{slot_id}", scheduled_at).model_copy(
+            update={"market": "US"}
+        )
+        snapshot = DecisionSnapshot.create(
+            decision_id=decision.decision_id,
+            created_at=decision.created_at,
+            schema_name=ANALYSIS_DECISION_SCHEMA,
+            raw_payload=decision.model_dump(mode="json"),
+            validation_result=ValidationResult(
+                passed=True, issues=(), schema_name=ANALYSIS_DECISION_SCHEMA
+            ),
+        )
+        return DecisionPublicationCandidate(
+            snapshot=snapshot,
+            plan=None,
+            valid_from=scheduled_at,
+            expires_at=scheduled_at + DAY_DELTA,
+        )
+
+
 class _NeverRunner:
     def __init__(self) -> None:
         self.calls = 0
@@ -204,8 +234,14 @@ def _scheduler(
 def test_four_slots_run_exactly_once(tmp_path: Path) -> None:
     store = ActiveDecisionStore(tmp_path / "a.sqlite3")
     runner = _HoldRunner()
+    # 각 tick은 now(due 판정) + completion(runner 완료 후 재읽기) 2회 clock을 읽는다.
     clock = _SequencedClock(
-        [_at(time(9, 30)), _at(time(11, 0)), _at(time(13, 0)), _at(time(14, 50))]
+        [
+            _at(time(9, 30)), _at(time(9, 30)),
+            _at(time(11, 0)), _at(time(11, 0)),
+            _at(time(13, 0)), _at(time(13, 0)),
+            _at(time(14, 50)), _at(time(14, 50)),
+        ]
     )
     sup = _scheduler(
         calendar=_open_calendar(), runner=runner, store=store, clock=clock, max_ticks=4
@@ -356,13 +392,15 @@ def test_durable_slot_not_rerun_after_restart(tmp_path: Path) -> None:
 
 def test_dangling_reserved_reconciled_not_rerun(tmp_path: Path) -> None:
     store = ActiveDecisionStore(tmp_path / "a.sqlite3")
-    # 직전 프로세스가 s1을 예약만 하고 죽음(RESERVED 잔존)을 모사한다.
+    # 직전 프로세스가 s1을 예약만 하고 죽음(RESERVED 잔존)을 모사한다. lease는 곧 만료된다.
     store.reserve_slot(
         market=Market.KR,
         session_date=_DAY,
         slot_id="s1",
         scheduled_at=_at(time(9, 30), second=0),
+        owner_id="dead-process",
         now=_at(time(9, 30)),
+        lease_seconds=10.0,
     )
     runner = _NeverRunner()
     summary = asyncio.run(
@@ -427,3 +465,41 @@ def test_early_close_marks_session_closed(tmp_path: Path) -> None:
     states = store.slot_states(Market.KR, _DAY)
     assert all(s is SlotState.MISSED_SESSION_CLOSED for s in states.values())
     assert len(states) == 4
+
+
+def test_early_close_marks_future_slots_too(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    runner = _NeverRunner()
+    # 12:00 조기폐장(POST_CLOSE): s1@9:30, s2@11:00은 지났고 s3@13:00, s4@14:50은 미도래.
+    sup = _scheduler(
+        calendar=_PostCloseTradingCalendar(),
+        runner=runner,
+        store=store,
+        clock=_SequencedClock([_at(time(12, 0))]),
+        max_ticks=1,
+    )
+    summary = asyncio.run(sup.run())
+    assert runner.calls == 0
+    # 세션이 끝났으므로 미도래 slot도 당일 실행되지 않음 → 전부 MISSED_SESSION_CLOSED.
+    assert summary.slots_missed_session_closed == 4
+    states = store.slot_states(Market.KR, _DAY)
+    assert states["s3"] is SlotState.MISSED_SESSION_CLOSED
+    assert states["s4"] is SlotState.MISSED_SESSION_CLOSED
+
+
+def test_scheduler_candidate_market_mismatch_fails_closed(tmp_path: Path) -> None:
+    store = ActiveDecisionStore(tmp_path / "a.sqlite3")
+    runner = _WrongMarketRunner()
+    # tick now + completion 재읽기 2회.
+    clock = _SequencedClock([_at(time(9, 30)), _at(time(9, 30))])
+    sup = _scheduler(
+        calendar=_open_calendar(), runner=runner, store=store, clock=clock, max_ticks=1
+    )
+    summary = asyncio.run(sup.run())
+    # runner는 호출되었지만 US 후보는 KR 스케줄러에서 게시 거부 → PUBLISH_FAILED, 활성 없음.
+    assert runner.calls == ["s1"]
+    assert summary.slots_run == 0
+    assert summary.publish_failures == 1
+    assert store.read_active(Market.KR, "005930") is None
+    assert store.read_active("US", "005930") is None
+    assert store.slot_states(Market.KR, _DAY)["s1"] is SlotState.FAILED

@@ -29,6 +29,7 @@ network/broker/ledger/paper_execution/LLM 접근이 없다. runner는 Protocol�
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -164,6 +165,8 @@ class DecisionRefreshScheduler:
         sleep: Callable[[float], Awaitable[None]] = _default_sleep,
         poll_interval_seconds: float = 1.0,
         slot_grace_seconds: float = 300.0,
+        slot_lease_seconds: float = 1800.0,
+        owner_id: str | None = None,
         max_ticks: int | None = None,
         on_evidence: Callable[[SchedulerEvidence], None] | None = None,
     ) -> None:
@@ -176,12 +179,16 @@ class DecisionRefreshScheduler:
             raise SchedulerError("poll_interval_seconds must be > 0.")
         if slot_grace_seconds < 0:
             raise SchedulerError("slot_grace_seconds must be >= 0.")
+        if slot_lease_seconds <= 0:
+            raise SchedulerError("slot_lease_seconds must be > 0.")
+        # owner_id: 이 스케줄러 인스턴스의 예약 소유권 식별자(겹치는 스케줄러 구분용).
+        self._owner_id = owner_id or uuid.uuid4().hex
+        self._lease = slot_lease_seconds
         self._market = market
         self._calendar = calendar
         self._runner = runner
         self._store = store
         self._slots = tuple(sorted(slots, key=lambda s: s.at))
-        self._slot_by_id = {s.slot_id: s for s in self._slots}
         self._tz = timezone
         self._clock = clock
         self._sleep = sleep
@@ -195,6 +202,9 @@ class DecisionRefreshScheduler:
     @property
     def state(self) -> SchedulerState:
         return self._state
+
+    def _now(self) -> datetime:
+        return require_timezone_aware_datetime(self._clock(), field_name="now")
 
     async def run(self) -> RefreshSummary:
         summary = RefreshSummary(final_state=SchedulerState.RUNNING)
@@ -269,25 +279,21 @@ class DecisionRefreshScheduler:
     def _reconcile_dangling(
         self, session_date: date, now: datetime, summary: RefreshSummary
     ) -> dict[str, SlotState]:
-        """재시작 후 잔존 RESERVED slot을 UNCERTAIN으로 fail-closed reconcile한다.
+        """lease가 만료된 잔존 RESERVED slot(크래시)을 UNCERTAIN으로 fail-closed reconcile.
 
-        자동 재실행하지 않는다(같은 slot을 다른 결정으로 재실행하면 안 되므로). reconcile
-        후 갱신된 slot 상태 맵을 반환한다."""
-        states = self._store.slot_states(self._market, session_date)
-        dangling = [sid for sid, st in states.items() if st is SlotState.RESERVED]
-        if not dangling:
-            return states
-        for slot_id in dangling:
-            scheduled_at = self._scheduled_at(session_date, slot_id, now)
-            self._store.finalize_slot(
+        lease가 아직 유효한 RESERVED(다른 owner 실행 중)는 건드리지 않는다. 자동 재실행하지
+        않는다(같은 slot을 다른 결정으로 재실행 금지). reconcile 후 slot 상태 맵을 반환한다."""
+        expired = self._store.expired_reservations(self._market, session_date, now)
+        for slot_id, scheduled_at in expired:
+            took_over = self._store.reconcile_expired_reservation(
                 market=self._market,
                 session_date=session_date,
                 slot_id=slot_id,
-                scheduled_at=scheduled_at,
-                state=SlotState.UNCERTAIN,
                 now=now,
                 outcome=_DANGLING_RESERVED,
             )
+            if not took_over:
+                continue
             summary.slots_reconciled += 1
             self.last_outcome = RefreshSlotOutcome.RECONCILED_UNCERTAIN
             self._record(
@@ -302,12 +308,6 @@ class DecisionRefreshScheduler:
                 ),
             )
         return self._store.slot_states(self._market, session_date)
-
-    def _scheduled_at(self, session_date: date, slot_id: str, fallback: datetime) -> datetime:
-        slot = self._slot_by_id.get(slot_id)
-        if slot is None:
-            return fallback
-        return datetime.combine(session_date, slot.at, tzinfo=self._tz)
 
     def _due_slots(
         self, session_date: date, now: datetime, states: dict[str, SlotState]
@@ -331,7 +331,7 @@ class DecisionRefreshScheduler:
         now: datetime,
         summary: RefreshSummary,
     ) -> None:
-        self._store.finalize_slot(
+        claimed = self._store.mark_unreserved_terminal(
             market=self._market,
             session_date=session_date,
             slot_id=slot.slot_id,
@@ -340,6 +340,9 @@ class DecisionRefreshScheduler:
             now=now,
             outcome=RefreshSlotOutcome.MISSED.value,
         )
+        if not claimed:
+            # 다른 owner가 예약/종료한 slot은 MISSED로 덮지 않는다(state machine 보호).
+            return
         summary.slots_missed += 1
         self.last_outcome = RefreshSlotOutcome.MISSED
         self._record(
@@ -356,15 +359,15 @@ class DecisionRefreshScheduler:
     def _mark_session_closed(
         self, session_date: date, now: datetime, summary: RefreshSummary
     ) -> None:
-        """세션 종료(POST_CLOSE/CLOSED) 후 남은 due slot을 MISSED_SESSION_CLOSED로 기록."""
+        """세션 종료(POST_CLOSE/CLOSED) 후 당일 남은 **모든** slot을 MISSED_SESSION_CLOSED로
+        기록한다(이미 도래한 것뿐 아니라 13:00/14:50 같은 미도래 slot도 — 세션이 끝났으므로
+        당일 더는 실행되지 않으며 다음 거래일 catch-up도 없다)."""
         states = self._reconcile_dangling(session_date, now, summary)
         for slot in self._slots:
             if slot.slot_id in states:
                 continue
             scheduled_at = datetime.combine(session_date, slot.at, tzinfo=self._tz)
-            if scheduled_at > now:
-                continue  # 아직 도래하지 않은 slot은 표시하지 않는다.
-            self._store.finalize_slot(
+            claimed = self._store.mark_unreserved_terminal(
                 market=self._market,
                 session_date=session_date,
                 slot_id=slot.slot_id,
@@ -373,6 +376,8 @@ class DecisionRefreshScheduler:
                 now=now,
                 outcome=_SESSION_CLOSED,
             )
+            if not claimed:
+                continue
             summary.slots_missed_session_closed += 1
             self.last_outcome = RefreshSlotOutcome.MISSED_SESSION_CLOSED
             self._record(
@@ -395,43 +400,31 @@ class DecisionRefreshScheduler:
         now: datetime,
         summary: RefreshSummary,
     ) -> None:
-        # runner 호출 전에 durable 예약. 이미 종료/잔존-예약이면 재실행하지 않는다.
+        # runner 호출 전에 durable 예약(owner+lease+token). 이미 종료/타 owner 실행 중이면
+        # 재실행하지 않는다. lease 만료 잔존이면 reconcile만 하고 재실행하지 않는다.
         reservation = self._store.reserve_slot(
             market=self._market,
             session_date=session_date,
             slot_id=slot.slot_id,
             scheduled_at=scheduled_at,
+            owner_id=self._owner_id,
             now=now,
+            lease_seconds=self._lease,
         )
-        if reservation.status is SlotReservationStatus.ALREADY_TERMINAL:
+        status = reservation.status
+        if status in (
+            SlotReservationStatus.ALREADY_TERMINAL,
+            SlotReservationStatus.ACTIVE_ELSEWHERE,
+        ):
             return
-        if reservation.status is SlotReservationStatus.DANGLING_RESERVED:
-            # 다른 프로세스가 예약만 남기고 죽음 → fail-closed reconcile, 재실행 금지.
-            self._store.finalize_slot(
-                market=self._market,
-                session_date=session_date,
-                slot_id=slot.slot_id,
-                scheduled_at=scheduled_at,
-                state=SlotState.UNCERTAIN,
-                now=now,
-                outcome=_DANGLING_RESERVED,
-            )
-            summary.slots_reconciled += 1
-            self.last_outcome = RefreshSlotOutcome.RECONCILED_UNCERTAIN
-            self._record(
-                summary,
-                SchedulerEvidence(
-                    at=now,
-                    session_date=session_date,
-                    slot_id=slot.slot_id,
-                    scheduled_at=scheduled_at,
-                    outcome=RefreshSlotOutcome.RECONCILED_UNCERTAIN,
-                    reason=_DANGLING_RESERVED,
-                ),
-            )
+        if status is SlotReservationStatus.DANGLING_RESERVED:
+            self._reconcile_one(session_date, slot.slot_id, scheduled_at, now, summary)
             return
 
-        # RESERVED: 실행 진행. 취소 시 RESERVED 잔존 → 다음 시작에서 reconcile(fail-closed).
+        token = reservation.token
+        assert token is not None  # RESERVED는 항상 token을 동반한다.
+
+        # RESERVED: 실행 진행. 취소 시 RESERVED 잔존 → lease 만료 후 reconcile(fail-closed).
         try:
             candidate = await self._runner.refresh(
                 market=self._market,
@@ -442,21 +435,26 @@ class DecisionRefreshScheduler:
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - runner 실패는 slot 종료 + 직전 bundle 유지
-            self._finalize_failure(
-                session_date, slot, scheduled_at, now, summary,
+            # runner가 LLM/network로 오래 걸렸을 수 있으므로 완료 시각을 다시 읽는다.
+            self._complete_failure(
+                session_date, slot, scheduled_at, token, self._now(), summary,
                 outcome=RefreshSlotOutcome.RUNNER_FAILED,
                 reason=_RUNNER_DEPENDENCY_ERROR,
             )
             summary.runner_failures += 1
             return
 
+        # runner 완료 시각을 다시 읽어 publish/finalize/evidence에 사용한다(stale now 방지).
+        completion_now = self._now()
         try:
-            result = self._store.publish(candidate, now=now)
+            result = self._store.publish(
+                candidate, now=completion_now, expected_market=self._market
+            )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - 게시 예외는 slot 종료 + 직전 bundle 유지
-            self._finalize_failure(
-                session_date, slot, scheduled_at, now, summary,
+            self._complete_failure(
+                session_date, slot, scheduled_at, token, completion_now, summary,
                 outcome=RefreshSlotOutcome.PUBLISH_FAILED,
                 reason=_PUBLICATION_DEPENDENCY_ERROR,
             )
@@ -473,34 +471,34 @@ class DecisionRefreshScheduler:
                 summary.slots_published += 1
             self.last_outcome = RefreshSlotOutcome.RAN
             outcome = RefreshSlotOutcome.RAN
-            self._store.finalize_slot(
+            self._store.complete_slot(
                 market=self._market,
                 session_date=session_date,
                 slot_id=slot.slot_id,
-                scheduled_at=scheduled_at,
                 state=SlotState.PUBLISHED,
-                now=now,
+                token=token,
+                now=completion_now,
                 outcome=result.status.value,
                 publication_id=result.publication_id,
             )
         else:
-            # 게시 거부(conflict/older/expired/invalid)는 성공으로 위장하지 않는다.
+            # 게시 거부(conflict/older/expired/invalid/market mismatch)는 성공 위장 금지.
             summary.publish_failures += 1
             self.last_outcome = RefreshSlotOutcome.PUBLISH_FAILED
             outcome = RefreshSlotOutcome.PUBLISH_FAILED
-            self._store.finalize_slot(
+            self._store.complete_slot(
                 market=self._market,
                 session_date=session_date,
                 slot_id=slot.slot_id,
-                scheduled_at=scheduled_at,
                 state=SlotState.FAILED,
-                now=now,
+                token=token,
+                now=completion_now,
                 outcome=result.status.value,
             )
         self._record(
             summary,
             SchedulerEvidence(
-                at=now,
+                at=completion_now,
                 session_date=session_date,
                 slot_id=slot.slot_id,
                 scheduled_at=scheduled_at,
@@ -511,11 +509,43 @@ class DecisionRefreshScheduler:
             ),
         )
 
-    def _finalize_failure(
+    def _reconcile_one(
+        self,
+        session_date: date,
+        slot_id: str,
+        scheduled_at: datetime,
+        now: datetime,
+        summary: RefreshSummary,
+    ) -> None:
+        took_over = self._store.reconcile_expired_reservation(
+            market=self._market,
+            session_date=session_date,
+            slot_id=slot_id,
+            now=now,
+            outcome=_DANGLING_RESERVED,
+        )
+        if not took_over:
+            return
+        summary.slots_reconciled += 1
+        self.last_outcome = RefreshSlotOutcome.RECONCILED_UNCERTAIN
+        self._record(
+            summary,
+            SchedulerEvidence(
+                at=now,
+                session_date=session_date,
+                slot_id=slot_id,
+                scheduled_at=scheduled_at,
+                outcome=RefreshSlotOutcome.RECONCILED_UNCERTAIN,
+                reason=_DANGLING_RESERVED,
+            ),
+        )
+
+    def _complete_failure(
         self,
         session_date: date,
         slot: SlotConfig,
         scheduled_at: datetime,
+        token: str,
         now: datetime,
         summary: RefreshSummary,
         *,
@@ -523,12 +553,12 @@ class DecisionRefreshScheduler:
         reason: str,
     ) -> None:
         self.last_outcome = outcome
-        self._store.finalize_slot(
+        self._store.complete_slot(
             market=self._market,
             session_date=session_date,
             slot_id=slot.slot_id,
-            scheduled_at=scheduled_at,
             state=SlotState.FAILED,
+            token=token,
             now=now,
             outcome=reason,
         )

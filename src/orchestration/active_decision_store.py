@@ -29,10 +29,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
@@ -95,14 +96,16 @@ _TERMINAL_SLOT_STATES = frozenset(
 
 
 class SlotReservationStatus(StrEnum):
-    RESERVED = "reserved"  # 이번 호출에서 새로 예약됨 → 실행 진행
+    RESERVED = "reserved"  # 이번 호출에서 새로 예약됨 → 실행 진행(token 반환)
     ALREADY_TERMINAL = "already_terminal"  # 이미 종료된 slot(소비됨) → 재실행 금지
-    DANGLING_RESERVED = "dangling_reserved"  # 직전 reserved 잔존(크래시) → reconcile 필요
+    ACTIVE_ELSEWHERE = "active_elsewhere"  # 다른 owner가 lease 유효한 채 실행 중 → 대기/skip
+    DANGLING_RESERVED = "dangling_reserved"  # lease 만료된 잔존 예약(크래시) → reconcile 필요
 
 
 @dataclass(frozen=True)
 class SlotReservation:
     status: SlotReservationStatus
+    token: str | None = None  # RESERVED일 때만 채워지는 소유권 토큰(finalize CAS용)
     existing_state: SlotState | None = None
 
 
@@ -175,7 +178,10 @@ CREATE TABLE IF NOT EXISTS decision_refresh_slots (
     slot_id TEXT NOT NULL,
     scheduled_at TEXT NOT NULL,
     state TEXT NOT NULL,
+    reservation_token TEXT,
+    owner_id TEXT,
     reserved_at TEXT NOT NULL,
+    lease_expires_at TEXT,
     finished_at TEXT,
     outcome TEXT,
     publication_id TEXT,
@@ -246,9 +252,17 @@ class ActiveDecisionStore:
     # --- publish ---------------------------------------------------------------
 
     def publish(
-        self, candidate: DecisionPublicationCandidate, *, now: datetime
+        self,
+        candidate: DecisionPublicationCandidate,
+        *,
+        now: datetime,
+        expected_market: Market | str | None = None,
     ) -> PublicationResult:
-        """검증된 후보를 원자적으로 게시한다. 정상 거부는 typed 상태로 반환한다(fail-closed)."""
+        """검증된 후보를 원자적으로 게시한다. 정상 거부는 typed 상태로 반환한다(fail-closed).
+
+        `expected_market`이 주어지면 후보 decision의 market과 정확히 일치해야 한다
+        (scheduler↔candidate market binding: KR 스케줄러가 US 후보를 게시하지 못하게 함).
+        """
         require_timezone_aware_datetime(now, field_name="now")
         valid_from = require_timezone_aware_datetime(
             candidate.valid_from, field_name="valid_from"
@@ -272,6 +286,13 @@ class ActiveDecisionStore:
 
         decision = bundle.decision
         decision_created_at = decision.created_at
+
+        # 1b) market binding: 후보 decision market이 기대 market과 일치해야 한다.
+        if expected_market is not None and decision.market != _market_value(expected_market):
+            return PublicationResult(
+                PublicationStatus.REJECTED_INVALID_BUNDLE,
+                reason="decision market does not match expected market",
+            )
 
         # 2) validity binding: 이중 validity 불일치 방지.
         if decision_created_at > valid_from:
@@ -462,37 +483,53 @@ class ActiveDecisionStore:
         session_date: date,
         slot_id: str,
         scheduled_at: datetime,
+        owner_id: str,
         now: datetime,
+        lease_seconds: float,
     ) -> SlotReservation:
-        """slot을 durable하게 예약한다(runner 호출 전 1회). 결과로 실행 가능 여부를 알린다.
+        """slot을 durable하게 예약한다(runner 호출 전 1회). lease+token으로 소유권을 표현해
+        '실행 중인 예약'과 '크래시 잔존 예약'을 구분한다.
 
-        - 미존재 → RESERVED (실행 진행)
+        - 미존재 → RESERVED (token 발급, 실행 진행)
         - 종료 상태(published/missed/failed/...) 존재 → ALREADY_TERMINAL (재실행 금지)
-        - reserved 잔존(직전 크래시) → DANGLING_RESERVED (자동 재실행 금지, reconcile 필요)
+        - RESERVED + lease 유효 → ACTIVE_ELSEWHERE (다른 owner 실행 중, 건드리지 않음)
+        - RESERVED + lease 만료 → DANGLING_RESERVED (크래시 잔존, reconcile 필요)
         """
         market_value = _market_value(market)
         sd = session_date.isoformat()
+        token = uuid.uuid4().hex
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
         with self._lock:
             with self._immediate():
                 row = self._conn.execute(
-                    "SELECT state FROM decision_refresh_slots "
+                    "SELECT state, lease_expires_at FROM decision_refresh_slots "
                     "WHERE market = ? AND session_date = ? AND slot_id = ?",
                     (market_value, sd, slot_id),
                 ).fetchone()
                 if row is not None:
                     state = SlotState(row["state"])
-                    if state is SlotState.RESERVED:
+                    if state is not SlotState.RESERVED:
                         return SlotReservation(
-                            SlotReservationStatus.DANGLING_RESERVED, state
+                            SlotReservationStatus.ALREADY_TERMINAL, existing_state=state
+                        )
+                    lease = (
+                        _parse(row["lease_expires_at"])
+                        if row["lease_expires_at"] is not None
+                        else None
+                    )
+                    if lease is not None and lease > now:
+                        return SlotReservation(
+                            SlotReservationStatus.ACTIVE_ELSEWHERE, existing_state=state
                         )
                     return SlotReservation(
-                        SlotReservationStatus.ALREADY_TERMINAL, state
+                        SlotReservationStatus.DANGLING_RESERVED, existing_state=state
                     )
                 self._conn.execute(
                     """
                     INSERT INTO decision_refresh_slots (
-                        market, session_date, slot_id, scheduled_at, state, reserved_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        market, session_date, slot_id, scheduled_at, state,
+                        reservation_token, owner_id, reserved_at, lease_expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         market_value,
@@ -500,12 +537,58 @@ class ActiveDecisionStore:
                         slot_id,
                         scheduled_at.isoformat(),
                         SlotState.RESERVED.value,
+                        token,
+                        owner_id,
                         now.isoformat(),
+                        lease_expires_at.isoformat(),
                     ),
                 )
-        return SlotReservation(SlotReservationStatus.RESERVED)
+        return SlotReservation(SlotReservationStatus.RESERVED, token=token)
 
-    def finalize_slot(
+    def complete_slot(
+        self,
+        *,
+        market: Market | str,
+        session_date: date,
+        slot_id: str,
+        state: SlotState,
+        token: str,
+        now: datetime,
+        outcome: str | None = None,
+        publication_id: str | None = None,
+    ) -> bool:
+        """예약을 보유한 owner가 slot을 종료 상태로 전이한다(CAS). 토큰이 일치하고 아직
+        RESERVED일 때만 성공한다 — 다른 owner/이미 종료된 slot은 덮어쓰지 못한다.
+
+        반환값은 전이 성공 여부. terminal이 아닌 state는 거부한다."""
+        if state not in _TERMINAL_SLOT_STATES:
+            raise PublicationError(f"complete_slot state must be terminal, got {state!r}.")
+        market_value = _market_value(market)
+        sd = session_date.isoformat()
+        with self._lock:
+            with self._immediate():
+                cur = self._conn.execute(
+                    """
+                    UPDATE decision_refresh_slots
+                    SET state = ?, finished_at = ?, outcome = ?, publication_id = ?
+                    WHERE market = ? AND session_date = ? AND slot_id = ?
+                      AND state = 'reserved' AND reservation_token = ?
+                    """,
+                    (
+                        state.value,
+                        now.isoformat(),
+                        outcome,
+                        publication_id,
+                        market_value,
+                        sd,
+                        slot_id,
+                        token,
+                    ),
+                )
+                changed = cur.rowcount
+        return changed == 1
+
+    def mark_unreserved_terminal(
         self,
         *,
         market: Market | str,
@@ -515,27 +598,24 @@ class ActiveDecisionStore:
         state: SlotState,
         now: datetime,
         outcome: str | None = None,
-        publication_id: str | None = None,
-    ) -> None:
-        """slot을 종료 상태로 기록한다(durable). 미존재면 종료 상태로 직접 INSERT한다
-        (missed/missed_session_closed는 예약 없이 바로 종료 기록될 수 있다)."""
-        if state not in _TERMINAL_SLOT_STATES:
-            raise PublicationError(f"finalize_slot state must be terminal, got {state!r}.")
+    ) -> bool:
+        """예약 없이 종료 상태(missed/missed_session_closed)를 기록한다. 이미 row가 있으면
+        (예약 중이든 종료든) 덮어쓰지 않는다(INSERT OR IGNORE). 반환값은 새로 기록 여부."""
+        if state not in (SlotState.MISSED, SlotState.MISSED_SESSION_CLOSED):
+            raise PublicationError(
+                f"mark_unreserved_terminal state must be a missed state, got {state!r}."
+            )
         market_value = _market_value(market)
         sd = session_date.isoformat()
         with self._lock:
             with self._immediate():
-                self._conn.execute(
+                cur = self._conn.execute(
                     """
                     INSERT INTO decision_refresh_slots (
                         market, session_date, slot_id, scheduled_at, state,
-                        reserved_at, finished_at, outcome, publication_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(market, session_date, slot_id) DO UPDATE SET
-                        state = excluded.state,
-                        finished_at = excluded.finished_at,
-                        outcome = excluded.outcome,
-                        publication_id = excluded.publication_id
+                        reserved_at, finished_at, outcome
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(market, session_date, slot_id) DO NOTHING
                     """,
                     (
                         market_value,
@@ -546,9 +626,82 @@ class ActiveDecisionStore:
                         now.isoformat(),
                         now.isoformat(),
                         outcome,
-                        publication_id,
                     ),
                 )
+                changed = cur.rowcount
+        return changed == 1
+
+    def expired_reservations(
+        self, market: Market | str, session_date: date, now: datetime
+    ) -> tuple[tuple[str, datetime], ...]:
+        """lease가 만료된 RESERVED slot 목록((slot_id, scheduled_at))을 반환한다(크래시 잔존)."""
+        market_value = _market_value(market)
+        sd = session_date.isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT slot_id, scheduled_at, lease_expires_at "
+                "FROM decision_refresh_slots "
+                "WHERE market = ? AND session_date = ? AND state = 'reserved'",
+                (market_value, sd),
+            ).fetchall()
+        out: list[tuple[str, datetime]] = []
+        for row in rows:
+            lease = (
+                _parse(row["lease_expires_at"])
+                if row["lease_expires_at"] is not None
+                else None
+            )
+            if lease is not None and lease <= now:
+                out.append((row["slot_id"], _parse(row["scheduled_at"])))
+        return tuple(out)
+
+    def reconcile_expired_reservation(
+        self,
+        *,
+        market: Market | str,
+        session_date: date,
+        slot_id: str,
+        now: datetime,
+        outcome: str | None = None,
+    ) -> bool:
+        """lease가 만료된 RESERVED slot을 UNCERTAIN으로 reconcile한다(fail-closed, 재실행 금지).
+
+        lease가 아직 유효(다른 owner 실행 중)하면 건드리지 않는다. 반환값은 전이 성공 여부."""
+        market_value = _market_value(market)
+        sd = session_date.isoformat()
+        with self._lock:
+            with self._immediate():
+                row = self._conn.execute(
+                    "SELECT state, lease_expires_at FROM decision_refresh_slots "
+                    "WHERE market = ? AND session_date = ? AND slot_id = ?",
+                    (market_value, sd, slot_id),
+                ).fetchone()
+                if row is None or SlotState(row["state"]) is not SlotState.RESERVED:
+                    return False
+                lease = (
+                    _parse(row["lease_expires_at"])
+                    if row["lease_expires_at"] is not None
+                    else None
+                )
+                if lease is None or lease > now:
+                    return False
+                self._conn.execute(
+                    """
+                    UPDATE decision_refresh_slots
+                    SET state = ?, finished_at = ?, outcome = ?
+                    WHERE market = ? AND session_date = ? AND slot_id = ?
+                      AND state = 'reserved'
+                    """,
+                    (
+                        SlotState.UNCERTAIN.value,
+                        now.isoformat(),
+                        outcome,
+                        market_value,
+                        sd,
+                        slot_id,
+                    ),
+                )
+        return True
 
     def slot_states(
         self, market: Market | str, session_date: date
@@ -637,10 +790,25 @@ def _bundle_to_json(
 
 
 def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
+    # 1) 저장된 bundle_json 전체에 대한 hash 검증(fail-closed): top-level 키/추가 키/
+    #    valid_from/expires_at 변조까지 모두 잡는다(컬럼으로 재구성하지 않는다).
     try:
-        payload = json.loads(row["bundle_json"])
-        decision = AnalysisDecision.model_validate(payload["decision"])
-        plan_payload = payload.get("plan")
+        stored_payload = json.loads(row["bundle_json"])
+    except Exception as exc:  # noqa: BLE001 - fail-closed, no fallback
+        raise PublicationError("stored bundle_json is not valid JSON.") from exc
+    if not isinstance(stored_payload, dict):
+        raise PublicationError("stored bundle_json must be a JSON object.")
+    try:
+        recomputed_hash = payload_sha256(stored_payload)
+    except Exception as exc:  # noqa: BLE001 - fail-closed
+        raise PublicationError("stored bundle_json could not be canonicalized.") from exc
+    if recomputed_hash != row["bundle_hash"]:
+        raise PublicationError("stored bundle_hash does not match the stored payload.")
+
+    # 2) 모델 복원: 검증 가능한 DecisionTriggerBundle이어야 한다.
+    try:
+        decision = AnalysisDecision.model_validate(stored_payload["decision"])
+        plan_payload = stored_payload.get("plan")
         plan = TriggerPlan.model_validate(plan_payload) if plan_payload is not None else None
         bundle = DecisionTriggerBundle(decision=decision, plan=plan)
     except Exception as exc:  # noqa: BLE001 - fail-closed, no fallback
@@ -650,27 +818,34 @@ def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
 
     valid_from = _parse(row["valid_from"])
     expires_at = _parse(row["expires_at"])
-    # 무결성 재검증(fail-closed): 저장 후 bundle_json/columns가 변조되었거나 불일치하면 거부.
-    recomputed_hash = payload_sha256(
-        json.loads(_bundle_to_json(bundle, valid_from=valid_from, expires_at=expires_at))
-    )
-    if recomputed_hash != row["bundle_hash"]:
-        raise PublicationError("stored bundle_hash does not match recomputed bundle hash.")
+    decision_created_at = _parse(row["decision_created_at"])
+
+    # 3) publication_id 재계산 일치(식별 + hash 결합) 검증.
     recomputed_pub_id = _publication_id(
         market=row["market"],
         symbol=row["symbol"],
         decision_id=row["decision_id"],
-        decision_created_at=_parse(row["decision_created_at"]),
+        decision_created_at=decision_created_at,
         bundle_hash=row["bundle_hash"],
     )
     if recomputed_pub_id != row["publication_id"]:
         raise PublicationError("stored publication_id does not match recomputed id.")
+
+    # 4) 저장 payload의 top-level validity/created_at이 컬럼과 일치해야 한다.
+    if (
+        stored_payload.get("valid_from") != row["valid_from"]
+        or stored_payload.get("expires_at") != row["expires_at"]
+    ):
+        raise PublicationError("stored payload validity does not match stored columns.")
+
+    # 5) identity 대조: 컬럼 vs bundle 내부 정체성(created_at 포함).
     plan_id = plan.plan_id if plan is not None else None
     if (
         decision.market != row["market"]
         or decision.symbol != row["symbol"]
         or decision.decision_id.value != row["decision_id"]
         or plan_id != row["plan_id"]
+        or decision.created_at != decision_created_at
     ):
         raise PublicationError("stored row identity does not match bundle identity.")
 
@@ -680,7 +855,7 @@ def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
         symbol=row["symbol"],
         decision_id=row["decision_id"],
         plan_id=row["plan_id"],
-        decision_created_at=_parse(row["decision_created_at"]),
+        decision_created_at=decision_created_at,
         valid_from=valid_from,
         expires_at=expires_at,
         bundle=bundle,

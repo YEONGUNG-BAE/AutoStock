@@ -454,23 +454,27 @@ def test_cross_connection_older_cannot_cover_newer(tmp_path: Path) -> None:
 _SD = date(2026, 5, 22)
 
 
-def test_slot_reserve_then_finalize_is_terminal_across_instances(tmp_path: Path) -> None:
+def test_slot_reserve_then_complete_is_terminal_across_instances(tmp_path: Path) -> None:
     path = tmp_path / "active.sqlite3"
     store_a = ActiveDecisionStore(path)
     r1 = store_a.reserve_slot(
-        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=300.0,
     )
     assert r1.status is SlotReservationStatus.RESERVED
-    store_a.finalize_slot(
-        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
-        state=SlotState.PUBLISHED, now=NOW, outcome="published", publication_id="p1",
+    assert r1.token is not None
+    assert store_a.complete_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1",
+        state=SlotState.PUBLISHED, token=r1.token, now=NOW,
+        outcome="published", publication_id="p1",
     )
     store_a.close()
 
     # 재시작(새 인스턴스)에서도 종료 상태가 유지되어 재실행되지 않는다.
     store_b = ActiveDecisionStore(path)
     r2 = store_b.reserve_slot(
-        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="B", now=NOW + timedelta(hours=1), lease_seconds=300.0,
     )
     assert r2.status is SlotReservationStatus.ALREADY_TERMINAL
     assert r2.existing_state is SlotState.PUBLISHED
@@ -478,27 +482,162 @@ def test_slot_reserve_then_finalize_is_terminal_across_instances(tmp_path: Path)
     store_b.close()
 
 
-def test_dangling_reserved_detected_across_instances(tmp_path: Path) -> None:
+def test_complete_slot_cannot_overwrite_terminal_or_other_token(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=300.0,
+    )
+    assert r.token is not None
+    assert store.complete_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1",
+        state=SlotState.PUBLISHED, token=r.token, now=NOW, outcome="published",
+    )
+    # 다른 토큰으로는 terminal 상태를 덮어쓰지 못한다(state machine 보호).
+    assert not store.complete_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1",
+        state=SlotState.FAILED, token="someone-else", now=NOW, outcome="boom",
+    )
+    assert store.slot_states(Market.KR, _SD)["s1"] is SlotState.PUBLISHED
+
+
+def test_active_lease_is_active_elsewhere_not_dangling(tmp_path: Path) -> None:
     path = tmp_path / "active.sqlite3"
     store_a = ActiveDecisionStore(path)
     store_a.reserve_slot(
-        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=600.0,
     )
-    store_a.close()  # finalize 없이 종료(크래시 모사) → RESERVED 잔존.
-
+    # 다른 인스턴스가 lease 유효 중에 같은 slot을 예약 시도 → ACTIVE_ELSEWHERE(크래시 오인 금지).
     store_b = ActiveDecisionStore(path)
     r = store_b.reserve_slot(
-        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW, now=NOW
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="B", now=NOW + timedelta(seconds=60), lease_seconds=600.0,
     )
-    assert r.status is SlotReservationStatus.DANGLING_RESERVED
-    assert r.existing_state is SlotState.RESERVED
+    assert r.status is SlotReservationStatus.ACTIVE_ELSEWHERE
+    store_a.close()
     store_b.close()
 
 
-def test_finalize_requires_terminal_state(tmp_path: Path) -> None:
+def test_expired_lease_is_dangling_and_reconcilable(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    store_a.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=60.0,
+    )
+    store_a.close()  # complete 없이 종료(크래시 모사) → RESERVED 잔존.
+
+    store_b = ActiveDecisionStore(path)
+    after = NOW + timedelta(seconds=120)  # lease 만료 후.
+    r = store_b.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="B", now=after, lease_seconds=60.0,
+    )
+    assert r.status is SlotReservationStatus.DANGLING_RESERVED
+    # 만료 잔존은 reconcile되어 UNCERTAIN(재실행 금지)이 된다.
+    expired = store_b.expired_reservations(Market.KR, _SD, after)
+    assert [sid for sid, _ in expired] == ["s1"]
+    assert store_b.reconcile_expired_reservation(
+        market=Market.KR, session_date=_SD, slot_id="s1", now=after, outcome="dangling"
+    )
+    assert store_b.slot_states(Market.KR, _SD)["s1"] is SlotState.UNCERTAIN
+    store_b.close()
+
+
+def test_mark_unreserved_terminal_does_not_overwrite_existing(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    r = store.reserve_slot(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        owner_id="A", now=NOW, lease_seconds=600.0,
+    )
+    assert r.token is not None
+    # 예약 중인 slot을 MISSED로 덮으려 해도 무시된다(claimed=False).
+    assert not store.mark_unreserved_terminal(
+        market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+        state=SlotState.MISSED, now=NOW, outcome="missed",
+    )
+    assert store.slot_states(Market.KR, _SD)["s1"] is SlotState.RESERVED
+
+
+def test_complete_slot_requires_terminal_state(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with pytest.raises(PublicationError):
-        store.finalize_slot(
-            market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
-            state=SlotState.RESERVED, now=NOW,
+        store.complete_slot(
+            market=Market.KR, session_date=_SD, slot_id="s1",
+            state=SlotState.RESERVED, token="x", now=NOW,
         )
+
+
+def test_concurrent_slot_reservation_single_winner(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    store_b = ActiveDecisionStore(path)
+    results: list[SlotReservationStatus] = []
+    lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def _worker(store: ActiveDecisionStore, owner: str) -> None:
+        start.wait()
+        r = store.reserve_slot(
+            market=Market.KR, session_date=_SD, slot_id="s1", scheduled_at=NOW,
+            owner_id=owner, now=NOW, lease_seconds=600.0,
+        )
+        with lock:
+            results.append(r.status)
+
+    threads = [
+        threading.Thread(target=_worker, args=(store_a, "A")),
+        threading.Thread(target=_worker, args=(store_b, "B")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 정확히 하나만 RESERVED(실행 진입), 다른 하나는 ACTIVE_ELSEWHERE(크래시 오인 없음).
+    assert results.count(SlotReservationStatus.RESERVED) == 1
+    assert results.count(SlotReservationStatus.ACTIVE_ELSEWHERE) == 1
+    store_a.close()
+    store_b.close()
+
+
+def test_concurrent_writers_newer_is_final_pointer(tmp_path: Path) -> None:
+    path = tmp_path / "active.sqlite3"
+    store_a = ActiveDecisionStore(path)
+    store_b = ActiveDecisionStore(path)
+    new_at = NOW + timedelta(hours=1)
+    results: list[PublicationStatus] = []
+    lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def _publish(store: ActiveDecisionStore, did: str, created: datetime) -> None:
+        cand = _candidate(
+            decision=_decision(decision_id=did, created_at=created),
+            plan=_plan(decision_id=did, created_at=created),
+            valid_from=created,
+            expires_at=created + DAY,
+        )
+        start.wait()
+        res = store.publish(cand, now=new_at)
+        with lock:
+            results.append(res.status)
+
+    threads = [
+        threading.Thread(target=_publish, args=(store_a, "d-new", new_at)),
+        threading.Thread(target=_publish, args=(store_b, "d-old", NOW)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 어떤 순서로 직렬화되든 최신 결정이 final pointer여야 한다(older가 newer를 못 덮음).
+    a = store_a.read_active(Market.KR, "005930")
+    b = store_b.read_active(Market.KR, "005930")
+    assert a is not None and a.decision_id == "d-new"
+    assert b is not None and b.decision_id == "d-new"
+    # older 게시는 REJECTED_OLDER로 거부되거나(newer 먼저) PUBLISHED 후 newer가 덮음.
+    assert PublicationStatus.PUBLISHED in results
+    store_a.close()
+    store_b.close()
