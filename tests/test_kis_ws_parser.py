@@ -278,6 +278,7 @@ _FORBIDDEN_ROOTS = {
 # 허용한다. socket/websocket/broker/ledger 등은 두 파일에서도 여전히 금지된다.
 _ALLOWED_IMPORTS_BY_FILE = {
     "monitor.py": {"asyncio"},
+    "supervisor.py": {"asyncio"},
     "latest_state.py": {"threading"},
     "trigger_engine.py": {"threading"},
     "rolling_window.py": {"threading"},
@@ -304,9 +305,10 @@ def test_market_data_modules_have_no_forbidden_imports() -> None:
 
 
 def test_asyncio_remains_forbidden_outside_monitor() -> None:
-    # asyncio는 monitor.py에서만 허용된다. 다른 어떤 파일에서도 새어들면 안 된다.
+    # asyncio는 monitor.py/supervisor.py(오케스트레이션 레이어)에서만 허용된다.
+    # 다른 어떤 파일에서도 새어들면 안 된다.
     for path in sorted(MARKET_DATA_SRC.glob("*.py")):
-        if path.name == "monitor.py":
+        if path.name in ("monitor.py", "supervisor.py"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
