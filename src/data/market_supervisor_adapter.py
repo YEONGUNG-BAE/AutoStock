@@ -1,10 +1,7 @@
 """RTM-7b — concrete evidence → neutral health signal adapter (data 계층).
 
 `KisWsTransportEvent`/`MonitorEvidence`는 data/monitor concrete 타입이다.
-`market_data.health_policy`/`market_data.supervisor`는 이 모듈을 import하지 않는다 —
-adapter가 중립 시그널로 변환해 supervisor/tracker에 전달한다.
-
-금지: broker/ledger/execution import, raw frame/token 보존, filesystem write.
+`market_data.health_policy`/`market_data.supervisor`는 이 모듈을 import하지 않는다.
 """
 
 from __future__ import annotations
@@ -22,6 +19,7 @@ from market_data.monitor import MonitorEvidence
 
 __all__ = [
     "AdapterError",
+    "InformationalTransportEvent",
     "MarketSupervisorAdapter",
     "NeutralMarketSignal",
     "NeutralTransportSignal",
@@ -41,15 +39,19 @@ class TransportKind(StrEnum):
     PONG_SENT = "pong_sent"
 
 
-_KIS_TRANSPORT_MAP: dict[str, str] = {
+# tracker all_subscribed 상태를 변경하는 kind만 매핑한다.
+_KIS_HEALTH_SIGNAL_MAP: dict[str, str] = {
     "connected": TransportKind.CONNECTED.value,
     "all_subscribed": TransportKind.ALL_SUBSCRIBED.value,
     "disconnect": TransportKind.DISCONNECT.value,
     "ping_received": TransportKind.PING_RECEIVED.value,
     "pong_sent": TransportKind.PONG_SENT.value,
-    "ack": TransportKind.ALL_SUBSCRIBED.value,
-    "subscribed": TransportKind.ALL_SUBSCRIBED.value,
 }
+
+# informational — tracker 상태를 변경하지 않는다.
+_KIS_INFORMATIONAL_KINDS = frozenset(
+    {"subscription_sent", "ack", "subscribed", "unsubscribe_sent"}
+)
 
 _MONITOR_TRANSPORT_MAP: dict[str, str] = {
     "connect": TransportKind.CONNECTED.value,
@@ -68,6 +70,14 @@ class NeutralTransportSignal:
 @dataclass(frozen=True)
 class NeutralMarketSignal:
     event_type: str
+    at: datetime
+
+
+@dataclass(frozen=True)
+class InformationalTransportEvent:
+    """tracker에 기록하지 않는 informational transport evidence."""
+
+    kind: str
     at: datetime
 
 
@@ -98,12 +108,14 @@ class MarketSupervisorAdapter:
     def __init__(self, *, clock: Callable[[], datetime]) -> None:
         self._clock = clock
 
-    def adapt_kis_transport(self, event: KisWsTransportEvent) -> NeutralTransportSignal:
+    def adapt_kis_transport(
+        self, event: KisWsTransportEvent
+    ) -> NeutralTransportSignal | InformationalTransportEvent:
         if event.at is None:
             raise AdapterError("KisWsTransportEvent.at is required.")
-        if event.kind == "subscription_sent":
-            raise AdapterError("subscription_sent is not a health signal.")
-        kind = _KIS_TRANSPORT_MAP.get(event.kind)
+        if event.kind in _KIS_INFORMATIONAL_KINDS:
+            return InformationalTransportEvent(kind=event.kind, at=event.at)
+        kind = _KIS_HEALTH_SIGNAL_MAP.get(event.kind)
         if kind is None:
             raise AdapterError(f"unknown KisWsTransportEvent.kind: {event.kind}")
         return NeutralTransportSignal(kind=kind, at=event.at)
@@ -128,15 +140,17 @@ class MarketSupervisorAdapter:
 
     def forward_kis_transport(
         self, event: KisWsTransportEvent, sink: _RecordSink
-    ) -> RecordResult:
-        signal = self.adapt_kis_transport(event)
-        now = self._clock()
-        return sink.record_transport_event(kind=signal.kind, at=signal.at, now=now)
+    ) -> RecordResult | None:
+        adapted = self.adapt_kis_transport(event)
+        if isinstance(adapted, InformationalTransportEvent):
+            return None
+        now = max(self._clock(), adapted.at)
+        return sink.record_transport_event(kind=adapted.kind, at=adapted.at, now=now)
 
     def forward_monitor_evidence(
         self, evidence: MonitorEvidence, sink: _RecordSink
     ) -> tuple[RecordResult | None, RecordResult | None]:
-        now = self._clock()
+        now = max(self._clock(), evidence.timestamp)
         market_result: RecordResult | None = None
         transport_result: RecordResult | None = None
         market = self.adapt_monitor_evidence(evidence)

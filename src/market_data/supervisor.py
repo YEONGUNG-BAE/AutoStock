@@ -1,17 +1,10 @@
-"""RTM-7b.3 — calendar-gated bounded monitor supervisor (순수 asyncio; broker/ledger 미연결).
-
-책임 경계:
-- MarketMonitor: 한 run() 안에서 reconnect/backoff/heartbeat-timeout.
-- MarketSupervisor(여기): run() **호출 사이** process-level lifecycle, typed action, restart budget.
-
-market-data starvation(quote/trade)은 transport restart 사유가 **아니다** — HOLD_EXECUTION_ONLY.
-transport 결함(disconnect/flapping/heartbeat timeout)만 RESTART_TRANSPORT.
-"""
+"""RTM-7b.3 — calendar-gated bounded monitor supervisor (순수 asyncio; broker/ledger 미연결)."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -30,12 +23,14 @@ from market_data.market_session import (
     MarketSessionError,
     MarketSessionState,
 )
-from market_data.monitor import MonitorSummary
+from market_data.monitor import MonitorExhaustedError, MonitorSummary
 
 from domain.enums import Market
 
 __all__ = [
+    "MonitorExitReason",
     "SupervisorAction",
+    "SupervisorInternalError",
     "SupervisorState",
     "SupervisorPolicy",
     "SupervisorError",
@@ -66,14 +61,26 @@ class SupervisorAction(StrEnum):
     FAILED_CLOSED = "FAILED_CLOSED"
 
 
+class MonitorExitReason(StrEnum):
+    NONE = "none"
+    TRANSPORT_EXIT = "transport_exit"
+    TRANSPORT_EXHAUSTED = "transport_exhausted"
+    INTERNAL_FAILURE = "internal_failure"
+    SESSION_CLOSED = "session_closed"
+    CANCELLED = "cancelled"
+    NORMAL_EOF = "normal_eof"
+
+
 class SupervisorError(Exception):
     """supervisor 설정/정책 위반."""
 
 
+class SupervisorInternalError(SupervisorError):
+    """factory/evidence 등 내부 결함. sticky FAILED_CLOSED를 유발한다."""
+
+
 @dataclass(frozen=True)
 class SupervisorPolicy:
-    """잠정 정책값. caller가 명시해야 한다."""
-
     poll_interval_seconds: float
     max_restarts_in_window: int
     restart_window_seconds: float
@@ -91,8 +98,6 @@ class SupervisorPolicy:
 
 
 class SupervisedMonitor:
-    """supervisor가 기동하는 monitor의 최소 계약."""
-
     async def run(self) -> MonitorSummary:  # pragma: no cover
         raise NotImplementedError
 
@@ -103,8 +108,6 @@ class SupervisedMonitor:
 
 @dataclass(frozen=True)
 class SupervisorEvidence:
-    """append-only supervisor evidence 한 건. raw frame/token/account/예외 repr 미포함."""
-
     timestamp: datetime
     state: SupervisorState
     session_state: str
@@ -114,6 +117,7 @@ class SupervisorEvidence:
     monitor_initial_starts: int
     monitor_restarts: int
     monitor_cancels: int
+    restarts_in_current_window: int
     kind: str
     reason_code: str | None = None
     backoff_seconds: float | None = None
@@ -126,6 +130,7 @@ class SupervisorSummary:
     monitor_initial_starts: int
     monitor_restarts: int
     monitor_cancels: int
+    restarts_in_current_window: int
     ticks: int
     final_action: SupervisorAction | None = None
 
@@ -141,8 +146,6 @@ def provisional_supervisor_policy() -> SupervisorPolicy:
 
 @dataclass
 class MarketSupervisor:
-    """calendar로 게이트되는 bounded monitor supervisor."""
-
     market: Market
     calendar: MarketCalendarProvider
     monitor_factory: Callable[[], SupervisedMonitor]
@@ -155,16 +158,16 @@ class MarketSupervisor:
 
     _state: SupervisorState = field(default=SupervisorState.IDLE, init=False)
     _task: asyncio.Task[MonitorSummary] | None = field(default=None, init=False)
-    _restart_times: list[datetime] = field(default_factory=list, init=False)
+    _restart_times: deque[datetime] = field(default_factory=deque, init=False)
     _initial_starts: int = field(default=0, init=False)
-    _restarts: int = field(default=0, init=False)
+    _total_restarts: int = field(default=0, init=False)
     _cancels: int = field(default=0, init=False)
     _ticks: int = field(default=0, init=False)
     _last_action: SupervisorAction | None = field(default=None, init=False)
     _session_was_active: bool = field(default=False, init=False)
-    _restart_scheduled: bool = field(default=False, init=False)
-    _provider_failed: bool = field(default=False, init=False)
-    _pending_monitor_restart: bool = field(default=False, init=False)
+    _terminal_failed: bool = field(default=False, init=False)
+    _pending_exit_reason: MonitorExitReason = field(default=MonitorExitReason.NONE, init=False)
+    _transport_restart_armed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.max_ticks is not None and self.max_ticks < 1:
@@ -179,6 +182,8 @@ class MarketSupervisor:
         return self._last_action
 
     def record_transport(self, *, kind: str, at: datetime) -> None:
+        if kind == "connected":
+            self._transport_restart_armed = False
         self.tracker.record_transport_event(kind=kind, at=at, now=self.clock())
 
     def record_market(self, *, event_type: str, at: datetime) -> None:
@@ -189,79 +194,28 @@ class MarketSupervisor:
             raise SupervisorError("supervisor.run() is not re-entrant.")
         try:
             while True:
+                if self._terminal_failed:
+                    self._state = SupervisorState.FAILED_CLOSED
+                    return self._summary()
                 self._ticks += 1
                 now = self.clock()
                 try:
                     session = self.calendar.session_at(self.market, now)
                 except MarketSessionError as exc:
-                    self._provider_failed = True
-                    self._state = SupervisorState.FAILED_CLOSED
-                    self._last_action = SupervisorAction.FAILED_CLOSED
-                    self._emit(
-                        "calendar_provider_error",
-                        None,
-                        action=SupervisorAction.FAILED_CLOSED,
-                        reason_code=str(exc)[:120],
-                    )
+                    self._enter_terminal_failed(reason_code=str(exc)[:120])
                     return self._summary()
                 except Exception:
-                    self._provider_failed = True
-                    self._state = SupervisorState.FAILED_CLOSED
-                    self._last_action = SupervisorAction.FAILED_CLOSED
-                    self._emit(
-                        "calendar_provider_error",
-                        None,
-                        action=SupervisorAction.FAILED_CLOSED,
-                        reason_code="provider_exception",
-                    )
+                    self._enter_terminal_failed(reason_code="provider_exception")
                     return self._summary()
 
                 self._reap_finished(now)
                 verdict = self.tracker.evaluate(session=session, now=now)
                 action = self._decide_action(session, verdict)
-
-                if action is SupervisorAction.FAILED_CLOSED:
-                    self._state = SupervisorState.FAILED_CLOSED
-                    self._last_action = action
-                    await self._ensure_idle(now, session, reason_code="failed_closed")
-                    self._emit_verdict(now, session, verdict, action)
-                    return self._summary()
-
-                if action is SupervisorAction.WAIT_FOR_CALENDAR:
-                    self._state = SupervisorState.WAITING_CALENDAR
-                    self._last_action = action
-                    await self._ensure_idle(now, session, reason_code="calendar_missing")
-                    self._emit_verdict(now, session, verdict, action)
-                elif action in (
-                    SupervisorAction.WAIT_FOR_SESSION,
-                    SupervisorAction.STOP_FOR_SESSION,
-                ):
-                    self._state = SupervisorState.IDLE_CLOSED
-                    self._last_action = action
-                    await self._ensure_idle(now, session, reason_code="session_inactive")
-                    self._emit_verdict(now, session, verdict, action)
-                elif action is SupervisorAction.RESTART_TRANSPORT:
-                    self._last_action = action
-                    await self._restart_transport(now, session, verdict, action)
-                elif action is SupervisorAction.HOLD_EXECUTION_ONLY:
-                    self._last_action = action
-                    if self._is_active(session):
-                        await self._ensure_running(
-                            now, session, is_restart=self._pending_monitor_restart
-                        )
-                    self._state = SupervisorState.RUNNING if self._task else SupervisorState.IDLE_CLOSED
-                    self._emit_verdict(now, session, verdict, action)
-                else:  # KEEP_RUNNING
-                    self._last_action = action
-                    if self._is_active(session):
-                        await self._ensure_running(
-                            now, session, is_restart=self._pending_monitor_restart
-                        )
-                    self._state = SupervisorState.RUNNING if self._task else SupervisorState.IDLE_CLOSED
-                    self._emit_verdict(now, session, verdict, action)
-
+                await self._apply_action(now, session, verdict, action)
                 self._track_session_transition(session)
 
+                if self._terminal_failed or self._state is SupervisorState.FAILED_CLOSED:
+                    return self._summary()
                 if self.max_ticks is not None and self._ticks >= self.max_ticks:
                     await self._graceful_cancel(now, session, reason_code="max_ticks")
                     self._state = SupervisorState.STOPPED
@@ -272,14 +226,106 @@ class MarketSupervisor:
             self._state = SupervisorState.STOPPED
             raise
         finally:
-            await self._graceful_cancel(self.clock(), None, reason_code="shutdown")
+            if not self._terminal_failed:
+                await self._graceful_cancel(self.clock(), None, reason_code="shutdown")
+
+    def _enter_terminal_failed(self, *, reason_code: str) -> None:
+        if self._terminal_failed:
+            return
+        self._terminal_failed = True
+        self._state = SupervisorState.FAILED_CLOSED
+        self._last_action = SupervisorAction.FAILED_CLOSED
+        if self.on_evidence is None:
+            return
+        now = self.clock()
+        try:
+            self.on_evidence(
+                SupervisorEvidence(
+                    timestamp=now,
+                    state=self._state,
+                    session_state="UNKNOWN",
+                    transport="UNKNOWN",
+                    market_data="UNKNOWN",
+                    action=str(SupervisorAction.FAILED_CLOSED),
+                    monitor_initial_starts=self._initial_starts,
+                    monitor_restarts=self._total_restarts,
+                    monitor_cancels=self._cancels,
+                    restarts_in_current_window=self._restarts_in_current_window(now),
+                    kind="internal_failure",
+                    reason_code=reason_code,
+                )
+            )
+        except Exception:
+            pass  # terminal 경로: sink 오류를 재귀적으로 삼키지 않는다.
+
+    async def _apply_action(
+        self,
+        now: datetime,
+        session: MarketSession,
+        verdict: HealthVerdict,
+        action: SupervisorAction,
+    ) -> None:
+        if action is SupervisorAction.FAILED_CLOSED:
+            self._state = SupervisorState.FAILED_CLOSED
+            self._last_action = action
+            await self._ensure_idle(now, session, reason_code="failed_closed")
+            self._emit_verdict(now, session, verdict, action)
+            return
+
+        if action is SupervisorAction.WAIT_FOR_CALENDAR:
+            self._state = SupervisorState.WAITING_CALENDAR
+            self._last_action = action
+            await self._ensure_idle(now, session, reason_code="calendar_missing")
+            self._emit_verdict(now, session, verdict, action)
+            return
+
+        if action in (SupervisorAction.WAIT_FOR_SESSION, SupervisorAction.STOP_FOR_SESSION):
+            self._state = SupervisorState.IDLE_CLOSED
+            self._last_action = action
+            await self._ensure_idle(now, session, reason_code="session_inactive")
+            self._emit_verdict(now, session, verdict, action)
+            return
+
+        if action is SupervisorAction.RESTART_TRANSPORT:
+            self._last_action = action
+            await self._restart_transport(now, session, verdict, action)
+            return
+
+        # KEEP_RUNNING / HOLD_EXECUTION_ONLY — starvation은 monitor를 유지한다.
+        self._last_action = action
+        if self._terminal_failed:
+            return
+        if self._is_active(session):
+            need_restart = self._pending_exit_reason in (
+                MonitorExitReason.TRANSPORT_EXIT,
+                MonitorExitReason.TRANSPORT_EXHAUSTED,
+                MonitorExitReason.INTERNAL_FAILURE,
+            )
+            if need_restart and self._task is None:
+                await self._ensure_running(now, session, is_restart=True)
+            elif self._task is None and action is SupervisorAction.KEEP_RUNNING:
+                await self._ensure_running(now, session, is_restart=False)
+            elif self._task is None and action is SupervisorAction.HOLD_EXECUTION_ONLY:
+                # transport session absent이지만 market starvation — restart 금지.
+                if self._pending_exit_reason in (
+                    MonitorExitReason.TRANSPORT_EXIT,
+                    MonitorExitReason.TRANSPORT_EXHAUSTED,
+                ):
+                    await self._ensure_running(now, session, is_restart=True)
+                else:
+                    await self._ensure_running(now, session, is_restart=False)
+            else:
+                self._pending_exit_reason = MonitorExitReason.NONE
+        if self._terminal_failed:
+            return
+        self._state = SupervisorState.RUNNING if self._task else SupervisorState.IDLE_CLOSED
+        self._emit_verdict(now, session, verdict, action)
 
     def _track_session_transition(self, session: MarketSession) -> None:
         active = self._is_active(session)
         if self._session_was_active and not active:
-            # 세션 종료 시 restart budget 초기화(새 session = 새 budget).
+            # 다음 OPEN epoch에서 restart window만 초기화(총 restart 수는 유지).
             self._restart_times.clear()
-            self._restarts = 0
         self._session_was_active = active
 
     @staticmethod
@@ -287,15 +333,12 @@ class MarketSupervisor:
         return session.is_open
 
     def _decide_action(self, session: MarketSession, verdict: HealthVerdict) -> SupervisorAction:
-        if self._provider_failed:
+        if self._terminal_failed:
             return SupervisorAction.FAILED_CLOSED
-
         if session.is_calendar_missing or session.state is MarketSessionState.UNKNOWN:
             return SupervisorAction.WAIT_FOR_CALENDAR
-
         if session.calendar_reason is CalendarReason.PROVIDER_ERROR:
             return SupervisorAction.FAILED_CLOSED
-
         if session.state in (
             MarketSessionState.CLOSED,
             MarketSessionState.PRE_OPEN,
@@ -303,20 +346,27 @@ class MarketSupervisor:
         ):
             return SupervisorAction.WAIT_FOR_SESSION
 
-        # OPEN 세션.
         transport = verdict.transport
         market = verdict.market_data
 
         if transport in (TransportHealthStatus.FLAPPING, TransportHealthStatus.UNHEALTHY):
+            if self._pending_exit_reason in (
+                MonitorExitReason.TRANSPORT_EXIT,
+                MonitorExitReason.TRANSPORT_EXHAUSTED,
+                MonitorExitReason.INTERNAL_FAILURE,
+            ):
+                return SupervisorAction.RESTART_TRANSPORT
+            if self._transport_restart_armed:
+                if market in (
+                    MarketDataHealthStatus.STARVED,
+                    MarketDataHealthStatus.STALE,
+                    MarketDataHealthStatus.INVALID,
+                ):
+                    return SupervisorAction.HOLD_EXECUTION_ONLY
+                return SupervisorAction.KEEP_RUNNING
             return SupervisorAction.RESTART_TRANSPORT
-
-        if market in (MarketDataHealthStatus.STARVED, MarketDataHealthStatus.STALE):
-            # market-data 결함 — transport 유지, execution만 hold.
+        if market in (MarketDataHealthStatus.STARVED, MarketDataHealthStatus.STALE, MarketDataHealthStatus.INVALID):
             return SupervisorAction.HOLD_EXECUTION_ONLY
-
-        if market is MarketDataHealthStatus.INVALID:
-            return SupervisorAction.HOLD_EXECUTION_ONLY
-
         return SupervisorAction.KEEP_RUNNING
 
     async def _ensure_running(
@@ -326,8 +376,7 @@ class MarketSupervisor:
             self._state = SupervisorState.RUNNING
             return
         if is_restart and not self._restart_allowed(now):
-            self._state = SupervisorState.FAILED_CLOSED
-            self._last_action = SupervisorAction.FAILED_CLOSED
+            self._enter_terminal_failed(reason_code="restart_budget_exhausted")
             return
         if is_restart and self.policy.restart_backoff_seconds > 0:
             self._emit(
@@ -340,22 +389,16 @@ class MarketSupervisor:
         try:
             monitor = self.monitor_factory()
         except Exception:
-            self._state = SupervisorState.FAILED_CLOSED
-            self._last_action = SupervisorAction.FAILED_CLOSED
-            self._emit(
-                "monitor_factory_error",
-                session,
-                action=SupervisorAction.FAILED_CLOSED,
-                reason_code="factory_exception",
-            )
+            self._enter_terminal_failed(reason_code="factory_exception")
             return
 
         if is_restart:
+            self._total_restarts += 1
             self._restart_times.append(now)
-            self._restarts += 1
-            self._pending_monitor_restart = False
+            self._pending_exit_reason = MonitorExitReason.NONE
         else:
             self._initial_starts += 1
+            self._pending_exit_reason = MonitorExitReason.NONE
 
         self._task = asyncio.create_task(monitor.run())
         self._state = SupervisorState.RUNNING
@@ -363,7 +406,7 @@ class MarketSupervisor:
             "monitor_start",
             session,
             action=self._last_action or SupervisorAction.KEEP_RUNNING,
-            reason_code="restart" if is_restart else "initial_start",
+            reason_code="transport_session_absent" if is_restart else "initial_start",
         )
         await asyncio.sleep(0)
         self._reap_finished(now)
@@ -376,16 +419,16 @@ class MarketSupervisor:
         action: SupervisorAction,
     ) -> None:
         if not self._restart_allowed(now):
-            self._state = SupervisorState.FAILED_CLOSED
-            self._last_action = SupervisorAction.FAILED_CLOSED
+            self._enter_terminal_failed(reason_code="restart_budget_exhausted")
             self._emit_verdict(now, session, verdict, SupervisorAction.FAILED_CLOSED)
             return
         if self._task is not None:
             await self._graceful_cancel(now, session, reason_code="transport_restart")
         self._state = SupervisorState.BACKING_OFF
+        self._transport_restart_armed = True
         await self._ensure_running(now, session, is_restart=True)
-        self._pending_monitor_restart = False
-        self._emit_verdict(now, session, verdict, action)
+        if not self._terminal_failed:
+            self._emit_verdict(now, session, verdict, action)
 
     async def _ensure_idle(
         self, now: datetime, session: MarketSession, *, reason_code: str
@@ -393,30 +436,32 @@ class MarketSupervisor:
         if self._task is not None:
             await self._graceful_cancel(now, session, reason_code=reason_code)
 
+    def _classify_exit(self, task: asyncio.Task[MonitorSummary]) -> MonitorExitReason:
+        if task.cancelled():
+            return MonitorExitReason.CANCELLED
+        exc = task.exception()
+        if exc is not None:
+            if isinstance(exc, MonitorExhaustedError):
+                return MonitorExitReason.TRANSPORT_EXHAUSTED
+            return MonitorExitReason.INTERNAL_FAILURE
+        return MonitorExitReason.TRANSPORT_EXIT
+
     def _reap_finished(self, now: datetime) -> None:
         task = self._task
         if task is None or not task.done():
             return
         self._task = None
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None and not isinstance(exc, asyncio.CancelledError):
-                self._state = SupervisorState.BACKING_OFF
-                self._pending_monitor_restart = True
-                self._emit(
-                    "monitor_exit",
-                    None,
-                    action=SupervisorAction.RESTART_TRANSPORT,
-                    reason_code="monitor_error",
-                )
-                return
+        reason = self._classify_exit(task)
+        if reason is MonitorExitReason.CANCELLED:
+            self._pending_exit_reason = MonitorExitReason.NONE
+            return
+        self._pending_exit_reason = reason
         self._state = SupervisorState.BACKING_OFF
-        self._pending_monitor_restart = True
         self._emit(
             "monitor_exit",
             None,
             action=SupervisorAction.RESTART_TRANSPORT,
-            reason_code="monitor_stopped",
+            reason_code="transport_session_absent",
         )
 
     async def _graceful_cancel(
@@ -431,17 +476,23 @@ class MarketSupervisor:
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.gather(task, return_exceptions=True)
         self._cancels += 1
+        self._pending_exit_reason = MonitorExitReason.NONE
         self._emit(
             "monitor_cancelled",
             session,
             action=self._last_action or SupervisorAction.STOP_FOR_SESSION,
             reason_code=reason_code,
+            suppress_sink_errors=True,
         )
 
-    def _restart_allowed(self, now: datetime) -> bool:
+    def _restarts_in_current_window(self, now: datetime) -> int:
         cutoff = now - timedelta(seconds=self.policy.restart_window_seconds)
-        self._restart_times = [t for t in self._restart_times if t >= cutoff]
-        return self._restarts < self.policy.max_restarts_in_window
+        while self._restart_times and self._restart_times[0] < cutoff:
+            self._restart_times.popleft()
+        return len(self._restart_times)
+
+    def _restart_allowed(self, now: datetime) -> bool:
+        return self._restarts_in_current_window(now) < self.policy.max_restarts_in_window
 
     def _emit_verdict(
         self,
@@ -471,8 +522,9 @@ class MarketSupervisor:
         transport: str = "UNKNOWN",
         market_data: str = "UNKNOWN",
         execution_ready: bool = False,
+        suppress_sink_errors: bool = False,
     ) -> None:
-        if self.on_evidence is None:
+        if self.on_evidence is None or self._terminal_failed:
             return
         now = self.clock()
         session_state = str(session.state) if session is not None else "UNKNOWN"
@@ -486,8 +538,9 @@ class MarketSupervisor:
                     market_data=market_data,
                     action=str(action),
                     monitor_initial_starts=self._initial_starts,
-                    monitor_restarts=self._restarts,
+                    monitor_restarts=self._total_restarts,
                     monitor_cancels=self._cancels,
+                    restarts_in_current_window=self._restarts_in_current_window(now),
                     kind=kind,
                     reason_code=reason_code,
                     backoff_seconds=backoff_seconds,
@@ -497,17 +550,23 @@ class MarketSupervisor:
         except asyncio.CancelledError:
             raise
         except Exception:
-            if kind == "monitor_cancelled" or "cancel" in kind:
-                return  # cancellation 경로: sink 오류 suppress, CancelledError 보존.
+            if suppress_sink_errors:
+                return
+            self._terminal_failed = True
             self._state = SupervisorState.FAILED_CLOSED
             self._last_action = SupervisorAction.FAILED_CLOSED
 
     def _summary(self) -> SupervisorSummary:
+        now = self.clock()
+        final_state = (
+            SupervisorState.FAILED_CLOSED if self._terminal_failed else self._state
+        )
         return SupervisorSummary(
-            final_state=self._state,
+            final_state=final_state,
             monitor_initial_starts=self._initial_starts,
-            monitor_restarts=self._restarts,
+            monitor_restarts=self._total_restarts,
             monitor_cancels=self._cancels,
+            restarts_in_current_window=self._restarts_in_current_window(now),
             ticks=self._ticks,
             final_action=self._last_action,
         )

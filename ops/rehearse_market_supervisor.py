@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""RTM-7b — offline market supervisor rehearsal CLI (network-free).
-
-fixture JSON scenario + fake clock + explicit schedule + scripted monitor로
-MarketSupervisor 전체 일을 결정론적으로 재생한다. KIS credential/socket/DNS/
-broker/ledger/execution을 호출하지 않는다.
-"""
+"""RTM-7b — offline market supervisor rehearsal CLI (network-free)."""
 
 from __future__ import annotations
 
@@ -12,18 +7,19 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from market_data.health_policy import MarketHealthTracker, provisional_thresholds
-from market_data.market_session import (
-    SessionWindow,
-    build_explicit_schedule,
+from market_data.health_policy import (
+    MarketHealthTracker,
+    MarketDataHealthStatus,
+    TransportHealthStatus,
+    provisional_thresholds,
 )
+from market_data.market_session import SessionWindow, build_explicit_schedule
 from market_data.monitor import MonitorState, MonitorSummary
 from market_data.supervisor import (
     MarketSupervisor,
@@ -35,6 +31,8 @@ from market_data.supervisor import (
 )
 
 from domain.enums import Market
+
+_MAX_STEPS = 500
 
 
 def _parse_time(value: str) -> time:
@@ -63,6 +61,11 @@ def _load_scenario(path: Path) -> dict[str, Any]:
     for key in ("schedule", "steps"):
         if key not in data:
             raise ValueError(f"fixture missing required key: {key}")
+    steps = data["steps"]
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("steps must be a non-empty list.")
+    if len(steps) > _MAX_STEPS:
+        raise ValueError(f"steps exceed max {_MAX_STEPS}.")
     return data
 
 
@@ -79,48 +82,88 @@ def _build_schedule(schedule: dict[str, Any]) -> object:
 
 
 class _ScriptedMonitor:
-    """supervisor factory가 만드는 결정론적 monitor — 즉시 STOPPED 반환."""
+    """fixture-driven monitor — long-running 또는 즉시 종료."""
 
     _instances: list["_ScriptedMonitor"] = []
+    _mode: str = "long_running"
 
     def __init__(self) -> None:
         self.state = MonitorState.IDLE
-        self.started = False
+        self.cancelled = False
+        self.cleanup_done = False
         _ScriptedMonitor._instances.append(self)
 
     async def run(self) -> MonitorSummary:
-        self.started = True
         self.state = MonitorState.RUNNING
-        await asyncio.sleep(0)
-        self.state = MonitorState.STOPPED
-        from market_data.monitor import MonitorSummary
+        if _ScriptedMonitor._mode == "instant_exit":
+            self.state = MonitorState.STOPPED
+            return _monitor_summary()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            self.cleanup_done = True
+            self.state = MonitorState.STOPPED
+            raise
+        return _monitor_summary()
 
-        return MonitorSummary(
-            monitor_session_id="rehearsal",
-            connection_attempts=1,
-            consecutive_failures=0,
-            applied=0,
-            duplicate=0,
-            out_of_order=0,
-            stream_mismatch=0,
-            future_event_error=0,
-            final_state=MonitorState.STOPPED,
-        )
+
+def _monitor_summary() -> MonitorSummary:
+    return MonitorSummary(
+        monitor_session_id="rehearsal",
+        connection_attempts=1,
+        consecutive_failures=0,
+        applied=0,
+        duplicate=0,
+        out_of_order=0,
+        stream_mismatch=0,
+        future_event_error=0,
+        final_state=MonitorState.STOPPED,
+    )
 
 
 @dataclass
-class _RehearsalState:
-    clock_at: datetime
-    actions: list[str] = field(default_factory=list)
-    starvation_detected: bool = False
-    flapping_detected: bool = False
-    restart_budget_exhausted: bool = False
+class _TransitionTracker:
+    transport_sequence: list[str] = field(default_factory=list)
+    market_sequence: list[str] = field(default_factory=list)
+    action_sequence: list[str] = field(default_factory=list)
+    session_sequence: list[str] = field(default_factory=list)
+    transport_transitions: int = 0
+    market_transitions: int = 0
+    action_transitions: int = 0
+    session_transitions: int = 0
+    _prev_transport: str | None = None
+    _prev_market: str | None = None
+    _prev_action: str | None = None
+    _prev_session: str | None = None
+
+    def observe(self, ev: SupervisorEvidence) -> None:
+        if self._prev_transport is not None and ev.transport != self._prev_transport:
+            self.transport_transitions += 1
+        if self._prev_market is not None and ev.market_data != self._prev_market:
+            self.market_transitions += 1
+        if self._prev_action is not None and ev.action != self._prev_action:
+            self.action_transitions += 1
+        if self._prev_session is not None and ev.session_state != self._prev_session:
+            self.session_transitions += 1
+        self.transport_sequence.append(ev.transport)
+        self.market_sequence.append(ev.market_data)
+        self.action_sequence.append(ev.action)
+        self.session_sequence.append(ev.session_state)
+        self._prev_transport = ev.transport
+        self._prev_market = ev.market_data
+        self._prev_action = ev.action
+        self._prev_session = ev.session_state
 
 
 def _validate_evidence_path(path: Path) -> None:
-    resolved = path.resolve()
-    runtime = (Path.cwd() / "runtime").resolve()
-    if not str(resolved).startswith(str(runtime)):
+    runtime_root = (Path.cwd() / "runtime").resolve()
+    candidate = path.resolve()
+    try:
+        ok = candidate.is_relative_to(runtime_root)
+    except AttributeError:
+        ok = str(candidate).startswith(str(runtime_root) + "/") or candidate == runtime_root
+    if not ok:
         raise ValueError("evidence path must be under runtime/")
 
 
@@ -129,33 +172,34 @@ async def run_rehearsal(
     *,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """scenario를 실행하고 JSON summary dict를 반환한다."""
     _ScriptedMonitor._instances.clear()
+    mode = scenario.get("monitor_mode", "long_running")
+    if mode not in ("long_running", "instant_exit"):
+        raise ValueError("monitor_mode must be long_running or instant_exit.")
+    _ScriptedMonitor._mode = mode
+
     schedule = _build_schedule(scenario["schedule"])
     steps: list[dict[str, Any]] = scenario["steps"]
-    if not steps:
-        raise ValueError("steps must be non-empty.")
 
     thresholds = provisional_thresholds()
     policy = provisional_supervisor_policy()
     if "thresholds" in scenario:
         from market_data.health_policy import HealthThresholds
 
-        thr = scenario["thresholds"]
-        thresholds = HealthThresholds(**thr)
+        thresholds = HealthThresholds(**scenario["thresholds"])
     if "policy" in scenario:
         policy = SupervisorPolicy(**scenario["policy"])
 
-    state = _RehearsalState(clock_at=_parse_datetime(steps[0]["clock"]))
     tick_idx = {"i": 0}
-
     tracker = MarketHealthTracker(thresholds)
+    transitions = _TransitionTracker()
+    starvation_detected = False
+    flapping_detected = False
 
     def clock() -> datetime:
         idx = min(tick_idx["i"], len(steps) - 1)
         step = steps[idx]
         at = _parse_datetime(step["clock"])
-        state.clock_at = at
         for sig in step.get("transport", []):
             tracker.record_transport_event(kind=sig, at=at, now=at)
         for sig in step.get("market", []):
@@ -173,13 +217,13 @@ async def run_rehearsal(
         record["timestamp"] = ev.timestamp.isoformat()
         record["state"] = ev.state.value
         evidence_records.append(record)
-        state.actions.append(ev.action)
+        transitions.observe(ev)
         if ev.action == str(SupervisorAction.HOLD_EXECUTION_ONLY):
-            state.starvation_detected = True
-        if "flapping" in (ev.reason_code or ""):
-            state.flapping_detected = True
-        if ev.action == str(SupervisorAction.FAILED_CLOSED):
-            state.restart_budget_exhausted = True
+            nonlocal starvation_detected
+            starvation_detected = True
+        if ev.transport == str(TransportHealthStatus.FLAPPING):
+            nonlocal flapping_detected
+            flapping_detected = True
 
     sup = MarketSupervisor(
         market=Market.KR,
@@ -194,7 +238,6 @@ async def run_rehearsal(
     )
 
     summary = await sup.run()
-
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
 
     result = {
@@ -203,14 +246,19 @@ async def run_rehearsal(
         "monitor_initial_starts": summary.monitor_initial_starts,
         "monitor_restarts": summary.monitor_restarts,
         "monitor_cancels": summary.monitor_cancels,
-        "session_transitions": len(steps),
-        "transport_health_transitions": len([a for a in state.actions if "health" in str(a)]),
-        "market_health_transitions": state.starvation_detected,
-        "supervisor_actions": state.actions,
-        "starvation_detected": state.starvation_detected,
-        "flapping_detected": state.flapping_detected,
-        "restart_budget_exhausted": state.restart_budget_exhausted,
+        "restarts_in_current_window": summary.restarts_in_current_window,
+        "transport_health_transitions": transitions.transport_transitions,
+        "market_health_transitions": transitions.market_transitions,
+        "supervisor_action_transitions": transitions.action_transitions,
+        "session_transitions": transitions.session_transitions,
+        "transport_health_sequence": transitions.transport_sequence,
+        "market_health_sequence": transitions.market_sequence,
+        "supervisor_action_sequence": transitions.action_sequence,
+        "starvation_detected": starvation_detected,
+        "flapping_detected": flapping_detected,
+        "restart_budget_exhausted": summary.final_state is SupervisorState.FAILED_CLOSED,
         "pending_tasks": len(pending),
+        "long_running_cancels": sum(1 for m in _ScriptedMonitor._instances if m.cancelled),
     }
 
     if evidence_path is not None:
@@ -225,13 +273,8 @@ async def run_rehearsal(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="RTM-7b offline market supervisor rehearsal")
-    parser.add_argument("--fixture", required=True, type=Path, help="JSON scenario fixture")
-    parser.add_argument(
-        "--evidence-out",
-        type=Path,
-        default=None,
-        help="optional evidence JSONL path (must be under runtime/)",
-    )
+    parser.add_argument("--fixture", required=True, type=Path)
+    parser.add_argument("--evidence-out", type=Path, default=None)
     args = parser.parse_args(argv)
 
     try:
