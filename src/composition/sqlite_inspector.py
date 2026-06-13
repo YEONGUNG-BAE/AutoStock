@@ -17,11 +17,14 @@ databases store credentials.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+from decision.canonical_json import payload_sha256
 
 
 class SqliteInspectionError(Exception):
@@ -160,10 +163,42 @@ JOURNAL_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
     "trigger_fire_journal": frozenset({"idempotency_key", "state"}),
 }
 ACTIVE_STORE_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
-    "decision_bundle_versions": frozenset({"publication_id", "decision_id", "plan_id", "market", "symbol"}),
+    "decision_bundle_versions": frozenset(
+        {
+            "publication_id",
+            "decision_id",
+            "plan_id",
+            "market",
+            "symbol",
+            "decision_created_at",
+            "valid_from",
+            "expires_at",
+            "bundle_json",
+            "bundle_hash",
+        }
+    ),
     "active_decision_pointers": frozenset({"market", "symbol", "publication_id"}),
     "decision_refresh_slots": frozenset({"publication_id"}),
 }
+
+# SQLite sidecar files that indicate an in-flight (non-quiescent) database: a live
+# WAL/shared-memory segment or a rollback journal. Read-only inspection is only
+# trustworthy against a quiescent DB, so their presence is surfaced as a reason.
+_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def sidecar_files(path: str | Path) -> tuple[str, ...]:
+    """Return the suffixes of any existing SQLite sidecar files for ``path``.
+
+    A non-empty result means the database is not quiescent (a writer left a live
+    WAL/shm/journal); read-only inspection cannot prove a clean snapshot of it."""
+
+    resolved = Path(path)
+    return tuple(
+        suffix
+        for suffix in _SIDECAR_SUFFIXES
+        if resolved.with_name(resolved.name + suffix).exists()
+    )
 
 
 def schema_issues(path: str | Path, required: dict[str, frozenset[str]]) -> tuple[str, ...]:
@@ -342,3 +377,207 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
             slot_count=slot_count,
             dangling_pointer_count=dangling_pointer_count,
         )
+
+
+# Integrity reasons surfaced by ``inspect_active_decision``. Sanitized — never raw
+# exception text. ``dangling`` ⇒ pointer references a missing version row;
+# ``corrupt`` ⇒ stored bundle JSON / hash / publication-id / validity columns do
+# not reconcile; ``identity_mismatch`` ⇒ stored columns disagree with the bundle's
+# own internal identity (market/symbol/decision_id/plan_id/created_at).
+_INTEGRITY_DANGLING = "dangling"
+_INTEGRITY_CORRUPT = "corrupt"
+_INTEGRITY_IDENTITY_MISMATCH = "identity_mismatch"
+
+
+@dataclass(frozen=True)
+class ActiveDecisionIntegrity:
+    """Read-only integrity verdict for the configured (market, symbol) active pointer.
+
+    Replicates the publish-time integrity invariants of ``ActiveDecisionStore`` WITHOUT
+    constructing it (its ``__init__`` creates/migrates schema). All fields are sanitized:
+    non-secret identifiers and parsed validity strings only — never the raw bundle JSON."""
+
+    present: bool
+    integrity_ok: bool
+    integrity_reason: str | None
+    decision_id: str | None
+    plan_id: str | None
+    market: str | None
+    symbol: str | None
+    universe: str | None
+    action: str | None
+    valid_from: str | None
+    expires_at: str | None
+    has_plan: bool
+
+
+def _absent_active_decision() -> ActiveDecisionIntegrity:
+    return ActiveDecisionIntegrity(
+        present=False,
+        integrity_ok=False,
+        integrity_reason=None,
+        decision_id=None,
+        plan_id=None,
+        market=None,
+        symbol=None,
+        universe=None,
+        action=None,
+        valid_from=None,
+        expires_at=None,
+        has_plan=False,
+    )
+
+
+def inspect_active_decision(path: str | Path, *, symbol: str, market: str) -> ActiveDecisionIntegrity:
+    """Read-only integrity verdict for the active decision pointer of (market, symbol).
+
+    Opens ``path`` strictly read-only and reconciles the stored bundle exactly as
+    ``ActiveDecisionStore._row_to_active_bundle`` would, but returns a sanitized verdict
+    instead of raising ``PublicationError``. Never constructs the store, never writes,
+    never creates schema. Raises ``SqliteInspectionError`` (sanitized) on sqlite failure."""
+
+    try:
+        with open_read_only(path) as conn:
+            known = frozenset(_list_tables(conn))
+            if "active_decision_pointers" not in known or "decision_bundle_versions" not in known:
+                # Schema gating lives in ``schema_issues``; absent tables ⇒ no active decision here.
+                return _absent_active_decision()
+            pointer = conn.execute(
+                "SELECT publication_id FROM active_decision_pointers WHERE market = ? AND symbol = ?",
+                (market, symbol),
+            ).fetchone()
+            if pointer is None:
+                return _absent_active_decision()
+            publication_id = str(pointer["publication_id"])
+            version = conn.execute(
+                """
+                SELECT publication_id, market, symbol, decision_id, plan_id,
+                       decision_created_at, valid_from, expires_at, bundle_json, bundle_hash
+                FROM decision_bundle_versions
+                WHERE publication_id = ?
+                """,
+                (publication_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:  # pragma: no cover - sanitized, raw text not surfaced
+        raise SqliteInspectionError(
+            "active_decision_read_failed", f"Unable to read active decision: {type(exc).__name__}"
+        ) from exc
+
+    if version is None:
+        # Pointer exists but references no version row → dangling/corrupt pointer.
+        return ActiveDecisionIntegrity(
+            present=True,
+            integrity_ok=False,
+            integrity_reason=_INTEGRITY_DANGLING,
+            decision_id=None,
+            plan_id=None,
+            market=market,
+            symbol=symbol,
+            universe=None,
+            action=None,
+            valid_from=None,
+            expires_at=None,
+            has_plan=False,
+        )
+
+    return _verify_active_version(version)
+
+
+def _verify_active_version(row: sqlite3.Row) -> ActiveDecisionIntegrity:
+    """Reconcile a stored ``decision_bundle_versions`` row read-only; return a verdict."""
+
+    col_market = str(row["market"])
+    col_symbol = str(row["symbol"])
+    col_decision_id = str(row["decision_id"])
+    col_plan_id = None if row["plan_id"] is None else str(row["plan_id"])
+    col_valid_from = str(row["valid_from"])
+    col_expires_at = str(row["expires_at"])
+    col_decision_created_at = str(row["decision_created_at"])
+
+    def _corrupt(reason: str = _INTEGRITY_CORRUPT) -> ActiveDecisionIntegrity:
+        return ActiveDecisionIntegrity(
+            present=True,
+            integrity_ok=False,
+            integrity_reason=reason,
+            decision_id=col_decision_id,
+            plan_id=col_plan_id,
+            market=col_market,
+            symbol=col_symbol,
+            universe=None,
+            action=None,
+            valid_from=col_valid_from,
+            expires_at=col_expires_at,
+            has_plan=col_plan_id is not None,
+        )
+
+    # 1) bundle_json must parse to a JSON object and hash to the stored bundle_hash.
+    try:
+        payload = json.loads(row["bundle_json"])
+    except Exception:  # noqa: BLE001 - fail-closed, sanitized
+        return _corrupt()
+    if not isinstance(payload, dict):
+        return _corrupt()
+    try:
+        recomputed_hash = payload_sha256(payload)
+    except Exception:  # noqa: BLE001 - fail-closed, sanitized
+        return _corrupt()
+    if recomputed_hash != str(row["bundle_hash"]):
+        return _corrupt()
+
+    # 2) publication_id must recompute from identity + hash.
+    recomputed_pub_id = payload_sha256(
+        {
+            "market": col_market,
+            "symbol": col_symbol,
+            "decision_id": col_decision_id,
+            "decision_created_at": col_decision_created_at,
+            "bundle_hash": str(row["bundle_hash"]),
+        }
+    )
+    if recomputed_pub_id != str(row["publication_id"]):
+        return _corrupt()
+
+    # 3) stored payload top-level validity must match the columns.
+    if payload.get("valid_from") != col_valid_from or payload.get("expires_at") != col_expires_at:
+        return _corrupt()
+
+    decision = payload.get("decision")
+    plan = payload.get("plan")
+    if not isinstance(decision, dict):
+        return _corrupt()
+
+    # 4) internal identity must match the stored columns.
+    plan_id_internal: str | None = None
+    if plan is not None:
+        if not isinstance(plan, dict):
+            return _corrupt()
+        plan_id_value = plan.get("plan_id")
+        plan_id_internal = None if plan_id_value is None else str(plan_id_value)
+    decision_id_obj = decision.get("decision_id")
+    decision_id_internal = decision_id_obj if isinstance(decision_id_obj, str) else None
+    if (
+        decision.get("market") != col_market
+        or decision.get("symbol") != col_symbol
+        or decision_id_internal != col_decision_id
+        or plan_id_internal != col_plan_id
+        or decision.get("created_at") != col_decision_created_at
+    ):
+        return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
+
+    universe = decision.get("universe")
+    fund_manager = decision.get("fund_manager")
+    action = fund_manager.get("action") if isinstance(fund_manager, dict) else None
+    return ActiveDecisionIntegrity(
+        present=True,
+        integrity_ok=True,
+        integrity_reason=None,
+        decision_id=col_decision_id,
+        plan_id=col_plan_id,
+        market=col_market,
+        symbol=col_symbol,
+        universe=str(universe) if isinstance(universe, str) else None,
+        action=str(action) if isinstance(action, str) else None,
+        valid_from=col_valid_from,
+        expires_at=col_expires_at,
+        has_plan=col_plan_id is not None,
+    )

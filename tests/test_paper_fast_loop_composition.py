@@ -158,7 +158,7 @@ CREATE TABLE current_positions (
 def test_inspect_reports_missing_databases(tmp_path: Path) -> None:
     # B2: 모든 DB가 없으면 fail-closed — outcome NO_GO + missing_database reason, exit/exception 없음.
     settings = _settings(tmp_path)
-    inspection = inspect_paper_fast_loop(settings=settings, base_dir=tmp_path)
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
     assert inspection.outcome is InspectionOutcome.NO_GO
     assert set(inspection.missing_databases) == {"ledger", "trigger_journal", "active_decision_store"}
     assert "missing_database:ledger" in inspection.reasons
@@ -180,7 +180,7 @@ def test_inspect_flags_foreign_position(tmp_path: Path) -> None:
     conn.execute("INSERT INTO current_positions VALUES ('AAPL', 'US', 'PAPER', 'USD', '5')")
     conn.commit()
     conn.close()
-    inspection = inspect_paper_fast_loop(settings=settings, base_dir=tmp_path)
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
     assert inspection.outcome is InspectionOutcome.NO_GO
     assert "foreign_position_present" in inspection.reasons
     assert "unsupported_market" in inspection.reasons
@@ -198,7 +198,7 @@ def test_inspect_flags_invalid_ledger_schema(tmp_path: Path) -> None:
     conn.execute("CREATE TABLE current_positions (symbol TEXT, market TEXT)")
     conn.commit()
     conn.close()
-    inspection = inspect_paper_fast_loop(settings=settings, base_dir=tmp_path)
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
     assert inspection.outcome is InspectionOutcome.NO_GO
     assert any(r.startswith("ledger_missing_table:") for r in inspection.reasons)
 

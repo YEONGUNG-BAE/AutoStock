@@ -19,8 +19,9 @@ never starts a live runtime. See ``docs/PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md`
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -94,7 +95,11 @@ __all__ = [
     "InspectionOutcome",
     "PaperFastLoopPlan",
     "PaperFastLoopInspection",
+    "ExecutionInputsInspection",
+    "ActiveDecisionInspection",
     "OfflineReplayResult",
+    "PaperFastLoopStack",
+    "build_offline_paper_fast_loop_stack",
     "AVAILABLE_REPLAY_FIXTURES",
     "build_paper_fast_loop_plan",
     "inspect_paper_fast_loop",
@@ -152,12 +157,55 @@ class PaperFastLoopPlan:
 
 
 @dataclass(frozen=True)
+class ExecutionInputsInspection:
+    """Sanitized readiness view of the on-disk execution-inputs snapshot.
+
+    ``hash_valid`` is true only when the snapshot loaded (the loader fail-closes on a
+    hash mismatch). ``currently_valid`` is true when ``created_at <= now <= expires_at``.
+    No raw snapshot JSON is carried — only non-secret identifiers and parsed timestamps.
+    """
+
+    present: bool
+    source_id: str | None
+    universe: str | None
+    created_at: str | None
+    expires_at: str | None
+    hash_valid: bool
+    currently_valid: bool
+
+
+@dataclass(frozen=True)
+class ActiveDecisionInspection:
+    """Sanitized readiness view of the configured (market, symbol) active decision.
+
+    ``integrity_valid`` mirrors the publish-time invariants (hash / publication-id /
+    validity columns / internal identity) reconciled read-only. No raw bundle JSON is
+    carried — only non-secret identifiers, the action label, and parsed timestamps.
+    """
+
+    present: bool
+    integrity_valid: bool
+    decision_id: str | None
+    plan_id: str | None
+    market: str | None
+    symbol: str | None
+    universe: str | None
+    action: str | None
+    valid_from: str | None
+    expires_at: str | None
+    has_plan: bool
+    currently_valid: bool
+
+
+@dataclass(frozen=True)
 class PaperFastLoopInspection:
     """Read-only inspection of the configured fast-loop databases.
 
-    ``outcome`` is ``NO_GO`` whenever any database is missing, has an invalid schema,
-    carries a dangling active pointer, holds a non-terminal (in-flight/crashed)
-    journal entry, or fails a single-symbol position preflight. ``reasons`` carries the
+    ``outcome`` is ``NO_GO`` whenever any database is missing, not quiescent (a live
+    WAL/shm/journal sidecar is present), has an invalid schema, carries a dangling active
+    pointer, holds a non-terminal (in-flight/crashed) journal entry, fails a single-symbol
+    position preflight, or the execution-inputs snapshot / active decision is missing,
+    corrupt, out of its validity window, or universe-mismatched. ``reasons`` carries the
     typed, sanitized codes behind that verdict.
     """
 
@@ -167,6 +215,8 @@ class PaperFastLoopInspection:
     ledger: sqlite_inspector.LedgerSummary | None
     journal: sqlite_inspector.JournalSummary | None
     active_store: sqlite_inspector.ActiveStoreSummary | None
+    execution_inputs: ExecutionInputsInspection | None
+    active_decision: ActiveDecisionInspection | None
     missing_databases: tuple[str, ...]
     reasons: tuple[str, ...]
 
@@ -275,15 +325,29 @@ def build_paper_fast_loop_plan(
 
 
 def inspect_paper_fast_loop(
-    *, settings: RuntimePaperFastLoopSettings, base_dir: Path | str = Path(".")
+    *, settings: RuntimePaperFastLoopSettings, now: datetime, base_dir: Path | str = Path(".")
 ) -> PaperFastLoopInspection:
-    """Read-only, fail-closed inspection of the configured ledger / journal / active store.
+    """Read-only, fail-closed startup-readiness inspection of the configured stack.
 
-    ``outcome`` is ``NO_GO`` (and ``reasons`` is populated) on any of: a missing
-    database, an invalid schema (missing required table/column), an unreadable file, a
-    dangling active pointer, a non-terminal (``reserved``/``dispatching``) journal entry,
-    or a single-symbol position preflight failure. All sqlite failures are surfaced as
-    sanitized reason codes — never raw exception text or tracebacks.
+    Checks (all read-only; constructs no store, creates/migrates no schema, reconciles
+    nothing) and the sanitized ``reasons`` they emit when ``NO_GO``:
+
+    * execution-inputs snapshot — ``missing_execution_inputs_snapshot``,
+      ``execution_inputs_hash_mismatch``, ``execution_inputs_universe_mismatch``,
+      ``execution_inputs_invalid``, ``execution_inputs_not_yet_valid``,
+      ``execution_inputs_expired``;
+    * quiescence — ``database_not_quiescent:<db>`` (a live WAL/shm/journal sidecar);
+    * databases — ``missing_database:<db>``, ``<db>_missing_table/column``,
+      ``<db>_unreadable:<code>``, ``dangling_active_pointer``,
+      ``nonterminal_journal_entries``;
+    * single-symbol position preflight — ``unsupported_*`` / ``foreign_position_present``;
+    * active decision — ``missing_active_decision``, ``active_pointer_identity_mismatch``,
+      ``active_bundle_corrupt``, ``active_decision_not_yet_valid``,
+      ``active_decision_expired``, ``active_execution_universe_mismatch``,
+      ``active_plan_consistency_mismatch``.
+
+    ``now`` must be timezone-aware (the CLI reads it once and passes it). All sqlite
+    failures are surfaced as sanitized reason codes — never raw exception text.
     """
 
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
@@ -292,11 +356,16 @@ def inspect_paper_fast_loop(
     missing: list[str] = []
     reasons: list[str] = []
 
+    execution_inputs, snapshot_universe = _inspect_execution_inputs(
+        paths.snapshot_path, now=now, reasons=reasons
+    )
     ledger_summary = _inspect_ledger(paths.ledger_path, symbol=symbol, market=market,
                                      missing=missing, reasons=reasons)
     journal_summary = _inspect_journal(paths.trigger_journal_path, missing=missing, reasons=reasons)
-    active_summary = _inspect_active_store(paths.active_decision_store_path, symbol=symbol,
-                                           market=market, missing=missing, reasons=reasons)
+    active_summary, active_decision = _inspect_active_store(
+        paths.active_decision_store_path, symbol=symbol, market=market, now=now,
+        snapshot_universe=snapshot_universe, missing=missing, reasons=reasons,
+    )
 
     outcome = InspectionOutcome.OK if not reasons else InspectionOutcome.NO_GO
     return PaperFastLoopInspection(
@@ -306,9 +375,62 @@ def inspect_paper_fast_loop(
         ledger=ledger_summary,
         journal=journal_summary,
         active_store=active_summary,
+        execution_inputs=execution_inputs,
+        active_decision=active_decision,
         missing_databases=tuple(missing),
         reasons=tuple(reasons),
     )
+
+
+def _check_quiescent(path: Path, db_name: str, reasons: list[str]) -> None:
+    """Flag a live SQLite sidecar (WAL/shm/journal) for an existing DB as non-quiescent."""
+
+    if sqlite_inspector.sidecar_files(path):
+        reasons.append(f"database_not_quiescent:{db_name}")
+
+
+def _inspect_execution_inputs(
+    snapshot_path: Path, *, now: datetime, reasons: list[str]
+) -> tuple[ExecutionInputsInspection | None, str | None]:
+    """Read-only execution-inputs snapshot readiness. Returns ``(inspection, universe)``.
+
+    ``universe`` (the snapshot's declared universe) is returned even when the validity
+    window fails, so the active-decision universe-match check can still run."""
+
+    if not snapshot_path.exists():
+        reasons.append("missing_execution_inputs_snapshot")
+        return None, None
+    try:
+        snapshot = load_execution_inputs_snapshot(snapshot_path)
+    except ExecutionInputsSnapshotError as exc:
+        code = getattr(exc, "reason_code", None)
+        if code == "snapshot_file_missing":
+            reasons.append("missing_execution_inputs_snapshot")
+        elif code == "snapshot_hash_mismatch":
+            reasons.append("execution_inputs_hash_mismatch")
+        elif code == "snapshot_universe_mismatch":
+            reasons.append("execution_inputs_universe_mismatch")
+        else:
+            reasons.append("execution_inputs_invalid")
+        return None, None
+
+    currently_valid = True
+    if now < snapshot.created_at:
+        reasons.append("execution_inputs_not_yet_valid")
+        currently_valid = False
+    elif now > snapshot.expires_at:
+        reasons.append("execution_inputs_expired")
+        currently_valid = False
+    inspection = ExecutionInputsInspection(
+        present=True,
+        source_id=snapshot.source_id,
+        universe=snapshot.universe,
+        created_at=snapshot.created_at.isoformat(),
+        expires_at=snapshot.expires_at.isoformat(),
+        hash_valid=True,
+        currently_valid=currently_valid,
+    )
+    return inspection, snapshot.universe
 
 
 def _inspect_ledger(
@@ -318,6 +440,7 @@ def _inspect_ledger(
         missing.append("ledger")
         reasons.append("missing_database:ledger")
         return None
+    _check_quiescent(path, "ledger", reasons)
     try:
         schema = sqlite_inspector.schema_issues(path, sqlite_inspector.LEDGER_REQUIRED_SCHEMA)
         if schema:
@@ -338,6 +461,7 @@ def _inspect_journal(
         missing.append("trigger_journal")
         reasons.append("missing_database:trigger_journal")
         return None
+    _check_quiescent(path, "trigger_journal", reasons)
     try:
         schema = sqlite_inspector.schema_issues(path, sqlite_inspector.JOURNAL_REQUIRED_SCHEMA)
         if schema:
@@ -353,24 +477,100 @@ def _inspect_journal(
 
 
 def _inspect_active_store(
-    path: Path, *, symbol: str, market: str, missing: list[str], reasons: list[str]
-) -> sqlite_inspector.ActiveStoreSummary | None:
+    path: Path, *, symbol: str, market: str, now: datetime, snapshot_universe: str | None,
+    missing: list[str], reasons: list[str]
+) -> tuple[sqlite_inspector.ActiveStoreSummary | None, ActiveDecisionInspection | None]:
     if not path.exists():
         missing.append("active_decision_store")
         reasons.append("missing_database:active_decision_store")
-        return None
+        return None, None
+    _check_quiescent(path, "active_decision_store", reasons)
     try:
         schema = sqlite_inspector.schema_issues(path, sqlite_inspector.ACTIVE_STORE_REQUIRED_SCHEMA)
         if schema:
             reasons.extend(f"active_store_{code}" for code in schema)
-            return None
+            return None, None
         summary = sqlite_inspector.summarize_active_store(path, symbol=symbol, market=market)
         if summary.dangling_pointer_count > 0:
             reasons.append("dangling_active_pointer")
-        return summary
+        inspection = _inspect_active_decision(
+            path, symbol=symbol, market=market, now=now,
+            snapshot_universe=snapshot_universe, reasons=reasons,
+        )
+        return summary, inspection
     except sqlite_inspector.SqliteInspectionError as exc:
         reasons.append(f"active_store_unreadable:{exc.reason_code}")
+        return None, None
+
+
+def _inspect_active_decision(
+    path: Path, *, symbol: str, market: str, now: datetime, snapshot_universe: str | None,
+    reasons: list[str]
+) -> ActiveDecisionInspection | None:
+    """Read-only active-decision readiness via ``sqlite_inspector.inspect_active_decision``.
+
+    Never constructs ``ActiveDecisionStore`` (its ``__init__`` creates/migrates schema)."""
+
+    integrity = sqlite_inspector.inspect_active_decision(path, symbol=symbol, market=market)
+    if not integrity.present:
+        reasons.append("missing_active_decision")
+        return ActiveDecisionInspection(
+            present=False, integrity_valid=False, decision_id=None, plan_id=None,
+            market=None, symbol=None, universe=None, action=None, valid_from=None,
+            expires_at=None, has_plan=False, currently_valid=False,
+        )
+    if not integrity.integrity_ok:
+        if integrity.integrity_reason == "identity_mismatch":
+            reasons.append("active_pointer_identity_mismatch")
+        else:  # "dangling" / "corrupt"
+            reasons.append("active_bundle_corrupt")
+        return ActiveDecisionInspection(
+            present=True, integrity_valid=False, decision_id=integrity.decision_id,
+            plan_id=integrity.plan_id, market=integrity.market, symbol=integrity.symbol,
+            universe=integrity.universe, action=integrity.action,
+            valid_from=integrity.valid_from, expires_at=integrity.expires_at,
+            has_plan=integrity.has_plan, currently_valid=False,
+        )
+
+    currently_valid = True
+    valid_from = _parse_optional_iso(integrity.valid_from)
+    expires_at = _parse_optional_iso(integrity.expires_at)
+    if valid_from is not None and now < valid_from:
+        reasons.append("active_decision_not_yet_valid")
+        currently_valid = False
+    elif expires_at is not None and now > expires_at:
+        reasons.append("active_decision_expired")
+        currently_valid = False
+    if snapshot_universe is not None and integrity.universe != snapshot_universe:
+        reasons.append("active_execution_universe_mismatch")
+    if not _plan_consistent(integrity.action, integrity.has_plan):
+        reasons.append("active_plan_consistency_mismatch")
+    return ActiveDecisionInspection(
+        present=True, integrity_valid=True, decision_id=integrity.decision_id,
+        plan_id=integrity.plan_id, market=integrity.market, symbol=integrity.symbol,
+        universe=integrity.universe, action=integrity.action,
+        valid_from=integrity.valid_from, expires_at=integrity.expires_at,
+        has_plan=integrity.has_plan, currently_valid=currently_valid,
+    )
+
+
+def _parse_optional_iso(value: str | None) -> datetime | None:
+    if value is None:
         return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:  # pragma: no cover - integrity_ok rows always carry parseable ISO
+        return None
+
+
+def _plan_consistent(action: str | None, has_plan: bool) -> bool:
+    """BUY/SELL must carry a plan; HOLD must not. Unknown action ⇒ not consistent."""
+
+    if action in (AnalysisAction.BUY.value, AnalysisAction.SELL.value):
+        return has_plan
+    if action == AnalysisAction.HOLD.value:
+        return not has_plan
+    return False
 
 
 # --- deterministic offline replay ---
@@ -534,14 +734,68 @@ def _seed_initial_cash() -> CashSnapshot:
     )
 
 
-def _build_orchestrator(
+@dataclass
+class PaperFastLoopStack:
+    """Owns the durable + in-memory resources of one composed offline fast-loop stack.
+
+    The ledger / journal / active-store SQLite connections are the only resources that
+    hold OS handles; ``close()`` releases them exactly once (idempotent) and attempts
+    every handle even if one raises, so a temp dir can be deleted with zero pending
+    handles (Windows-safe). The in-memory stores need no teardown.
+    """
+
+    orchestrator: FastLoopExecutionOrchestrator
+    latest_store: LatestMarketStateStore
+    ledger: SQLiteLedger
+    journal: SqliteTriggerJournal
+    active_store: ActiveDecisionStore
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        first_error: Exception | None = None
+        for resource in (self.ledger, self.journal, self.active_store):
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 - close every handle, re-raise first
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def __enter__(self) -> "PaperFastLoopStack":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+@contextmanager
+def build_offline_paper_fast_loop_stack(
     temp_root: Path, *, provider: ValidatedExecutionInputsProvider
-) -> tuple[FastLoopExecutionOrchestrator, LatestMarketStateStore]:
+) -> Iterator[PaperFastLoopStack]:
+    """Context-managed ``PaperFastLoopStack`` that always closes its handles on exit."""
+
+    stack = _build_stack(temp_root, provider=provider)
+    try:
+        yield stack
+    finally:
+        stack.close()
+
+
+def _build_stack(
+    temp_root: Path, *, provider: ValidatedExecutionInputsProvider
+) -> PaperFastLoopStack:
     """(Re)build the full fast-loop stack against the on-disk DBs in ``temp_root``.
 
     In-memory state (latest/rolling stores, health tracker, engine) is fresh each call;
     the ledger / journal / active-store SQLite files persist, so calling this twice models
-    a composition restart against the same durable state.
+    a composition restart against the same durable state. The caller owns ``close()``.
     """
 
     ledger = SQLiteLedger(temp_root / "ledger.sqlite3")
@@ -587,7 +841,13 @@ def _build_orchestrator(
         execution_inputs_provider=provider,
         coordinator=coordinator,
     )
-    return orchestrator, latest
+    return PaperFastLoopStack(
+        orchestrator=orchestrator,
+        latest_store=latest,
+        ledger=ledger,
+        journal=journal,
+        active_store=active_store,
+    )
 
 
 def _drive_one_event(
@@ -653,28 +913,34 @@ def replay_offline(
         return _empty_replay_result(fixture, symbol, snapshot_reason=exc.reason_code)
     provider = ValidatedExecutionInputsProvider(snapshot=snapshot)
 
-    # active decision은 한 번만 publish하고 모든 phase가 같은 파일을 공유한다.
-    active_store = ActiveDecisionStore(temp_root / "active.sqlite3")
-    active_store.publish(
-        DecisionPublicationCandidate(
-            snapshot=_snapshot(decision),
-            plan=plan,
-            valid_from=_REPLAY_DECISION_AT,
-            expires_at=_REPLAY_DECISION_AT + _DAY_DELTA,
-        ),
-        now=_REPLAY_DECISION_AT,
-    )
+    # active decision은 한 번만 publish하고 모든 phase가 같은 파일을 공유한다. publish 전용
+    # store는 즉시 닫아 handle을 남기지 않는다(이후 phase가 같은 파일을 다시 연다).
+    publish_store = ActiveDecisionStore(temp_root / "active.sqlite3")
+    try:
+        publish_store.publish(
+            DecisionPublicationCandidate(
+                snapshot=_snapshot(decision),
+                plan=plan,
+                valid_from=_REPLAY_DECISION_AT,
+                expires_at=_REPLAY_DECISION_AT + _DAY_DELTA,
+            ),
+            now=_REPLAY_DECISION_AT,
+        )
+    finally:
+        publish_store.close()
 
     statuses: list[str] = []
-    # Phase 1 + 2: 동일 스택에서 첫 이벤트와 반복 이벤트(arming 내 중복).
-    orchestrator, latest = _build_orchestrator(temp_root, provider=provider)
-    first_status = _drive_one_event(orchestrator, latest, symbol=symbol, sequence=10)
-    repeat_status = _drive_one_event(orchestrator, latest, symbol=symbol, sequence=20)
+    # Phase 1 + 2: 동일 스택에서 첫 이벤트와 반복 이벤트(arming 내 중복). 끝나면 close.
+    with build_offline_paper_fast_loop_stack(temp_root, provider=provider) as stack:
+        first_status = _drive_one_event(stack.orchestrator, stack.latest_store, symbol=symbol, sequence=10)
+        repeat_status = _drive_one_event(stack.orchestrator, stack.latest_store, symbol=symbol, sequence=20)
     statuses.extend((first_status, repeat_status))
 
-    # Phase 3: 같은 DB 파일로 스택을 재구성(컴포지션 재시작) 후 한 이벤트 더.
-    restart_orchestrator, restart_latest = _build_orchestrator(temp_root, provider=provider)
-    restart_status = _drive_one_event(restart_orchestrator, restart_latest, symbol=symbol, sequence=30)
+    # Phase 3: 같은 DB 파일로 스택을 재구성(컴포지션 재시작) 후 한 이벤트 더. 끝나면 close.
+    with build_offline_paper_fast_loop_stack(temp_root, provider=provider) as restart_stack:
+        restart_status = _drive_one_event(
+            restart_stack.orchestrator, restart_stack.latest_store, symbol=symbol, sequence=30
+        )
     statuses.append(restart_status)
 
     committed = sum(1 for status in statuses if status == FastLoopExecutionStatus.COMMITTED.value)

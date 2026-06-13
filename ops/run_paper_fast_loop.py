@@ -58,12 +58,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validate-only",
         action="store_true",
-        help="snapshot + single-symbol preflight only; no execution, no DB writes (default)",
+        help=(
+            "config + execution-input snapshot validation only; opens/creates/writes no "
+            "database, runs no position preflight, no network (default)"
+        ),
     )
     parser.add_argument(
         "--inspect-existing",
         action="store_true",
-        help="read-only inspection of configured ledger/journal/active-store",
+        help=(
+            "read-only startup-readiness inspection: snapshot + active decision + DB "
+            "schema/state + single-symbol position; reconciles nothing, fail-closed NO_GO"
+        ),
     )
     parser.add_argument(
         "--replay",
@@ -160,6 +166,12 @@ def _inspect_summary(inspection: Any, *, config_path: str, enabled: bool) -> dic
         "ledger": asdict(inspection.ledger) if inspection.ledger is not None else None,
         "journal": _journal_to_dict(inspection.journal),
         "active_store": asdict(inspection.active_store) if inspection.active_store is not None else None,
+        "execution_inputs": (
+            asdict(inspection.execution_inputs) if inspection.execution_inputs is not None else None
+        ),
+        "active_decision": (
+            asdict(inspection.active_decision) if inspection.active_decision is not None else None
+        ),
         "network_called": False,
     }
 
@@ -231,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if mode == "inspect-existing":
         try:
-            inspection = inspect_paper_fast_loop(settings=fast_loop)
+            inspection = inspect_paper_fast_loop(settings=fast_loop, now=datetime.now(tz=_KST))
         except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
             return _fail(f"inspect error: {type(exc).__name__}", as_json=as_json, out=out)
         summary = _inspect_summary(inspection, config_path=args.config, enabled=fast_loop.enabled)
