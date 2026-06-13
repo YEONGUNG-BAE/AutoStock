@@ -204,7 +204,9 @@ def _stack(tmp_path: Path, sample_risk_input_factory) -> dict[str, Any]:
         rolling_store=rolling,
         execution_gate=gate,
         execution_inputs_provider=StaticExecutionInputsProvider(
-            allocator_decision=ri.allocator_decision,
+            allocator_decision=ri.allocator_decision.model_copy(
+                update={"universe": "KR_LARGE", "created_at": T0}
+            ),
             portfolio_policy=PaperPortfolioPolicy(mode=RiskMode.REBALANCING),
         ),
         coordinator=coordinator,

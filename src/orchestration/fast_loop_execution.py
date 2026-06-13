@@ -121,6 +121,12 @@ class StaticExecutionInputsProvider:
             raise ValueError("active symbol mismatch")
         if decision.market != active.market:
             raise ValueError("active market mismatch")
+        alloc = self.allocator_decision
+        require_timezone_aware_datetime(alloc.created_at, field_name="allocator_decision.created_at")
+        if alloc.created_at > now:
+            raise ValueError("allocator created_at in future")
+        if alloc.universe != decision.universe:
+            raise ValueError("allocator universe mismatch")
         if active.bundle.plan is not None:
             plan = active.bundle.plan
             if plan.symbol != active.symbol or plan.market.value != active.market:
@@ -413,9 +419,9 @@ class FastLoopExecutionOrchestrator:
         try:
             self._on_evidence(evidence)
         except Exception:
+            self._global_terminal = True
             if status is FastLoopExecutionStatus.COMMITTED:
                 return result
-            self._global_terminal = True
             return FastLoopExecutionResult(
                 status=FastLoopExecutionStatus.EVIDENCE_SINK_ERROR,
                 reason_code=FastLoopExecutionStatus.EVIDENCE_SINK_ERROR.value,
@@ -428,29 +434,36 @@ class FastLoopExecutionOrchestrator:
         return FastLoopExecutionResult(status=status, reason_code=reason_code)
 
 
-def _preflight_update(update: AppliedMarketUpdate) -> FastLoopExecutionResult | None:
+def _malformed_result() -> FastLoopExecutionResult:
+    return FastLoopExecutionResult(
+        status=FastLoopExecutionStatus.MALFORMED_UPDATE,
+        reason_code=FastLoopExecutionStatus.MALFORMED_UPDATE.value,
+    )
+
+
+def _preflight_update(update: object) -> FastLoopExecutionResult | None:
+    """public boundary 방어 검증. malformed 입력에서 예외를 발생시키지 않는다."""
+    if not isinstance(update, AppliedMarketUpdate):
+        return _malformed_result()
+    if not isinstance(update.market, Market):
+        return _malformed_result()
+    if not isinstance(update.event_type, MarketEventType):
+        return _malformed_result()
+    if update.event_type not in (MarketEventType.TRADE, MarketEventType.BEST_BID_ASK):
+        return _malformed_result()
     try:
         require_timezone_aware_datetime(update.applied_at, field_name="applied_at")
     except Exception:
-        return FastLoopExecutionResult(
-            status=FastLoopExecutionStatus.MALFORMED_UPDATE,
-            reason_code=FastLoopExecutionStatus.MALFORMED_UPDATE.value,
-        )
-    if update.event_type not in (MarketEventType.TRADE, MarketEventType.BEST_BID_ASK):
-        return FastLoopExecutionResult(
-            status=FastLoopExecutionStatus.MALFORMED_UPDATE,
-            reason_code=FastLoopExecutionStatus.MALFORMED_UPDATE.value,
-        )
-    if not update.symbol.strip() or not update.provider.strip() or not update.channel.strip():
-        return FastLoopExecutionResult(
-            status=FastLoopExecutionStatus.MALFORMED_UPDATE,
-            reason_code=FastLoopExecutionStatus.MALFORMED_UPDATE.value,
-        )
-    if isinstance(update.sequence, bool) or update.sequence < 0:
-        return FastLoopExecutionResult(
-            status=FastLoopExecutionStatus.MALFORMED_UPDATE,
-            reason_code=FastLoopExecutionStatus.MALFORMED_UPDATE.value,
-        )
+        return _malformed_result()
+    if not isinstance(update.symbol, str) or not update.symbol.strip():
+        return _malformed_result()
+    if not isinstance(update.provider, str) or not update.provider.strip():
+        return _malformed_result()
+    if not isinstance(update.channel, str) or not update.channel.strip():
+        return _malformed_result()
+    seq = update.sequence
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        return _malformed_result()
     return None
 
 

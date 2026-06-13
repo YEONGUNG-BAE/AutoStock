@@ -81,6 +81,51 @@ orchestrator instance lifetime. No auto-clear API.
 `FastLoopExecutionEvidence` — no raw frames, credentials, accounts, full decision JSON,
 or exception repr.
 
+### COMMITTED evidence sink failure (hardening)
+
+When `on_evidence` raises after a `COMMITTED` coordinator result:
+
+- current call returns `COMMITTED` (order not rolled back)
+- `_global_terminal = True` immediately
+- all subsequent updates → `GLOBAL_TERMINAL_FAIL_CLOSED`, coordinator 0
+
+Non-`COMMITTED` sink failure → `EVIDENCE_SINK_ERROR` + global terminal (unchanged).
+
+## Malformed update validation (hardening)
+
+`handle_applied_update()` validates the full public boundary without raising:
+
+- `AppliedMarketUpdate` type, `Market` enum, `MarketEventType` enum
+- timezone-aware `applied_at`
+- nonblank `str` symbol/provider/channel
+- `int` sequence (not bool), `>= 0`
+
+All malformed inputs → `MALFORMED_UPDATE`, gate/active/coordinator 0.
+
+## Execution inputs binding (hardening)
+
+`StaticExecutionInputsProvider.resolve()` additionally requires:
+
+- `allocator_decision.universe == active.bundle.decision.universe`
+- `allocator_decision.created_at <= now` (timezone-aware)
+
+## Rolling orchestration (hardening)
+
+When plan has rolling rules and `rolling_store` is configured:
+
+```text
+rule_required_windows → peek_history → build_indicator_context → coordinator
+```
+
+When `rolling_store is None`, orchestrator passes `indicators=None` and delegates
+suppression to TriggerEngine (`MISSING_INDICATOR` etc.) — orchestrator does not
+pre-fail.
+
+## Package exports
+
+`orchestration` lazy-exports RTM-7c.1 store types + RTM-7c.2 gate/fast-loop types.
+No eager imports; no circular dependency.
+
 ## Import boundaries
 
 - `market_data/*` must not import `execution`, `orchestration`, `broker`, `ledger`

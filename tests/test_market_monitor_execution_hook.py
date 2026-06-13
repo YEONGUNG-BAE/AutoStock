@@ -124,6 +124,39 @@ def test_out_of_order_no_callback() -> None:
     assert len(calls) == 1
 
 
+def test_future_event_no_callback() -> None:
+    calls: list[AppliedMarketUpdate] = []
+    future = _BASE + timedelta(hours=2)
+    late = _BASE + timedelta(hours=1)
+    _run_monitor(
+        [_trade(sequence=1, at=future)],
+        clock=lambda: late,
+        on_applied_update=calls.append,
+    )
+    assert calls == []
+
+
+def test_stream_mismatch_no_callback() -> None:
+    calls: list[AppliedMarketUpdate] = []
+    t1 = _trade(sequence=1)
+    t2 = NormalizedTradeTick(
+        provider="other",
+        symbol="005930",
+        market=Market.KR,
+        currency=Currency.KRW,
+        price=Decimal("70000"),
+        quantity=Decimal("10"),
+        trade_at=_BASE + timedelta(seconds=2),
+        received_at=_BASE + timedelta(seconds=2),
+        provider_sequence=ProviderSequence(
+            provider="other", channel="OTHER|005930", sequence=1,
+            received_at=_BASE + timedelta(seconds=2),
+        ),
+    )
+    _run_monitor([t1, t2], on_applied_update=calls.append)
+    assert len(calls) == 1
+
+
 def test_callback_applied_at_matches_shared_now() -> None:
     clock = _SteppingClock(_BASE + timedelta(hours=1))
     calls: list[AppliedMarketUpdate] = []
