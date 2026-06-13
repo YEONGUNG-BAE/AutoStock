@@ -144,13 +144,15 @@ class MarketSupervisorAdapter:
         adapted = self.adapt_kis_transport(event)
         if isinstance(adapted, InformationalTransportEvent):
             return None
-        now = max(self._clock(), adapted.at)
+        # now는 절대 at으로 끌어올리지 않는다 — 미래 event는 tracker에서 FUTURE로 거부돼야 한다.
+        now = self._clock()
         return sink.record_transport_event(kind=adapted.kind, at=adapted.at, now=now)
 
     def forward_monitor_evidence(
         self, evidence: MonitorEvidence, sink: _RecordSink
     ) -> tuple[RecordResult | None, RecordResult | None]:
-        now = max(self._clock(), evidence.timestamp)
+        # 미래 timestamp는 tracker FUTURE 거부 경로를 그대로 타야 한다(끌어올리지 않음).
+        now = self._clock()
         market_result: RecordResult | None = None
         transport_result: RecordResult | None = None
         market = self.adapt_monitor_evidence(evidence)

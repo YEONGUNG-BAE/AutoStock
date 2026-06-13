@@ -15,9 +15,17 @@ from data.market_supervisor_adapter import (
     InformationalTransportEvent,
     MarketSupervisorAdapter,
 )
-from market_data.health_policy import MarketHealthTracker, RecordResult, provisional_thresholds
+from market_data.health_policy import (
+    MarketHealthTracker,
+    RecordResult,
+    TransportHealthStatus,
+    provisional_thresholds,
+)
+from market_data.market_session import MarketSession, MarketSessionState
 from market_data.models import MarketEventType
 from market_data.monitor import MonitorEvidence, MonitorState
+
+from domain.enums import Market
 
 _REPO = Path(__file__).resolve().parents[1]
 _DATA = _REPO / "src" / "data"
@@ -55,7 +63,8 @@ def test_all_subscribed_sets_tracker_state() -> None:
 
 
 def test_two_acks_then_all_subscribed_sequence() -> None:
-    adapter = MarketSupervisorAdapter(clock=lambda: _T0)
+    # clock은 처리 시점 — 모든 event(_T0..+2s)는 과거여야 tracker가 수용한다.
+    adapter = MarketSupervisorAdapter(clock=lambda: _T0 + timedelta(seconds=10))
     tracker = MarketHealthTracker(provisional_thresholds())
     _connected(tracker, _T0)
     adapter.forward_kis_transport(KisWsTransportEvent(kind="ack", at=_T0), tracker)
@@ -81,6 +90,40 @@ def test_forward_connected() -> None:
     tracker = MarketHealthTracker(provisional_thresholds())
     result = adapter.forward_kis_transport(KisWsTransportEvent(kind="connected", at=_T0), tracker)
     assert result is RecordResult.RECORDED
+
+
+def test_future_transport_event_rejected_state_unchanged() -> None:
+    # adapter는 now를 event.at으로 끌어올리지 않는다 — 미래 transport event는 FUTURE로 거부.
+    adapter = MarketSupervisorAdapter(clock=lambda: _T0)
+    tracker = MarketHealthTracker(provisional_thresholds())
+    result = adapter.forward_kis_transport(
+        KisWsTransportEvent(kind="connected", at=_T0 + timedelta(minutes=5)), tracker
+    )
+    assert result is RecordResult.FUTURE
+    # state unchanged: 연결 기록이 남지 않아 여전히 never-connected.
+    verdict = tracker.evaluate(
+        session=MarketSession(market=Market.KR, state=MarketSessionState.OPEN, as_of=_T0),
+        now=_T0,
+    )
+    assert verdict.transport is TransportHealthStatus.UNKNOWN
+
+
+def test_future_market_event_rejected_state_unchanged() -> None:
+    adapter = MarketSupervisorAdapter(clock=lambda: _T0)
+    tracker = MarketHealthTracker(provisional_thresholds())
+    _connected(tracker, _T0)
+    adapter.forward_kis_transport(KisWsTransportEvent(kind="all_subscribed", at=_T0), tracker)
+    evidence = MonitorEvidence(
+        timestamp=_T0 + timedelta(minutes=5),
+        monitor_session_id="t",
+        state=MonitorState.RUNNING,
+        connection_attempt=1,
+        consecutive_failures=0,
+        kind="apply",
+        event_type=MarketEventType.BEST_BID_ASK.value,
+    )
+    market_result, _ = adapter.forward_monitor_evidence(evidence, tracker)
+    assert market_result is RecordResult.FUTURE
 
 
 def test_market_data_does_not_import_data() -> None:

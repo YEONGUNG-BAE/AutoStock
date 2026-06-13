@@ -113,10 +113,15 @@ Previous-epoch pong/heartbeat values are **not** reused. Delayed events with
 Flapping is judged from **completed** `ConnectionEpochResult` records (bounded deque, max 64):
 
 ```text
-stable epoch = uptime >= flapping_min_uptime_seconds
-               AND market_event_count >= flapping_min_market_events
-short unstable = NOT stable
+short unstable = uptime < flapping_min_uptime_seconds
+                 AND market_event_count < flapping_min_market_events
+stable epoch   = uptime >= flapping_min_uptime_seconds
+                 OR market_event_count >= flapping_min_market_events
 ```
+
+An epoch is short-unstable only when it is **both** too short **and** event-starved.
+A long, quiet connection (sufficient uptime, few quotes) and a short but
+event-rich connection are both treated as stable — they do not count toward flapping.
 
 When `short_epochs_in_window >= flapping_max_short_epochs` within
 `flapping_window_seconds` → transport `FLAPPING` (evaluated before WARMING).

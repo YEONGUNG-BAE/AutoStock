@@ -292,12 +292,12 @@ class MarketHealthTracker:
             self._completed_epochs.popleft()
 
     def _is_short_unstable(self, epoch: ConnectionEpochResult) -> bool:
-        # stable epoch = uptime·market 이벤트 모두 임계 충족. 그 외 completed epoch는 short.
-        stable = (
-            epoch.uptime_seconds >= self.thresholds.flapping_min_uptime_seconds
-            and epoch.market_event_count >= self.thresholds.flapping_min_market_events
+        # short-unstable = uptime 부족 AND event 부족. 둘 중 하나라도 충분하면 안정 근거로 본다
+        # (긴 안정 연결의 적은 quote, 또는 짧지만 이벤트가 충분한 연결은 flapping 아님).
+        return (
+            epoch.uptime_seconds < self.thresholds.flapping_min_uptime_seconds
+            and epoch.market_event_count < self.thresholds.flapping_min_market_events
         )
-        return not stable
 
     def _short_epochs_in_window(self, now: datetime) -> int:
         self._trim_epochs(now)

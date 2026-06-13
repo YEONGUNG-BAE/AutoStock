@@ -155,7 +155,8 @@ def test_delayed_old_epoch_pong_rejected() -> None:
 # --- flapping completed epochs ------------------------------------------------
 
 
-def test_one_event_then_drop_flapping() -> None:
+def test_short_uptime_no_events_repeated_flapping() -> None:
+    # short-unstable = uptime 부족 AND event 부족. 짧은 연결 + 이벤트 0 반복 → flapping.
     tracker = _tracker(
         flapping_max_short_epochs=3,
         flapping_window_seconds=600.0,
@@ -166,11 +167,61 @@ def test_one_event_then_drop_flapping() -> None:
         base = _T0 + timedelta(minutes=i * 2)
         _connected(tracker, base)
         _subscribed(tracker, base)
-        tracker.record_market_event(event_type="best_bid_ask", at=base + timedelta(seconds=1), now=base + timedelta(seconds=1))
-        tracker.record_transport_event(kind="disconnect", at=base + timedelta(seconds=5), now=base + timedelta(seconds=5))
+        tracker.record_transport_event(
+            kind="disconnect", at=base + timedelta(seconds=5), now=base + timedelta(seconds=5)
+        )
     now = _T0 + timedelta(minutes=10)
     verdict = tracker.evaluate(session=_session(MarketSessionState.OPEN, now), now=now)
     assert verdict.transport is TransportHealthStatus.FLAPPING
+
+
+def test_long_uptime_zero_events_not_flapping() -> None:
+    # 긴 안정 연결은 quote가 없어도 flapping 아님(uptime 충분 → not short-unstable).
+    tracker = _tracker(
+        flapping_max_short_epochs=1,
+        flapping_window_seconds=7200.0,
+        flapping_min_uptime_seconds=30.0,
+        flapping_min_market_events=1,
+    )
+    base = _T0
+    _connected(tracker, base)
+    _subscribed(tracker, base)
+    tracker.record_transport_event(
+        kind="disconnect", at=base + timedelta(hours=1), now=base + timedelta(hours=1)
+    )
+    now = base + timedelta(hours=1, seconds=1)
+    verdict = tracker.evaluate(session=_session(MarketSessionState.OPEN, now), now=now)
+    assert verdict.transport is not TransportHealthStatus.FLAPPING
+
+
+def test_short_uptime_enough_events_not_flapping() -> None:
+    # 짧은 연결이라도 이벤트가 충분하면 flapping 아님(event 충분 → not short-unstable).
+    tracker = _tracker(
+        flapping_max_short_epochs=1,
+        flapping_window_seconds=600.0,
+        flapping_min_uptime_seconds=30.0,
+        flapping_min_market_events=1,
+    )
+    for i in range(3):
+        base = _T0 + timedelta(minutes=i * 2)
+        _connected(tracker, base)
+        _subscribed(tracker, base)
+        tracker.record_market_event(
+            event_type="best_bid_ask",
+            at=base + timedelta(seconds=1),
+            now=base + timedelta(seconds=1),
+        )
+        tracker.record_market_event(
+            event_type="best_bid_ask",
+            at=base + timedelta(seconds=2),
+            now=base + timedelta(seconds=2),
+        )
+        tracker.record_transport_event(
+            kind="disconnect", at=base + timedelta(seconds=5), now=base + timedelta(seconds=5)
+        )
+    now = _T0 + timedelta(minutes=10)
+    verdict = tracker.evaluate(session=_session(MarketSessionState.OPEN, now), now=now)
+    assert verdict.transport is not TransportHealthStatus.FLAPPING
 
 
 def test_stable_epoch_recovery() -> None:

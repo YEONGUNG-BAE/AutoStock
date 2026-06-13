@@ -36,3 +36,6 @@ memory/
 # Runtime data directory at repository root only (not src/data/)
 /data/
 /runtime/
+
+# Local tool state (Claude Code session locks, scheduled-task state, etc.)
+/.claude/

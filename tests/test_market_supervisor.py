@@ -168,6 +168,59 @@ def test_starvation_hold_no_restart() -> None:
     assert summary.monitor_restarts == 0
 
 
+def test_starved_after_monitor_exit_restarts_for_transport_absence() -> None:
+    # STARVED 자체로 restart하지 않지만, monitor가 자연 종료(transport session absent)하면
+    # HOLD 상태에서도 transport 원인으로 restart해야 한다. (live-monitor no-restart의 짝)
+    events: list[SupervisorEvidence] = []
+    clock_at = {"now": _T0}
+    thr = HealthThresholds(
+        subscription_grace_seconds=30.0,
+        heartbeat_timeout_seconds=300.0,
+        minimum_stable_uptime_seconds=1.0,
+        flapping_window_seconds=120.0,
+        flapping_max_short_epochs=5,
+        flapping_min_uptime_seconds=30.0,
+        flapping_min_market_events=1,
+        quote_grace_seconds=30.0,
+        quote_starvation_seconds=30.0,
+        max_quote_age_seconds=300.0,
+    )
+
+    def clock() -> datetime:
+        return clock_at["now"]
+
+    policy = SupervisorPolicy(
+        poll_interval_seconds=0.01,
+        max_restarts_in_window=5,
+        restart_window_seconds=300.0,
+        restart_backoff_seconds=0.0,
+    )
+    tracker = MarketHealthTracker(thr)
+    sup = MarketSupervisor(
+        market=Market.KR,
+        calendar=_FakeCalendar(lambda _n: MarketSessionState.OPEN),
+        monitor_factory=_InstantMonitor,
+        tracker=tracker,
+        clock=clock,
+        sleep=_fake_sleep,
+        policy=policy,
+        max_ticks=3,
+        on_evidence=events.append,
+    )
+    sup.record_transport(kind="connected", at=_T0)
+    sup.record_transport(kind="all_subscribed", at=_T0)
+    sup.record_transport(kind="pong_sent", at=_T0)
+    sup.record_market(event_type="best_bid_ask", at=_T0)
+    clock_at["now"] = _T0 + timedelta(seconds=120)  # quote starvation (>30, <max 300) → STARVED
+    summary = asyncio.run(sup.run())
+    actions = {e.action for e in events}
+    assert str(SupervisorAction.HOLD_EXECUTION_ONLY) in actions
+    assert summary.monitor_initial_starts == 1
+    assert summary.monitor_restarts >= 1
+    # restart 사유는 starvation이 아니라 transport session absent여야 한다.
+    assert any(e.reason_code == "transport_session_absent" for e in events)
+
+
 def test_restart_budget_window_not_total() -> None:
     created: list[_InstantMonitor] = []
 

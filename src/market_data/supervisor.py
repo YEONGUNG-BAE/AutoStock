@@ -226,8 +226,10 @@ class MarketSupervisor:
             self._state = SupervisorState.STOPPED
             raise
         finally:
-            if not self._terminal_failed:
-                await self._graceful_cancel(self.clock(), None, reason_code="shutdown")
+            # terminal failure에서도 살아있는 monitor task는 반드시 정리한다(누수·fail-closed 모순 방지).
+            # _graceful_cancel은 suppress_sink_errors=True로 emit하고, terminal 상태에서는
+            # _emit이 조기 return하므로 sink 억제와 CancelledError 전파는 유지된다.
+            await self._graceful_cancel(self.clock(), None, reason_code="shutdown")
 
     def _enter_terminal_failed(self, *, reason_code: str) -> None:
         if self._terminal_failed:
