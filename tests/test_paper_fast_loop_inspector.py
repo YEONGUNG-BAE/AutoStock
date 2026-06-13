@@ -9,11 +9,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from analysis import AnalysisAction
+from composition import paper_fast_loop as _pfl
 from composition.sqlite_inspector import (
+    ACTIVE_STORE_REQUIRED_SCHEMA,
     SqliteInspectionError,
     inspect_active_decision,
     inspect_sqlite_file,
     open_read_only,
+    schema_issues,
     summarize_active_store,
     summarize_journal,
     summarize_ledger,
@@ -248,12 +252,34 @@ def _active_path(tmp_path: Path, name: str = "active.sqlite3") -> tuple[Path, sq
     return path, conn
 
 
+def _full_model_bundle_dicts(
+    *, symbol: str = "005930", decision_id: str = "dec-1"
+) -> tuple[dict, dict]:
+    """Build a fully valid AnalysisDecision + BUY TriggerPlan as JSON dicts via the real
+    composition builders, so the bundle round-trips through ``deserialize_validated_bundle``
+    exactly as the runtime store-write path produces it (P1-A model-validation parity)."""
+
+    from domain import DecisionId
+
+    decision = _pfl._analysis_decision(
+        action=AnalysisAction.BUY, symbol=symbol, decision_id=decision_id
+    )
+    plan = _pfl._buy_plan(symbol=symbol, decision_id=DecisionId(decision_id))
+    return decision.model_dump(mode="json"), plan.model_dump(mode="json")
+
+
 def test_active_decision_valid_buy(tmp_path: Path) -> None:
+    # P1-A: a valid verdict requires a payload the runtime reader can model_validate; use the
+    # real full AnalysisDecision/TriggerPlan models (not a minimal dict) so integrity_ok holds
+    # only when the bundle is genuinely restorable.
     path, conn = _active_path(tmp_path)
+    decision, plan = _full_model_bundle_dicts()
+    created_at = decision["created_at"]
     _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
-                   version_market="KR", version_symbol="005930", plan_id="plan-1",
-                   plan_payload=_plan_payload(market="KR", symbol="005930",
-                                              decision_id="dec-1", plan_id="plan-1"))
+                   version_market="KR", version_symbol="005930",
+                   decision_id=decision["decision_id"], plan_id=plan["plan_id"],
+                   created_at=created_at, valid_from=created_at, expires_at=_EXPIRES_AT,
+                   decision_payload=decision, plan_payload=plan)
     conn.commit(); conn.close()
     verdict = inspect_active_decision(path, symbol="005930", market="KR")
     assert verdict.present is True
@@ -262,6 +288,56 @@ def test_active_decision_valid_buy(tmp_path: Path) -> None:
     assert verdict.universe == "KR_LARGE"
     assert verdict.action == "buy"
     assert verdict.has_plan is True
+
+
+def test_active_decision_model_invalid_bundle_is_corrupt(tmp_path: Path) -> None:
+    # P1-A reproduction: a bundle that clears hash + publication_id + identity + validity but
+    # is NOT a restorable AnalysisDecision (a runtime-required field removed) must fail-closed
+    # as corrupt. Before the fix the inspector reported integrity_ok=True for this bundle even
+    # though ActiveDecisionStore._row_to_active_bundle would raise at activation-read time.
+    path, conn = _active_path(tmp_path)
+    decision, plan = _full_model_bundle_dicts()
+    del decision["summary_one_liner"]  # required by AnalysisDecision; ignored by the dict checks
+    created_at = decision["created_at"]
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930",
+                   decision_id=decision["decision_id"], plan_id=plan["plan_id"],
+                   created_at=created_at, valid_from=created_at, expires_at=_EXPIRES_AT,
+                   decision_payload=decision, plan_payload=plan)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.present is True
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "corrupt"
+
+
+def test_active_decision_buy_without_plan_is_corrupt(tmp_path: Path) -> None:
+    # P1-A: a BUY decision with no plan is a malformed DecisionTriggerBundle (BUY requires a
+    # plan). The dict checks do not reject it here (plan-consistency is gated separately), so
+    # the model-restoration gate must fail-closed as corrupt to match the runtime reader.
+    path, conn = _active_path(tmp_path)
+    decision, _plan = _full_model_bundle_dicts()
+    created_at = decision["created_at"]
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930",
+                   decision_id=decision["decision_id"], plan_id=None,
+                   created_at=created_at, valid_from=created_at, expires_at=_EXPIRES_AT,
+                   decision_payload=decision, plan_payload=None)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "corrupt"
+
+
+def test_active_store_schema_requires_runtime_reader_columns(tmp_path: Path) -> None:
+    # P1-A: the required schema must include every column the runtime reader reads
+    # (source_payload_hash, published_at). A store missing them is unreadable at activation
+    # time, so it must be flagged rather than silently treated as inspectable.
+    path, conn = _active_path(tmp_path)  # _FULL_ACTIVE_SCHEMA omits the two runtime columns
+    conn.commit(); conn.close()
+    issues = schema_issues(path, ACTIVE_STORE_REQUIRED_SCHEMA)
+    assert "missing_column:decision_bundle_versions.source_payload_hash" in issues
+    assert "missing_column:decision_bundle_versions.published_at" in issues
 
 
 def test_active_decision_missing_pointer(tmp_path: Path) -> None:

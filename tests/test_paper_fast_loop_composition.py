@@ -447,6 +447,34 @@ def test_inspect_flags_active_pointer_identity_mismatch(tmp_path: Path) -> None:
     assert "active_bundle_corrupt" not in inspection.reasons
 
 
+def test_inspect_dangling_pointer_emits_single_reason(tmp_path: Path) -> None:
+    # P1-B: a configured pointer that references a missing version row is ONE root cause and
+    # must surface exactly `dangling_active_pointer` — never additionally `active_bundle_corrupt`
+    # (the pre-fix behaviour emitted both: the store summary's dangling count AND the decision
+    # inspector's `else` branch). Asserts the exact reason and that it appears once.
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    conn = sqlite3.connect(paths.active_decision_store_path)
+    conn.execute("DELETE FROM decision_bundle_versions")  # leave the pointer dangling.
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = paths.active_decision_store_path.with_name(
+            paths.active_decision_store_path.name + suffix
+        )
+        if sidecar.exists():
+            sidecar.unlink()
+
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.NO_GO
+    assert "dangling_active_pointer" in inspection.reasons
+    assert "active_bundle_corrupt" not in inspection.reasons
+    assert inspection.reasons.count("dangling_active_pointer") == 1
+
+
 def test_inspect_never_constructs_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Section 6: inspect must NOT construct ActiveDecisionStore / SQLiteLedger /
     # SqliteTriggerJournal (their __init__ creates/migrates schema = a write).

@@ -116,14 +116,29 @@ version is `identity_mismatch` even if that version is itself internally
 consistent. Validity is treated as **integrity, not best-effort**:
 `valid_from`/`expires_at` must be present, ISO-parseable, timezone-aware, and
 satisfy `valid_from <= expires_at`; a missing/unparseable/naive/reversed value is
-corruption (never silently downgraded to "currently valid"). Reasons:
+corruption (never silently downgraded to "currently valid").
+
+**Full model-restoration parity (no drift):** the stored bundle payload is run
+through `orchestration.active_decision_store.deserialize_validated_bundle` — the
+*same* pure helper the runtime reader uses — so it must restore into a valid
+`DecisionTriggerBundle` (`AnalysisDecision` + `TriggerPlan` model validation,
+BUY/SELL plan-binding, plan/decision time binding). A payload that clears the
+hash / publication-id / identity / validity checks but is **not** a restorable
+bundle (incomplete model, BUY without a plan, etc.) is `active_bundle_corrupt`,
+never reported as integrity-OK — inspect can never accept a bundle the runtime
+reader would reject. The required schema therefore also includes the columns the
+runtime reader reads (`source_payload_hash`, `published_at`); a store missing them
+fails the schema check rather than being treated as inspectable. Reasons:
 
 - `missing_active_decision` — no pointer for the configured key.
 - `active_pointer_identity_mismatch` — pointer/version/bundle/plan identity
   disagree (distinct from `dangling_active_pointer`, which is a pointer to a
   missing version row).
 - `active_bundle_corrupt` — bundle JSON / hash / publication-id / validity
-  columns / validity datetimes do not reconcile.
+  columns / validity datetimes / **full model restoration** do not reconcile.
+  A missing-version pointer is **not** reported here: it is exactly one
+  `dangling_active_pointer` (the store summary detects it via LEFT JOIN), never
+  also `active_bundle_corrupt`.
 - `active_decision_not_yet_valid`, `active_decision_expired` — `now` is outside a
   well-formed validity window.
 - `active_execution_universe_mismatch` — active decision universe ≠ snapshot
@@ -215,16 +230,20 @@ The composed stack owns three durable SQLite handles (ledger / trigger journal /
 active-decision-store); the in-memory stores need no teardown. `close()` releases
 every handle exactly once (idempotent) and attempts all three even if one raises,
 re-raising the first error, so the temp dir is deletable with zero pending handles
-(Windows-safe). `build_offline_paper_fast_loop_stack` is a context manager that
-always closes on exit (including on a body exception).
+(Windows-safe). Teardown closes in **construction-reverse order**
+(active-store → journal → ledger), identical on both the normal `close()` path and
+the partial-construction cleanup path. `build_offline_paper_fast_loop_stack` is a
+context manager that always closes on exit (including on a body exception).
 
 Construction is fail-closed: if any step after the first SQLite handle is opened
 raises — a later store constructor or an in-memory dependency — `_build_stack`
-closes every already-opened handle in reverse order (active-store → journal →
-ledger) and re-raises the **original** construction exception; a cleanup-time
-`close` failure is swallowed so it never masks the original error. A partial
-construction therefore never leaks a handle. Replay's composition-restart phase
-fully closes the first stack before opening the next against the same files.
+closes every already-opened handle in that same reverse order (active-store →
+journal → ledger) and re-raises the **original** construction exception; a
+cleanup-time `close` failure is swallowed so it never masks the original error. A
+partial construction therefore never leaks a handle. Replay's composition-restart
+phase fully closes the first stack before opening the next against the same files.
+The resource-lifecycle tests assert the exact teardown order via a shared ordered
+close-event log across all three handles (not merely a per-handle close count).
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 

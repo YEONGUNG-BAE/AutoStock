@@ -525,7 +525,14 @@ def _inspect_active_decision(
     if not integrity.integrity_ok:
         if integrity.integrity_reason == "identity_mismatch":
             reasons.append("active_pointer_identity_mismatch")
-        else:  # "dangling" / "corrupt"
+        elif integrity.integrity_reason == "dangling":
+            # 손상 종류가 "pointer는 있으나 가리키는 version 행이 없음"인 경우, 이미
+            # ``_inspect_active_store``가 summary.dangling_pointer_count>0를 보고
+            # ``dangling_active_pointer``를 한 번 기록한다(LEFT JOIN으로 같은 pointer를 셈).
+            # 여기서 ``active_bundle_corrupt``를 더하면 단일 근본원인에 두 reason이 붙어
+            # 안정-단일-reason 계약을 깨므로, dangling은 corrupt로 중복 보고하지 않는다.
+            pass
+        else:  # "corrupt": JSON/hash/publication_id/model/validity 손상
             reasons.append("active_bundle_corrupt")
         return ActiveDecisionInspection(
             present=True, integrity_valid=False, decision_id=integrity.decision_id,
@@ -759,7 +766,9 @@ class PaperFastLoopStack:
             return
         self._closed = True
         first_error: Exception | None = None
-        for resource in (self.ledger, self.journal, self.active_store):
+        # 생성 역순(active_store → journal → ledger)으로 닫아 부분-생성 정리 경로
+        # (``_build_stack`` except 절)와 동일한 teardown 순서를 보장한다.
+        for resource in (self.active_store, self.journal, self.ledger):
             close = getattr(resource, "close", None)
             if not callable(close):
                 continue

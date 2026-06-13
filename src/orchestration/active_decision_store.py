@@ -987,6 +987,27 @@ def _bundle_to_json(
     return canonical_json_dumps(payload)
 
 
+def deserialize_validated_bundle(stored_payload: object) -> DecisionTriggerBundle:
+    """Pure model-restoration of a stored bundle payload (no DB, no I/O, fail-closed).
+
+    Shared by the runtime reader (``_row_to_active_bundle``) and the read-only operator
+    inspector (``composition.sqlite_inspector``) so their *model-validation* parity cannot
+    drift: a payload that the runtime would reject at activation-read time must also be
+    rejected by inspect. Raises ``PublicationError`` on any malformation; never falls back."""
+
+    if not isinstance(stored_payload, dict):
+        raise PublicationError("stored bundle_json must be a JSON object.")
+    try:
+        decision = AnalysisDecision.model_validate(stored_payload["decision"])
+        plan_payload = stored_payload.get("plan")
+        plan = TriggerPlan.model_validate(plan_payload) if plan_payload is not None else None
+        return DecisionTriggerBundle(decision=decision, plan=plan)
+    except Exception as exc:  # noqa: BLE001 - fail-closed, no fallback
+        raise PublicationError(
+            "stored bundle could not be deserialized into a valid DecisionTriggerBundle."
+        ) from exc
+
+
 def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
     # 1) 저장된 bundle_json 전체에 대한 hash 검증(fail-closed): top-level 키/추가 키/
     #    valid_from/expires_at 변조까지 모두 잡는다(컬럼으로 재구성하지 않는다).
@@ -1003,16 +1024,10 @@ def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
     if recomputed_hash != row["bundle_hash"]:
         raise PublicationError("stored bundle_hash does not match the stored payload.")
 
-    # 2) 모델 복원: 검증 가능한 DecisionTriggerBundle이어야 한다.
-    try:
-        decision = AnalysisDecision.model_validate(stored_payload["decision"])
-        plan_payload = stored_payload.get("plan")
-        plan = TriggerPlan.model_validate(plan_payload) if plan_payload is not None else None
-        bundle = DecisionTriggerBundle(decision=decision, plan=plan)
-    except Exception as exc:  # noqa: BLE001 - fail-closed, no fallback
-        raise PublicationError(
-            "stored bundle could not be deserialized into a valid DecisionTriggerBundle."
-        ) from exc
+    # 2) 모델 복원: 검증 가능한 DecisionTriggerBundle이어야 한다(inspector와 공유하는 순수 헬퍼).
+    bundle = deserialize_validated_bundle(stored_payload)
+    decision = bundle.decision
+    plan = bundle.plan
 
     valid_from = _parse(row["valid_from"])
     expires_at = _parse(row["expires_at"])

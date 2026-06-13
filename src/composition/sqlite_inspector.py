@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from decision.canonical_json import payload_sha256
+from orchestration.active_decision_store import deserialize_validated_bundle
 
 
 class SqliteInspectionError(Exception):
@@ -187,6 +188,11 @@ ACTIVE_STORE_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
             "expires_at",
             "bundle_json",
             "bundle_hash",
+            # The runtime reader (ActiveDecisionStore._row_to_active_bundle) also reads these
+            # two columns; a DB missing them would be unreadable at activation time, so an
+            # operator-trustworthy inspection must require them too.
+            "source_payload_hash",
+            "published_at",
         }
     ),
     "active_decision_pointers": frozenset({"market", "symbol", "publication_id"}),
@@ -620,6 +626,18 @@ def _verify_active_version(
             or plan.get("decision_id") != decision_id_internal
         ):
             return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
+
+    # 5) full model-restoration parity with the runtime reader
+    #    (ActiveDecisionStore._row_to_active_bundle, via the shared pure helper). Run last so
+    #    the more specific identity/validity reasons above win when both apply; a payload that
+    #    clears every check above but is not a valid DecisionTriggerBundle (incomplete model,
+    #    BUY without plan, plan/decision time binding, etc.) is rejected at activation-read
+    #    time, so inspect must fail-closed here too — never report integrity_ok for a bundle
+    #    the runtime reader cannot load.
+    try:
+        deserialize_validated_bundle(payload)
+    except Exception:  # noqa: BLE001 - fail-closed, sanitized (no model/exception text surfaced)
+        return _corrupt()
 
     universe = decision.get("universe")
     fund_manager = decision.get("fund_manager")
