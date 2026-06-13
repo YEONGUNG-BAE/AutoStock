@@ -76,7 +76,10 @@ from composition import sqlite_inspector
 from orchestration.active_decision_store import ActiveDecisionStore, DecisionPublicationCandidate
 from orchestration.execution_gate import SessionHealthExecutionGate
 from orchestration.execution_inputs_snapshot import (
+    ExecutionInputsSnapshotError,
+    ValidatedExecutionInputsProvider,
     ValidatedExecutionInputsSnapshot,
+    compute_snapshot_payload_hash,
     load_execution_inputs_snapshot,
 )
 from orchestration.fast_loop_execution import (
@@ -88,6 +91,7 @@ from orchestration.fast_loop_execution import (
 __all__ = [
     "PaperFastLoopPaths",
     "PaperFastLoopOutcome",
+    "InspectionOutcome",
     "PaperFastLoopPlan",
     "PaperFastLoopInspection",
     "OfflineReplayResult",
@@ -101,6 +105,11 @@ __all__ = [
 class PaperFastLoopOutcome(StrEnum):
     READY = "ready"
     NOT_READY = "not_ready"
+
+
+class InspectionOutcome(StrEnum):
+    OK = "ok"
+    NO_GO = "no_go"
 
 
 @dataclass(frozen=True)
@@ -144,28 +153,53 @@ class PaperFastLoopPlan:
 
 @dataclass(frozen=True)
 class PaperFastLoopInspection:
-    """Read-only inspection of the configured fast-loop databases."""
+    """Read-only inspection of the configured fast-loop databases.
 
+    ``outcome`` is ``NO_GO`` whenever any database is missing, has an invalid schema,
+    carries a dangling active pointer, holds a non-terminal (in-flight/crashed)
+    journal entry, or fails a single-symbol position preflight. ``reasons`` carries the
+    typed, sanitized codes behind that verdict.
+    """
+
+    outcome: InspectionOutcome
     market: str
     symbol: str
     ledger: sqlite_inspector.LedgerSummary | None
     journal: sqlite_inspector.JournalSummary | None
     active_store: sqlite_inspector.ActiveStoreSummary | None
     missing_databases: tuple[str, ...]
+    reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class OfflineReplayResult:
-    """Deterministic offline replay summary built from temp-dir databases."""
+    """Deterministic offline replay summary built from temp-dir databases.
+
+    Replay runs three phases on the *same* on-disk databases to prove idempotency:
+    a first event, a repeat event on the same orchestrator (within-arming duplicate),
+    and a third event after rebuilding the whole stack (composition restart). The
+    execution inputs are supplied by the real ``ValidatedExecutionInputsProvider`` loaded
+    from a snapshot file, so a tampered/stale/universe-mismatch snapshot yields zero fills.
+    """
 
     fixture: str
     market: str
     symbol: str
+    snapshot_loaded: bool
+    snapshot_reason: str | None
     event_count: int
     statuses: tuple[str, ...]
+    first_status: str | None
+    repeat_status: str | None
+    restart_status: str | None
     committed_count: int
-    final_position_quantity: str | None
+    order_result_count: int
+    filled_result_count: int
+    fill_count: int
+    journal_state_counts: tuple[tuple[str, int], ...]
     journal_terminal_count: int
+    final_position_quantity: str | None
+    final_cash_amount: str | None
 
 
 # --- single-symbol preflight ---
@@ -203,7 +237,12 @@ def build_paper_fast_loop_plan(
     base_dir: Path | str = Path("."),
     snapshot_loader: Callable[[Path], ValidatedExecutionInputsSnapshot] = load_execution_inputs_snapshot,
 ) -> PaperFastLoopPlan:
-    """Validate-only: load+validate snapshot, run single-symbol preflight. No execution."""
+    """Validate-only: load+validate the on-disk snapshot and check validity window.
+
+    Pure config + snapshot only. Opens **no** database (no ledger/journal/active-store
+    access); single-symbol position preflight against existing databases lives in
+    ``inspect_paper_fast_loop`` so validate-only stays side-effect free.
+    """
 
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
     market = settings.market
@@ -223,15 +262,6 @@ def build_paper_fast_loop_plan(
         elif now > snapshot.expires_at:
             reasons.append("snapshot_expired")
 
-    # 기존 ledger가 있으면 단일 종목 preflight 수행(없으면 통과).
-    if paths.ledger_path.exists():
-        try:
-            positions = sqlite_inspector.scan_positions(paths.ledger_path)
-        except sqlite_inspector.SqliteInspectionError:
-            reasons.append("ledger_unreadable")
-        else:
-            reasons.extend(_position_preflight_reasons(positions, symbol=symbol))
-
     outcome = PaperFastLoopOutcome.READY if not reasons else PaperFastLoopOutcome.NOT_READY
     return PaperFastLoopPlan(
         outcome=outcome,
@@ -247,43 +277,100 @@ def build_paper_fast_loop_plan(
 def inspect_paper_fast_loop(
     *, settings: RuntimePaperFastLoopSettings, base_dir: Path | str = Path(".")
 ) -> PaperFastLoopInspection:
-    """Read-only inspection of the configured ledger / journal / active store."""
+    """Read-only, fail-closed inspection of the configured ledger / journal / active store.
+
+    ``outcome`` is ``NO_GO`` (and ``reasons`` is populated) on any of: a missing
+    database, an invalid schema (missing required table/column), an unreadable file, a
+    dangling active pointer, a non-terminal (``reserved``/``dispatching``) journal entry,
+    or a single-symbol position preflight failure. All sqlite failures are surfaced as
+    sanitized reason codes — never raw exception text or tracebacks.
+    """
 
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
     market = settings.market
     symbol = settings.symbol
     missing: list[str] = []
+    reasons: list[str] = []
 
-    ledger_summary: sqlite_inspector.LedgerSummary | None = None
-    if paths.ledger_path.exists():
-        ledger_summary = sqlite_inspector.summarize_ledger(
-            paths.ledger_path, symbol=symbol, market=market
-        )
-    else:
-        missing.append("ledger")
+    ledger_summary = _inspect_ledger(paths.ledger_path, symbol=symbol, market=market,
+                                     missing=missing, reasons=reasons)
+    journal_summary = _inspect_journal(paths.trigger_journal_path, missing=missing, reasons=reasons)
+    active_summary = _inspect_active_store(paths.active_decision_store_path, symbol=symbol,
+                                           market=market, missing=missing, reasons=reasons)
 
-    journal_summary: sqlite_inspector.JournalSummary | None = None
-    if paths.trigger_journal_path.exists():
-        journal_summary = sqlite_inspector.summarize_journal(paths.trigger_journal_path)
-    else:
-        missing.append("trigger_journal")
-
-    active_summary: sqlite_inspector.ActiveStoreSummary | None = None
-    if paths.active_decision_store_path.exists():
-        active_summary = sqlite_inspector.summarize_active_store(
-            paths.active_decision_store_path, symbol=symbol, market=market
-        )
-    else:
-        missing.append("active_decision_store")
-
+    outcome = InspectionOutcome.OK if not reasons else InspectionOutcome.NO_GO
     return PaperFastLoopInspection(
+        outcome=outcome,
         market=market,
         symbol=symbol,
         ledger=ledger_summary,
         journal=journal_summary,
         active_store=active_summary,
         missing_databases=tuple(missing),
+        reasons=tuple(reasons),
     )
+
+
+def _inspect_ledger(
+    path: Path, *, symbol: str, market: str, missing: list[str], reasons: list[str]
+) -> sqlite_inspector.LedgerSummary | None:
+    if not path.exists():
+        missing.append("ledger")
+        reasons.append("missing_database:ledger")
+        return None
+    try:
+        schema = sqlite_inspector.schema_issues(path, sqlite_inspector.LEDGER_REQUIRED_SCHEMA)
+        if schema:
+            reasons.extend(f"ledger_{code}" for code in schema)
+            return None
+        positions = sqlite_inspector.scan_positions(path)
+        reasons.extend(_position_preflight_reasons(positions, symbol=symbol))
+        return sqlite_inspector.summarize_ledger(path, symbol=symbol, market=market)
+    except sqlite_inspector.SqliteInspectionError as exc:
+        reasons.append(f"ledger_unreadable:{exc.reason_code}")
+        return None
+
+
+def _inspect_journal(
+    path: Path, *, missing: list[str], reasons: list[str]
+) -> sqlite_inspector.JournalSummary | None:
+    if not path.exists():
+        missing.append("trigger_journal")
+        reasons.append("missing_database:trigger_journal")
+        return None
+    try:
+        schema = sqlite_inspector.schema_issues(path, sqlite_inspector.JOURNAL_REQUIRED_SCHEMA)
+        if schema:
+            reasons.extend(f"journal_{code}" for code in schema)
+            return None
+        summary = sqlite_inspector.summarize_journal(path)
+        if summary.nonterminal_count > 0:
+            reasons.append("nonterminal_journal_entries")
+        return summary
+    except sqlite_inspector.SqliteInspectionError as exc:
+        reasons.append(f"journal_unreadable:{exc.reason_code}")
+        return None
+
+
+def _inspect_active_store(
+    path: Path, *, symbol: str, market: str, missing: list[str], reasons: list[str]
+) -> sqlite_inspector.ActiveStoreSummary | None:
+    if not path.exists():
+        missing.append("active_decision_store")
+        reasons.append("missing_database:active_decision_store")
+        return None
+    try:
+        schema = sqlite_inspector.schema_issues(path, sqlite_inspector.ACTIVE_STORE_REQUIRED_SCHEMA)
+        if schema:
+            reasons.extend(f"active_store_{code}" for code in schema)
+            return None
+        summary = sqlite_inspector.summarize_active_store(path, symbol=symbol, market=market)
+        if summary.dangling_pointer_count > 0:
+            reasons.append("dangling_active_pointer")
+        return summary
+    except sqlite_inspector.SqliteInspectionError as exc:
+        reasons.append(f"active_store_unreadable:{exc.reason_code}")
+        return None
 
 
 # --- deterministic offline replay ---
@@ -408,52 +495,59 @@ def _trade_tick(*, symbol: str, sequence: int) -> NormalizedTradeTick:
     )
 
 
-def replay_offline(
-    *, settings: RuntimePaperFastLoopSettings, temp_dir: Path | str, fixture: str
-) -> OfflineReplayResult:
-    """Run a deterministic offline replay in ``temp_dir`` (never the runtime paths).
+def build_replay_snapshot_payload(
+    *,
+    symbol_universe: str = _REPLAY_UNIVERSE,
+    created_at: datetime = _REPLAY_DECISION_AT,
+    expires_at: datetime = _REPLAY_DECISION_AT + _DAY_DELTA,
+) -> dict:
+    """Build a canonical, hash-stamped execution-inputs snapshot payload for replay.
 
-    Raises ``ValueError`` for an unknown fixture name.
+    Exposed so operator tests can write tampered/stale/universe-mismatch variants and
+    prove the ``ValidatedExecutionInputsProvider`` path yields zero fills.
     """
 
-    if fixture not in AVAILABLE_REPLAY_FIXTURES:
-        raise ValueError(f"unknown replay fixture: {fixture!r}")
-
-    temp_root = Path(temp_dir)
-    if not temp_root.exists():
-        raise ValueError(f"replay temp_dir does not exist: {temp_root}")
-
-    symbol = settings.symbol
-    is_buy = fixture == "buy_fill"
-    action = AnalysisAction.BUY if is_buy else AnalysisAction.HOLD
-    decision = _analysis_decision(
-        action=action, symbol=symbol, decision_id=f"replay-{fixture}"
-    )
-    plan = _buy_plan(symbol=symbol, decision_id=decision.decision_id) if is_buy else None
-
-    # 모든 상태는 caller temp_dir에만 쓴다(runtime/ 경로 미사용).
-    ledger = SQLiteLedger(temp_root / "ledger.sqlite3")
-    broker = PaperBrokerAdapter(
-        ledger,
-        initial_cash=CashSnapshot(
-            currency=Currency.KRW,
-            amount=Decimal("100000000"),
-            account_role=AccountRole.PAPER,
-            as_of=_REPLAY_DECISION_AT,
+    payload: dict = {
+        "schema_version": 1,
+        "source_id": "replay-fixture",
+        "created_at": created_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "universe": symbol_universe,
+        "allocator_decision": _build_allocator(symbol_universe=symbol_universe).model_dump(
+            mode="json"
         ),
+        "portfolio_policy": {
+            "mode": RiskMode.REBALANCING.value,
+            "allocator_symbol_target_weight": "4",
+        },
+    }
+    payload["payload_sha256"] = compute_snapshot_payload_hash(payload)
+    return payload
+
+
+def _seed_initial_cash() -> CashSnapshot:
+    return CashSnapshot(
+        currency=Currency.KRW,
+        amount=Decimal("100000000"),
+        account_role=AccountRole.PAPER,
+        as_of=_REPLAY_DECISION_AT,
     )
+
+
+def _build_orchestrator(
+    temp_root: Path, *, provider: ValidatedExecutionInputsProvider
+) -> tuple[FastLoopExecutionOrchestrator, LatestMarketStateStore]:
+    """(Re)build the full fast-loop stack against the on-disk DBs in ``temp_root``.
+
+    In-memory state (latest/rolling stores, health tracker, engine) is fresh each call;
+    the ledger / journal / active-store SQLite files persist, so calling this twice models
+    a composition restart against the same durable state.
+    """
+
+    ledger = SQLiteLedger(temp_root / "ledger.sqlite3")
+    broker = PaperBrokerAdapter(ledger, initial_cash=_seed_initial_cash())
     journal = SqliteTriggerJournal(temp_root / "journal.sqlite3")
     active_store = ActiveDecisionStore(temp_root / "active.sqlite3")
-
-    active_store.publish(
-        DecisionPublicationCandidate(
-            snapshot=_snapshot(decision),
-            plan=plan,
-            valid_from=_REPLAY_DECISION_AT,
-            expires_at=_REPLAY_DECISION_AT + _DAY_DELTA,
-        ),
-        now=_REPLAY_DECISION_AT,
-    )
 
     latest = LatestMarketStateStore()
     rolling = RollingTradeHistoryStore(
@@ -469,9 +563,7 @@ def replay_offline(
         kind="all_subscribed", at=_REPLAY_DECISION_AT, now=_REPLAY_DECISION_AT
     )
     # market-data HEALTHY는 최근 quote를 요구한다(trade만으로는 quote starvation).
-    tracker.record_market_event(
-        event_type="best_bid_ask", at=_REPLAY_EVENT_AT, now=_REPLAY_EVENT_AT
-    )
+    tracker.record_market_event(event_type="best_bid_ask", at=_REPLAY_EVENT_AT, now=_REPLAY_EVENT_AT)
 
     bridge = TriggerOrderBridge(
         journal=journal,
@@ -487,12 +579,6 @@ def replay_offline(
             ledger_source=ledger, market_state_source=_LatestStateAdapter(latest)
         ),
     )
-    provider = StaticExecutionInputsProvider(
-        allocator_decision=_build_allocator(symbol_universe=_REPLAY_UNIVERSE),
-        portfolio_policy=PaperPortfolioPolicy(
-            mode=RiskMode.REBALANCING, allocator_symbol_target_weight=Percent("4")
-        ),
-    )
     orchestrator = FastLoopExecutionOrchestrator(
         active_reader=active_store,
         latest_store=latest,
@@ -501,42 +587,162 @@ def replay_offline(
         execution_inputs_provider=provider,
         coordinator=coordinator,
     )
+    return orchestrator, latest
 
-    # 가격 산출을 위해 quote를 먼저 latest store에 seed한다(applied update로 라우팅하지 않음).
-    latest.apply(_quote_tick(symbol=symbol, sequence=1), now=_REPLAY_EVENT_AT)
+
+def _drive_one_event(
+    orchestrator: FastLoopExecutionOrchestrator, latest: LatestMarketStateStore, *, symbol: str,
+    sequence: int,
+) -> str:
+    """Seed a quote + trade into ``latest`` and route one applied trade update."""
+
+    latest.apply(_quote_tick(symbol=symbol, sequence=sequence), now=_REPLAY_EVENT_AT)
+    latest.apply(_trade_tick(symbol=symbol, sequence=sequence + 1), now=_REPLAY_EVENT_AT)
+    update = AppliedMarketUpdate(
+        market=Market.KR,
+        symbol=symbol,
+        event_type=MarketEventType.TRADE,
+        provider="replay",
+        channel="replay-trade",
+        sequence=sequence,
+        applied_at=_REPLAY_EVENT_AT,
+    )
+    return orchestrator.handle_applied_update(update).status.value
+
+
+def replay_offline(
+    *,
+    settings: RuntimePaperFastLoopSettings,
+    temp_dir: Path | str,
+    fixture: str,
+    snapshot_path: Path | str | None = None,
+) -> OfflineReplayResult:
+    """Run a deterministic offline replay in ``temp_dir`` (never the runtime paths).
+
+    Execution inputs flow through the real ``ValidatedExecutionInputsProvider`` loaded
+    from ``snapshot_path`` (or a canonical valid snapshot written into ``temp_dir`` when
+    omitted). Three phases prove idempotency: first event, repeat event (same stack),
+    restart event (rebuilt stack, same DBs). A snapshot that fails to load yields a
+    zero-execution result with a sanitized ``snapshot_reason``.
+
+    Raises ``ValueError`` for an unknown fixture or a missing ``temp_dir``.
+    """
+
+    if fixture not in AVAILABLE_REPLAY_FIXTURES:
+        raise ValueError(f"unknown replay fixture: {fixture!r}")
+
+    temp_root = Path(temp_dir)
+    if not temp_root.exists():
+        raise ValueError(f"replay temp_dir does not exist: {temp_root}")
+
+    symbol = settings.symbol
+    is_buy = fixture == "buy_fill"
+    action = AnalysisAction.BUY if is_buy else AnalysisAction.HOLD
+    decision = _analysis_decision(action=action, symbol=symbol, decision_id=f"replay-{fixture}")
+    plan = _buy_plan(symbol=symbol, decision_id=decision.decision_id) if is_buy else None
+
+    # 실행 입력 snapshot을 디스크에서 fail-closed 로드 → ValidatedExecutionInputsProvider.
+    if snapshot_path is None:
+        snapshot_file = temp_root / "execution_inputs_snapshot.json"
+        snapshot_file.write_text(_json_dumps(build_replay_snapshot_payload()), encoding="utf-8")
+    else:
+        snapshot_file = Path(snapshot_path)
+    try:
+        snapshot = load_execution_inputs_snapshot(snapshot_file)
+    except ExecutionInputsSnapshotError as exc:
+        return _empty_replay_result(fixture, symbol, snapshot_reason=exc.reason_code)
+    provider = ValidatedExecutionInputsProvider(snapshot=snapshot)
+
+    # active decision은 한 번만 publish하고 모든 phase가 같은 파일을 공유한다.
+    active_store = ActiveDecisionStore(temp_root / "active.sqlite3")
+    active_store.publish(
+        DecisionPublicationCandidate(
+            snapshot=_snapshot(decision),
+            plan=plan,
+            valid_from=_REPLAY_DECISION_AT,
+            expires_at=_REPLAY_DECISION_AT + _DAY_DELTA,
+        ),
+        now=_REPLAY_DECISION_AT,
+    )
 
     statuses: list[str] = []
-    events = [_trade_tick(symbol=symbol, sequence=2)]
-    for index, event in enumerate(events, start=1):
-        latest.apply(event, now=_REPLAY_EVENT_AT)
-        rolling.observe(event, now=_REPLAY_EVENT_AT)
-        update = AppliedMarketUpdate(
-            market=Market.KR,
-            symbol=symbol,
-            event_type=MarketEventType.TRADE,
-            provider="replay",
-            channel="replay-trade",
-            sequence=index,
-            applied_at=_REPLAY_EVENT_AT,
-        )
-        result = orchestrator.handle_applied_update(update)
-        statuses.append(result.status.value)
+    # Phase 1 + 2: 동일 스택에서 첫 이벤트와 반복 이벤트(arming 내 중복).
+    orchestrator, latest = _build_orchestrator(temp_root, provider=provider)
+    first_status = _drive_one_event(orchestrator, latest, symbol=symbol, sequence=10)
+    repeat_status = _drive_one_event(orchestrator, latest, symbol=symbol, sequence=20)
+    statuses.extend((first_status, repeat_status))
+
+    # Phase 3: 같은 DB 파일로 스택을 재구성(컴포지션 재시작) 후 한 이벤트 더.
+    restart_orchestrator, restart_latest = _build_orchestrator(temp_root, provider=provider)
+    restart_status = _drive_one_event(restart_orchestrator, restart_latest, symbol=symbol, sequence=30)
+    statuses.append(restart_status)
 
     committed = sum(1 for status in statuses if status == FastLoopExecutionStatus.COMMITTED.value)
     journal_summary = sqlite_inspector.summarize_journal(temp_root / "journal.sqlite3")
     ledger_summary = sqlite_inspector.summarize_ledger(
         temp_root / "ledger.sqlite3", symbol=symbol, market=_SUPPORTED_MARKET
     )
+    cash_amount = _read_cash_amount(temp_root / "ledger.sqlite3")
     return OfflineReplayResult(
         fixture=fixture,
         market=_SUPPORTED_MARKET,
         symbol=symbol,
-        event_count=len(events),
+        snapshot_loaded=True,
+        snapshot_reason=None,
+        event_count=len(statuses),
         statuses=tuple(statuses),
+        first_status=first_status,
+        repeat_status=repeat_status,
+        restart_status=restart_status,
         committed_count=committed,
-        final_position_quantity=ledger_summary.position_quantity,
+        order_result_count=ledger_summary.order_result_count,
+        filled_result_count=ledger_summary.filled_result_count,
+        fill_count=ledger_summary.fill_count,
+        journal_state_counts=tuple(
+            (item.state, item.count) for item in journal_summary.state_counts
+        ),
         journal_terminal_count=journal_summary.terminal_count,
+        final_position_quantity=ledger_summary.position_quantity,
+        final_cash_amount=cash_amount,
     )
+
+
+def _empty_replay_result(fixture: str, symbol: str, *, snapshot_reason: str) -> OfflineReplayResult:
+    return OfflineReplayResult(
+        fixture=fixture,
+        market=_SUPPORTED_MARKET,
+        symbol=symbol,
+        snapshot_loaded=False,
+        snapshot_reason=snapshot_reason,
+        event_count=0,
+        statuses=(),
+        first_status=None,
+        repeat_status=None,
+        restart_status=None,
+        committed_count=0,
+        order_result_count=0,
+        filled_result_count=0,
+        fill_count=0,
+        journal_state_counts=(),
+        journal_terminal_count=0,
+        final_position_quantity=None,
+        final_cash_amount=None,
+    )
+
+
+def _read_cash_amount(ledger_path: Path) -> str | None:
+    with sqlite_inspector.open_read_only(ledger_path) as conn:
+        row = conn.execute(
+            "SELECT amount FROM current_cash WHERE currency = ? AND account_role = ?",
+            (Currency.KRW.value, AccountRole.PAPER.value),
+        ).fetchone()
+    return None if row is None else str(row["amount"])
+
+
+def _json_dumps(payload: dict) -> str:
+    import json
+
+    return json.dumps(payload)
 
 
 class _LatestStateAdapter:

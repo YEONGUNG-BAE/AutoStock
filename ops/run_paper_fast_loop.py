@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 from composition.paper_fast_loop import (
     AVAILABLE_REPLAY_FIXTURES,
+    InspectionOutcome,
     PaperFastLoopOutcome,
     build_paper_fast_loop_plan,
     inspect_paper_fast_loop,
@@ -145,13 +146,16 @@ def _validate_summary(plan: Any, *, config_path: str, enabled: bool) -> dict[str
 
 
 def _inspect_summary(inspection: Any, *, config_path: str, enabled: bool) -> dict[str, Any]:
+    passed = inspection.outcome is InspectionOutcome.OK
     return {
-        "outcome": "PASS",
+        "outcome": "PASS" if passed else "NO_GO",
         "mode": "inspect-existing",
         "config": config_path,
         "enabled": enabled,
         "market": inspection.market,
         "symbol": inspection.symbol,
+        "inspection_outcome": inspection.outcome.value,
+        "reasons": list(inspection.reasons),
         "missing_databases": list(inspection.missing_databases),
         "ledger": asdict(inspection.ledger) if inspection.ledger is not None else None,
         "journal": _journal_to_dict(inspection.journal),
@@ -176,11 +180,21 @@ def _replay_summary(result: Any, *, config_path: str) -> dict[str, Any]:
         "fixture": result.fixture,
         "market": result.market,
         "symbol": result.symbol,
+        "snapshot_loaded": result.snapshot_loaded,
+        "snapshot_reason": result.snapshot_reason,
         "event_count": result.event_count,
         "statuses": list(result.statuses),
+        "first_status": result.first_status,
+        "repeat_status": result.repeat_status,
+        "restart_status": result.restart_status,
         "committed_count": result.committed_count,
-        "final_position_quantity": result.final_position_quantity,
+        "order_result_count": result.order_result_count,
+        "filled_result_count": result.filled_result_count,
+        "fill_count": result.fill_count,
+        "journal_state_counts": [list(item) for item in result.journal_state_counts],
         "journal_terminal_count": result.journal_terminal_count,
+        "final_position_quantity": result.final_position_quantity,
+        "final_cash_amount": result.final_cash_amount,
         "used_temp_dir": True,
         "runtime_paths_touched": False,
         "network_called": False,
@@ -216,10 +230,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if summary["outcome"] == "PASS" else 1
 
     if mode == "inspect-existing":
-        inspection = inspect_paper_fast_loop(settings=fast_loop)
+        try:
+            inspection = inspect_paper_fast_loop(settings=fast_loop)
+        except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
+            return _fail(f"inspect error: {type(exc).__name__}", as_json=as_json, out=out)
         summary = _inspect_summary(inspection, config_path=args.config, enabled=fast_loop.enabled)
         _emit(summary, as_json=as_json, out=out)
-        return 0
+        return 0 if summary["outcome"] == "PASS" else 1
 
     if mode == "replay":
         fixture = args.replay
@@ -229,8 +246,11 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=as_json,
                 out=out,
             )
-        with tempfile.TemporaryDirectory(prefix="paper_fast_loop_replay_") as tmp:
-            result = replay_offline(settings=fast_loop, temp_dir=Path(tmp), fixture=fixture)
+        try:
+            with tempfile.TemporaryDirectory(prefix="paper_fast_loop_replay_") as tmp:
+                result = replay_offline(settings=fast_loop, temp_dir=Path(tmp), fixture=fixture)
+        except Exception as exc:  # replay 내부 오류도 traceback 없이 sanitized fail로.
+            return _fail(f"replay error: {type(exc).__name__}", as_json=as_json, out=out)
         _emit(_replay_summary(result, config_path=args.config), as_json=as_json, out=out)
         return 0
 

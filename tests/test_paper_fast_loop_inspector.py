@@ -23,7 +23,7 @@ CREATE TABLE order_results (order_id TEXT PRIMARY KEY, status TEXT);
 CREATE TABLE fills (fill_id TEXT PRIMARY KEY, order_id TEXT);
 CREATE TABLE current_cash (currency TEXT, account_role TEXT, amount TEXT, PRIMARY KEY (currency, account_role));
 CREATE TABLE current_positions (
-    symbol TEXT, market TEXT, account_role TEXT, quantity TEXT,
+    symbol TEXT, market TEXT, account_role TEXT, currency TEXT, quantity TEXT,
     PRIMARY KEY (symbol, market, account_role)
 );
 """
@@ -56,10 +56,10 @@ def _ledger_db(tmp_path: Path) -> Path:
     path = tmp_path / "ledger.sqlite3"
     conn = _make_db(path, LEDGER_SCHEMA)
     conn.execute("INSERT INTO order_intents VALUES ('o1', '005930', 'KR')")
-    conn.execute("INSERT INTO order_results VALUES ('o1', 'COMMITTED')")
+    conn.execute("INSERT INTO order_results VALUES ('o1', 'FILLED')")
     conn.execute("INSERT INTO fills VALUES ('f1', 'o1')")
     conn.execute("INSERT INTO current_cash VALUES ('KRW', 'PAPER', '96010000')")
-    conn.execute("INSERT INTO current_positions VALUES ('005930', 'KR', 'PAPER', '57')")
+    conn.execute("INSERT INTO current_positions VALUES ('005930', 'KR', 'PAPER', 'KRW', '57')")
     conn.commit()
     conn.close()
     return path
@@ -99,7 +99,13 @@ def test_inspect_sqlite_file_reports_tables_and_counts(tmp_path: Path) -> None:
 def test_summarize_ledger_is_sanitized(tmp_path: Path) -> None:
     summary = summarize_ledger(_ledger_db(tmp_path), symbol="005930", market="KR")
     assert summary.fill_count == 1
-    assert summary.committed_result_count == 1
+    # order_results.status는 실제 domain.OrderStatus(FILLED 등)로 집계된다 — 존재하지 않는
+    # 'COMMITTED'는 항상 0이므로 per-status 카운트로 검증한다.
+    assert summary.order_result_count == 1
+    assert summary.filled_result_count == 1
+    assert summary.rejected_result_count == 0
+    assert summary.pending_result_count == 0
+    assert summary.cancelled_result_count == 0
     assert summary.position_quantity == "57"
     assert summary.cash_entry_count == 1
 
@@ -131,6 +137,19 @@ def test_summarize_active_store_missing_pointer(tmp_path: Path) -> None:
     summary = summarize_active_store(_active_db(tmp_path), symbol="000660", market="KR")
     assert summary.active_pointer_present is False
     assert summary.active_decision_id is None
+    assert summary.dangling_pointer_count == 0
+
+
+def test_summarize_active_store_detects_dangling_pointer(tmp_path: Path) -> None:
+    # pointer 행은 있으나 가리키는 bundle version이 없는 손상 상태 → dangling으로 검출.
+    path = tmp_path / "active_dangling.sqlite3"
+    conn = _make_db(path, ACTIVE_SCHEMA)
+    conn.execute("INSERT INTO active_decision_pointers VALUES ('KR', '005930', 'ghost')")
+    conn.commit()
+    conn.close()
+    summary = summarize_active_store(path, symbol="005930", market="KR")
+    assert summary.active_pointer_present is False
+    assert summary.dangling_pointer_count == 1
 
 
 def test_missing_file_raises_typed_error(tmp_path: Path) -> None:

@@ -118,8 +118,12 @@ def test_inspect_existing_reports_missing_dbs(
     monkeypatch.chdir(tmp_path)
     config_path = _write_config(tmp_path)
     code, payload = _run(["--config", str(config_path), "--inspect-existing", "--json"], capsys)
-    assert code == 0
+    # B2: DB가 전부 없으면 fail-closed — outcome NO_GO + nonzero exit (이전 fail-open과 반대).
+    assert code == 1
     assert payload["mode"] == "inspect-existing"
+    assert payload["outcome"] == "NO_GO"
+    assert payload["inspection_outcome"] == "no_go"
+    assert "missing_database:ledger" in payload["reasons"]
     assert set(payload["missing_databases"]) == {"ledger", "trigger_journal", "active_decision_store"}
 
 

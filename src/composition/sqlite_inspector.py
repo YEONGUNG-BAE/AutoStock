@@ -51,7 +51,11 @@ class LedgerSummary:
     path: str
     order_intent_count: int
     fill_count: int
-    committed_result_count: int
+    order_result_count: int
+    filled_result_count: int
+    rejected_result_count: int
+    pending_result_count: int
+    cancelled_result_count: int
     position_quantity: str | None
     cash_entry_count: int
 
@@ -88,6 +92,7 @@ class ActiveStoreSummary:
     active_decision_id: str | None
     active_plan_id: str | None
     slot_count: int
+    dangling_pointer_count: int
 
 
 _TERMINAL_JOURNAL_STATES = frozenset({"committed", "aborted", "uncertain"})
@@ -133,6 +138,57 @@ def _read_user_version(conn: sqlite3.Connection) -> int:
     return int(row[0]) if row is not None else 0
 
 
+def _table_columns(conn: sqlite3.Connection, table: str, *, known_tables: frozenset[str]) -> frozenset[str]:
+    if table not in known_tables:
+        return frozenset()
+    # table은 sqlite_master 화이트리스트 값이므로 식별자 인터폴레이션이 안전하다.
+    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    return frozenset(str(row["name"]) for row in rows)
+
+
+# Minimal required schema per database for an operator-trustworthy inspection.
+# Column names are verified against the live DDL in SQLiteLedger / SqliteTriggerJournal /
+# ActiveDecisionStore; a missing table/column means the DB is not the expected store.
+LEDGER_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
+    "order_intents": frozenset({"order_id"}),
+    "order_results": frozenset({"order_id", "status"}),
+    "fills": frozenset({"order_id"}),
+    "current_cash": frozenset({"currency", "account_role", "amount"}),
+    "current_positions": frozenset({"symbol", "market", "account_role", "currency", "quantity"}),
+}
+JOURNAL_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
+    "trigger_fire_journal": frozenset({"idempotency_key", "state"}),
+}
+ACTIVE_STORE_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
+    "decision_bundle_versions": frozenset({"publication_id", "decision_id", "plan_id", "market", "symbol"}),
+    "active_decision_pointers": frozenset({"market", "symbol", "publication_id"}),
+    "decision_refresh_slots": frozenset({"publication_id"}),
+}
+
+
+def schema_issues(path: str | Path, required: dict[str, frozenset[str]]) -> tuple[str, ...]:
+    """Return sanitized ``missing_table:<t>`` / ``missing_column:<t>.<c>`` codes for any
+    required table/column absent from ``path``. Empty tuple ⇒ schema satisfies the contract.
+    Raises ``SqliteInspectionError`` (never the raw sqlite text) on open/read failure."""
+
+    issues: list[str] = []
+    try:
+        with open_read_only(path) as conn:
+            known = frozenset(_list_tables(conn))
+            for table, columns in required.items():
+                if table not in known:
+                    issues.append(f"missing_table:{table}")
+                    continue
+                present = _table_columns(conn, table, known_tables=known)
+                for column in sorted(columns - present):
+                    issues.append(f"missing_column:{table}.{column}")
+    except sqlite3.Error as exc:  # pragma: no cover - sanitized, raw text not surfaced
+        raise SqliteInspectionError(
+            "sqlite_schema_read_failed", f"Unable to read schema: {type(exc).__name__}"
+        ) from exc
+    return tuple(issues)
+
+
 def _count_rows(conn: sqlite3.Connection, table: str, *, known_tables: frozenset[str]) -> int:
     if table not in known_tables:
         return 0
@@ -171,17 +227,23 @@ def summarize_ledger(path: str | Path, *, symbol: str, market: str) -> LedgerSum
             ).fetchone()
             if row is not None:
                 position_quantity = str(row["quantity"])
-        committed = 0
+        # order_results.status는 domain.OrderStatus (FILLED/PENDING/REJECTED/CANCELLED)를
+        # 저장한다. 존재하지 않는 'COMMITTED' 대신 실제 enum별로 집계한다.
+        status_counts: dict[str, int] = {}
         if "order_results" in known:
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM order_results WHERE status = 'COMMITTED'"
-            ).fetchone()
-            committed = int(row["n"]) if row is not None else 0
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM order_results GROUP BY status"
+            ).fetchall()
+            status_counts = {str(row["status"]): int(row["n"]) for row in rows}
         return LedgerSummary(
             path=str(Path(path)),
             order_intent_count=_count_rows(conn, "order_intents", known_tables=known),
             fill_count=_count_rows(conn, "fills", known_tables=known),
-            committed_result_count=committed,
+            order_result_count=sum(status_counts.values()),
+            filled_result_count=status_counts.get("FILLED", 0),
+            rejected_result_count=status_counts.get("REJECTED", 0),
+            pending_result_count=status_counts.get("PENDING", 0),
+            cancelled_result_count=status_counts.get("CANCELLED", 0),
             position_quantity=position_quantity,
             cash_entry_count=_count_rows(conn, "current_cash", known_tables=known),
         )
@@ -245,6 +307,7 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
         active_decision_id: str | None = None
         active_plan_id: str | None = None
         pointer_present = False
+        dangling_pointer_count = 0
         if "active_decision_pointers" in known and "decision_bundle_versions" in known:
             row = conn.execute(
                 """
@@ -259,6 +322,17 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
                 pointer_present = True
                 active_decision_id = str(row["decision_id"])
                 active_plan_id = None if row["plan_id"] is None else str(row["plan_id"])
+            # dangling pointer: pointer 행은 있으나 가리키는 bundle version이 없는 손상 상태.
+            # JOIN 결과 없음 ≠ "정상적으로 active 없음"을 구분하기 위해 LEFT JOIN으로 검출한다.
+            dangling = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM active_decision_pointers AS p
+                LEFT JOIN decision_bundle_versions AS v ON v.publication_id = p.publication_id
+                WHERE v.publication_id IS NULL
+                """
+            ).fetchone()
+            dangling_pointer_count = int(dangling["n"]) if dangling is not None else 0
         return ActiveStoreSummary(
             path=str(Path(path)),
             bundle_version_count=bundle_count,
@@ -266,4 +340,5 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
             active_decision_id=active_decision_id,
             active_plan_id=active_plan_id,
             slot_count=slot_count,
+            dangling_pointer_count=dangling_pointer_count,
         )
