@@ -47,8 +47,18 @@ Monitor transport `connect` evidence must **not** reset a manually seeded transp
 
 - Runner calls: `4`; slot terminals: s1/s2/s4 `PUBLISHED`, s3 `FAILED`
 - Paper fills: exactly **1** COMMITTED; position `57`, cash `96,010,000` KRW at 4% / 100M NAV
-- Reconnect epoch sequence reset: no duplicate fill
-- Fast-loop process restart (new engine/coordinator/orchestrator, same DBs): journal blocks duplicate
+- Reconnect epoch sequence reset: per-stream. The pre-drop batch carries only a trade, so on
+  reconnect only the **trade** stream is reset (new-epoch `sequence=1` trade APPLIED); the
+  unobserved **quote** stream is *not* reset, so its new `sequence=1` quote is correctly rejected
+  `OUT_OF_ORDER` against the retained stored sequence (no aggressive fail-open). No duplicate fill.
+- Fast-loop process restart (new engine/coordinator/orchestrator, same DBs): re-armed engine
+  re-fires, but the duplicate fill is blocked by **portfolio-state quantity resolution**
+  (`TRIGGERED_ABORTED` / `no_executable_quantity` — position already at target weight), **not**
+  journal dedup. The idempotency key embeds in-memory `activation_epoch`, which resets across
+  restart → a *different* key → `reserve` succeeds and the journal records a new `ABORTED` row
+  (final journal rows = COMMITTED 1 + ABORTED 1 = 2). Journal-based cross-process exactly-once
+  (identical-key `SKIPPED_TERMINAL`) is proven separately in the F1b integration suite; persistent
+  activation-epoch restore stays deferred (TECH_DEBT F1).
 - Scheduler restart same day: duplicate slot execution `0`
 - Session/health held phases: PRE_OPEN / WARMING / POST_CLOSE coordinator `0`
 
