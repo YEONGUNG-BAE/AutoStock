@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 import sqlite3
 import sys
 from pathlib import Path
@@ -10,12 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from composition.sqlite_inspector import (
     SqliteInspectionError,
+    inspect_active_decision,
     inspect_sqlite_file,
     open_read_only,
     summarize_active_store,
     summarize_journal,
     summarize_ledger,
 )
+from decision.canonical_json import canonical_json_dumps, payload_sha256
 
 LEDGER_SCHEMA = """
 CREATE TABLE order_intents (order_id TEXT PRIMARY KEY, symbol TEXT, market TEXT);
@@ -171,3 +174,174 @@ def test_read_only_does_not_create_missing_file(tmp_path: Path) -> None:
         with open_read_only(target):
             pass
     assert not target.exists()
+
+
+# --- active decision integrity (RTM-7c.4b hardening: pointer identity + validity) ---
+
+_FULL_ACTIVE_SCHEMA = """
+CREATE TABLE decision_bundle_versions (
+    publication_id TEXT PRIMARY KEY, market TEXT, symbol TEXT, decision_id TEXT, plan_id TEXT,
+    decision_created_at TEXT, valid_from TEXT, expires_at TEXT, bundle_json TEXT, bundle_hash TEXT
+);
+CREATE TABLE active_decision_pointers (
+    market TEXT, symbol TEXT, publication_id TEXT, PRIMARY KEY (market, symbol)
+);
+CREATE TABLE decision_refresh_slots (publication_id TEXT);
+"""
+
+_CREATED_AT = "2026-06-16T09:00:00+09:00"
+_VALID_FROM = "2026-06-16T09:00:00+09:00"
+_EXPIRES_AT = "2026-06-17T09:00:00+09:00"
+
+
+def _decision_payload(*, market: str, symbol: str, decision_id: str, created_at: str = _CREATED_AT,
+                      universe: str = "KR_LARGE", action: str = "buy") -> dict:
+    return {
+        "decision_id": decision_id,
+        "created_at": created_at,
+        "market": market,
+        "symbol": symbol,
+        "universe": universe,
+        "fund_manager": {"action": action},
+    }
+
+
+def _plan_payload(*, market: str, symbol: str, decision_id: str, plan_id: str) -> dict:
+    return {"plan_id": plan_id, "market": market, "symbol": symbol, "decision_id": decision_id}
+
+
+def _insert_bundle(
+    conn: sqlite3.Connection, *, pointer_market: str, pointer_symbol: str,
+    version_market: str, version_symbol: str, decision_id: str = "dec-1",
+    plan_id: str | None = None, created_at: str = _CREATED_AT,
+    valid_from: str = _VALID_FROM, expires_at: str = _EXPIRES_AT,
+    decision_payload: dict | None = None, plan_payload: dict | None = None,
+) -> None:
+    decision = decision_payload if decision_payload is not None else _decision_payload(
+        market=version_market, symbol=version_symbol, decision_id=decision_id, created_at=created_at
+    )
+    bundle = {"decision": decision, "plan": plan_payload, "valid_from": valid_from, "expires_at": expires_at}
+    bundle_json = canonical_json_dumps(bundle)
+    bundle_hash = payload_sha256(_json.loads(bundle_json))
+    pub = payload_sha256(
+        {
+            "market": version_market,
+            "symbol": version_symbol,
+            "decision_id": decision_id,
+            "decision_created_at": created_at,
+            "bundle_hash": bundle_hash,
+        }
+    )
+    conn.execute(
+        "INSERT INTO decision_bundle_versions VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (pub, version_market, version_symbol, decision_id, plan_id, created_at,
+         valid_from, expires_at, bundle_json, bundle_hash),
+    )
+    conn.execute(
+        "INSERT INTO active_decision_pointers VALUES (?,?,?)", (pointer_market, pointer_symbol, pub)
+    )
+
+
+def _active_path(tmp_path: Path, name: str = "active.sqlite3") -> tuple[Path, sqlite3.Connection]:
+    path = tmp_path / name
+    conn = _make_db(path, _FULL_ACTIVE_SCHEMA)
+    return path, conn
+
+
+def test_active_decision_valid_buy(tmp_path: Path) -> None:
+    path, conn = _active_path(tmp_path)
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930", plan_id="plan-1",
+                   plan_payload=_plan_payload(market="KR", symbol="005930",
+                                              decision_id="dec-1", plan_id="plan-1"))
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.present is True
+    assert verdict.integrity_ok is True
+    assert verdict.integrity_reason is None
+    assert verdict.universe == "KR_LARGE"
+    assert verdict.action == "buy"
+    assert verdict.has_plan is True
+
+
+def test_active_decision_missing_pointer(tmp_path: Path) -> None:
+    path, conn = _active_path(tmp_path)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.present is False
+    assert verdict.integrity_ok is False
+
+
+def test_active_decision_dangling_pointer(tmp_path: Path) -> None:
+    path, conn = _active_path(tmp_path)
+    conn.execute("INSERT INTO active_decision_pointers VALUES ('KR', '005930', 'ghost')")
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.present is True
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "dangling"
+
+
+def test_active_decision_pointer_to_foreign_version_is_identity_mismatch(tmp_path: Path) -> None:
+    # Finding A: configured pointer (KR,005930) referencing a (KR,000660) version must fail,
+    # even though that version is itself internally consistent.
+    path, conn = _active_path(tmp_path)
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="000660",
+                   version_market="KR", version_symbol="000660", decision_id="dec-660")
+    # Cross-wire: make the (KR,005930) pointer reference the (KR,000660) publication.
+    pub = conn.execute(
+        "SELECT publication_id FROM active_decision_pointers WHERE symbol='000660'"
+    ).fetchone()[0]
+    conn.execute("INSERT INTO active_decision_pointers VALUES ('KR','005930',?)", (pub,))
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.present is True
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "identity_mismatch"
+
+
+def test_active_decision_internal_identity_mismatch(tmp_path: Path) -> None:
+    # version columns match the queried pointer, but the bundle's internal decision.symbol differs.
+    path, conn = _active_path(tmp_path)
+    tampered = _decision_payload(market="KR", symbol="999999", decision_id="dec-1")
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930", decision_payload=tampered)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_reason == "identity_mismatch"
+
+
+def test_active_decision_plan_identity_mismatch(tmp_path: Path) -> None:
+    # BUY plan present but plan.market disagrees with the version it executes.
+    path, conn = _active_path(tmp_path)
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930", plan_id="plan-1",
+                   plan_payload=_plan_payload(market="US", symbol="005930",
+                                              decision_id="dec-1", plan_id="plan-1"))
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_reason == "identity_mismatch"
+
+
+@pytest.mark.parametrize(
+    "valid_from, expires_at",
+    [
+        ("not-a-date", _EXPIRES_AT),                       # malformed valid_from
+        (_VALID_FROM, "not-a-date"),                        # malformed expires_at
+        ("2026-06-16T09:00:00", _EXPIRES_AT),               # naive valid_from
+        (_VALID_FROM, "2026-06-17T09:00:00"),               # naive expires_at
+        (_EXPIRES_AT, _VALID_FROM),                          # valid_from > expires_at
+    ],
+)
+def test_active_decision_malformed_validity_is_corrupt(
+    tmp_path: Path, valid_from: str, expires_at: str
+) -> None:
+    # Finding B: validity is integrity, not best-effort. Malformed/naive/reversed → corrupt.
+    path, conn = _active_path(tmp_path)
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930",
+                   valid_from=valid_from, expires_at=expires_at)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "corrupt"

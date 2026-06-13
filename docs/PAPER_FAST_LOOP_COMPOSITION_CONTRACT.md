@@ -32,6 +32,18 @@ composition root does.
   credentials, exception reprs, or tracebacks. Output is sanitized counts plus a
   small set of non-secret identifiers (`decision_id` / `plan_id`) and
   integer-quantity strings. None of the inspected DBs store credentials.
+  - **Quiescent-only, sidecar-creating-free reads.** A plain `mode=ro` open of a
+    WAL-mode database materializes a `-shm`/`-wal` sidecar even for a reader
+    (SQLite takes a WAL read lock via shared memory), which would mutate the
+    operator's filesystem. `open_read_only` therefore appends `immutable=1`
+    **only when the database is already quiescent** (no live
+    `-wal`/`-shm`/`-journal` sidecar): for a quiescent file `immutable=1` reads
+    the main file directly and creates no sidecar, and is safe precisely because
+    nothing else holds the file. When a sidecar *is* present the DB is
+    non-quiescent — the inspection fails closed with
+    `database_not_quiescent:<db>` — so a faithful `mode=ro` read is kept there
+    rather than blindly ignoring the live WAL with `immutable=1`. The inspector
+    never creates or deletes a sidecar.
 - `src/composition/paper_fast_loop.py` — the composition root. Three offline
   capabilities (below).
 - `ops/run_paper_fast_loop.py` — operator CLI over the three capabilities plus
@@ -65,6 +77,9 @@ of:
 
 - `missing_database:<ledger|trigger_journal|active_decision_store>` — a required
   DB file does not exist (fail-closed, not fail-open).
+- `database_not_quiescent:<db>` — a live `-wal`/`-shm`/`-journal` sidecar is
+  present, so a clean read-only snapshot cannot be proven (read-only inspection
+  is trustworthy only against a quiescent DB).
 - `<db>_missing_table:<t>` / `<db>_missing_column:<t>.<c>` — required schema is
   absent (DB is not the expected store), checked via read-only `PRAGMA`.
 - `<db>_unreadable:<reason_code>` — a sanitized sqlite open/read failure
@@ -78,10 +93,51 @@ of:
   `unsupported_currency`, `foreign_position_present` (any position whose
   symbol ≠ the configured symbol).
 
+#### Execution-inputs snapshot readiness
+
+The on-disk execution-inputs snapshot is read (loaded fail-closed; a hash
+mismatch never loads) and its validity window checked against the caller-supplied
+timezone-aware `now`:
+
+- `missing_execution_inputs_snapshot`, `execution_inputs_hash_mismatch`,
+  `execution_inputs_universe_mismatch`, `execution_inputs_invalid` (any other
+  loader failure), `execution_inputs_not_yet_valid`, `execution_inputs_expired`.
+
+#### Active-decision readiness (pointer ↔ version ↔ bundle identity)
+
+The configured `(market, symbol)` active pointer is reconciled read-only,
+replicating `ActiveDecisionStore._row_to_active_bundle` **without constructing the
+store** (its `__init__` creates/migrates schema). Identity is verified end to
+end: the configured pointer key, the referenced version's `market`/`symbol`
+columns, the bundle's internal `decision.market`/`decision.symbol`/
+`decision_id`/`created_at`, and (when present) the plan's
+`market`/`symbol`/`decision_id` must all agree — a pointer referencing a foreign
+version is `identity_mismatch` even if that version is itself internally
+consistent. Validity is treated as **integrity, not best-effort**:
+`valid_from`/`expires_at` must be present, ISO-parseable, timezone-aware, and
+satisfy `valid_from <= expires_at`; a missing/unparseable/naive/reversed value is
+corruption (never silently downgraded to "currently valid"). Reasons:
+
+- `missing_active_decision` — no pointer for the configured key.
+- `active_pointer_identity_mismatch` — pointer/version/bundle/plan identity
+  disagree (distinct from `dangling_active_pointer`, which is a pointer to a
+  missing version row).
+- `active_bundle_corrupt` — bundle JSON / hash / publication-id / validity
+  columns / validity datetimes do not reconcile.
+- `active_decision_not_yet_valid`, `active_decision_expired` — `now` is outside a
+  well-formed validity window.
+- `active_execution_universe_mismatch` — active decision universe ≠ snapshot
+  universe.
+- `active_plan_consistency_mismatch` — BUY/SELL without a plan, or HOLD with one.
+
+A single root cause emits a single reason — no duplicate/contradictory codes for
+the same fault.
+
 Ledger summary reports per-`OrderStatus` counts (`order_result_count`,
 `filled_result_count`, `rejected_result_count`, `pending_result_count`,
-`cancelled_result_count`) — never a non-existent `COMMITTED` status. No writes,
-no schema creation, no network.
+`cancelled_result_count`) — never a non-existent `COMMITTED` status. `now` must
+be timezone-aware (the CLI reads it once and passes it; a naive `now` raises
+`ValueError`). No writes, no schema creation, no reconciliation, no network.
 
 ### `replay_offline` (deterministic offline replay)
 
@@ -152,6 +208,23 @@ TriggerOrderBridge(journal, generator=OrderIntentGenerator(),
 ```
 
 All SQLite databases live under the caller-provided temp dir.
+
+### Resource lifecycle (`PaperFastLoopStack`)
+
+The composed stack owns three durable SQLite handles (ledger / trigger journal /
+active-decision-store); the in-memory stores need no teardown. `close()` releases
+every handle exactly once (idempotent) and attempts all three even if one raises,
+re-raising the first error, so the temp dir is deletable with zero pending handles
+(Windows-safe). `build_offline_paper_fast_loop_stack` is a context manager that
+always closes on exit (including on a body exception).
+
+Construction is fail-closed: if any step after the first SQLite handle is opened
+raises — a later store constructor or an in-memory dependency — `_build_stack`
+closes every already-opened handle in reverse order (active-store → journal →
+ledger) and re-raises the **original** construction exception; a cleanup-time
+`close` failure is swallowed so it never masks the original error. A partial
+construction therefore never leaks a handle. Replay's composition-restart phase
+fully closes the first stack before opening the next against the same files.
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 

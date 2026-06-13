@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime, timedelta
@@ -22,11 +23,16 @@ from allocator import (
     SignalSummary,
     TargetWeights,
 )
+from analysis import AnalysisAction
+from composition import paper_fast_loop as _pfl
 from composition.paper_fast_loop import (
     AVAILABLE_REPLAY_FIXTURES,
     InspectionOutcome,
     PaperFastLoopOutcome,
     PaperFastLoopPaths,
+    _analysis_decision,
+    _buy_plan,
+    _snapshot,
     build_paper_fast_loop_plan,
     build_replay_snapshot_payload,
     inspect_paper_fast_loop,
@@ -34,7 +40,12 @@ from composition.paper_fast_loop import (
 )
 from config.settings import RuntimePaperFastLoopSettings
 from domain import DateId, DecisionId, Percent
+from execution.sqlite_trigger_journal import SqliteTriggerJournal
+from ledger.sqlite_ledger import SQLiteLedger
+from orchestration.active_decision_store import ActiveDecisionStore, DecisionPublicationCandidate
 from orchestration.execution_inputs_snapshot import compute_snapshot_payload_hash
+
+_DECISION_AT = _pfl._REPLAY_DECISION_AT  # 2026-06-16 09:00 KST == 00:00 UTC (within _NOW window)
 
 _NOW = datetime(2026, 6, 16, 0, 30, tzinfo=UTC)
 _UNIVERSE = "KR_LARGE"
@@ -305,3 +316,164 @@ def test_replay_uses_only_temp_dir(tmp_path: Path) -> None:
 
 def test_available_fixtures_constant() -> None:
     assert AVAILABLE_REPLAY_FIXTURES == ("buy_fill", "hold_noop")
+
+
+# --- end-to-end inspect readiness (RTM-7c.4b: real quiescent SQLite stacks) ---
+
+
+def _seed_valid_stack(base_dir: Path, settings: RuntimePaperFastLoopSettings) -> None:
+    """Seed a fully valid, quiescent fast-loop stack at the settings-resolved paths.
+
+    Constructs the real ``SQLiteLedger`` / ``SqliteTriggerJournal`` (empty but schema-init'd)
+    and publishes one valid BUY active decision via the real ``ActiveDecisionStore``, then
+    closes every connection so all WAL/-shm sidecars are checkpointed away (quiescent)."""
+
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
+    paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_snapshot(base_dir, settings, _snapshot_payload())
+
+    ledger = SQLiteLedger(paths.ledger_path)
+    ledger.close()
+    journal = SqliteTriggerJournal(paths.trigger_journal_path)
+    journal.close()
+
+    decision = _analysis_decision(
+        action=AnalysisAction.BUY, symbol=settings.symbol, decision_id="dec-ok"
+    )
+    plan = _buy_plan(symbol=settings.symbol, decision_id=decision.decision_id)
+    store = ActiveDecisionStore(paths.active_decision_store_path)
+    try:
+        store.publish(
+            DecisionPublicationCandidate(
+                snapshot=_snapshot(decision),
+                plan=plan,
+                valid_from=_DECISION_AT,
+                expires_at=_DECISION_AT + timedelta(days=1),
+            ),
+            now=_DECISION_AT,
+        )
+    finally:
+        store.close()
+
+
+def _fingerprint(path: Path) -> tuple[str, int, int, tuple[str, ...]]:
+    """Byte-hash + size + user_version + sidecar suffixes for a quiescent DB file.
+
+    ``user_version`` is read from the SQLite header (4-byte big-endian int at offset 60)
+    rather than by opening a connection, so the fingerprint itself never touches the DB
+    (a WAL-mode reader could otherwise materialize a -shm/-wal sidecar)."""
+
+    data = path.read_bytes()
+    user_version = int.from_bytes(data[60:64], "big") if len(data) >= 64 else 0
+    return (
+        hashlib.sha256(data).hexdigest(),
+        len(data),
+        user_version,
+        _pfl.sqlite_inspector.sidecar_files(path),
+    )
+
+
+def test_inspect_ok_when_fully_seeded(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.OK
+    assert inspection.reasons == ()
+    assert inspection.missing_databases == ()
+    assert inspection.execution_inputs is not None
+    assert inspection.execution_inputs.currently_valid is True
+    assert inspection.active_decision is not None
+    assert inspection.active_decision.integrity_valid is True
+    assert inspection.active_decision.currently_valid is True
+    assert inspection.active_decision.action == "buy"
+    assert inspection.active_decision.has_plan is True
+
+
+def test_inspect_is_read_only_and_does_not_mutate_databases(tmp_path: Path) -> None:
+    # Section 6: byte-hash / size / user_version / sidecar set unchanged; 0 new sidecars created.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    db_paths = (paths.ledger_path, paths.trigger_journal_path, paths.active_decision_store_path)
+    before = {p: _fingerprint(p) for p in db_paths}
+
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.OK
+
+    after = {p: _fingerprint(p) for p in db_paths}
+    assert after == before
+    for p in db_paths:
+        assert _pfl.sqlite_inspector.sidecar_files(p) == ()
+
+
+def test_inspect_flags_non_quiescent_active_store(tmp_path: Path) -> None:
+    # Section 6: a live -wal sidecar means the DB is not quiescent → fail-closed NO_GO.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    wal = paths.active_decision_store_path.with_name(
+        paths.active_decision_store_path.name + "-wal"
+    )
+    wal.write_bytes(b"")  # simulate a writer that left a live WAL sidecar.
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.NO_GO
+    assert "database_not_quiescent:active_decision_store" in inspection.reasons
+
+
+def test_inspect_flags_active_pointer_identity_mismatch(tmp_path: Path) -> None:
+    # Section 3: a configured pointer referencing a foreign-(market,symbol) version is an
+    # identity mismatch, surfaced as active_pointer_identity_mismatch (not active_bundle_corrupt).
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    conn = sqlite3.connect(paths.active_decision_store_path)
+    # Repoint the referenced version to a foreign market; step-0 identity check fires first.
+    conn.execute("UPDATE decision_bundle_versions SET market = 'US'")
+    conn.commit()
+    conn.close()
+    # The UPDATE leaves a -wal/-journal sidecar; checkpoint+close already done, but ensure
+    # quiescence so the identity reason (not quiescence) is what we observe.
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = paths.active_decision_store_path.with_name(
+            paths.active_decision_store_path.name + suffix
+        )
+        if sidecar.exists():
+            sidecar.unlink()
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.NO_GO
+    assert "active_pointer_identity_mismatch" in inspection.reasons
+    assert "active_bundle_corrupt" not in inspection.reasons
+
+
+def test_inspect_never_constructs_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Section 6: inspect must NOT construct ActiveDecisionStore / SQLiteLedger /
+    # SqliteTriggerJournal (their __init__ creates/migrates schema = a write).
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+
+    calls: list[str] = []
+
+    def _spy(name: str):
+        def _raise(*_a: Any, **_k: Any):
+            calls.append(name)
+            raise AssertionError(f"inspect constructed {name}")
+
+        return _raise
+
+    monkeypatch.setattr(_pfl, "ActiveDecisionStore", _spy("ActiveDecisionStore"))
+    monkeypatch.setattr(_pfl, "SQLiteLedger", _spy("SQLiteLedger"))
+    monkeypatch.setattr(_pfl, "SqliteTriggerJournal", _spy("SqliteTriggerJournal"))
+
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.OK
+    assert calls == []
+
+
+def test_inspect_requires_timezone_aware_now(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    naive = datetime(2026, 6, 16, 9, 30)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        inspect_paper_fast_loop(settings=settings, now=naive, base_dir=tmp_path)

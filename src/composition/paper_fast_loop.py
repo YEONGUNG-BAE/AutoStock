@@ -350,6 +350,9 @@ def inspect_paper_fast_loop(
     failures are surfaced as sanitized reason codes — never raw exception text.
     """
 
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("inspect_paper_fast_loop requires a timezone-aware 'now'.")
+
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
     market = settings.market
     symbol = settings.symbol
@@ -796,51 +799,71 @@ def _build_stack(
     In-memory state (latest/rolling stores, health tracker, engine) is fresh each call;
     the ledger / journal / active-store SQLite files persist, so calling this twice models
     a composition restart against the same durable state. The caller owns ``close()``.
+
+    Construction is fail-closed: if *any* step after the first SQLite resource is opened
+    raises (a later resource constructor, or an in-memory dependency), every
+    already-opened SQLite handle is closed in reverse order and the **original** exception
+    is re-raised, so a partial construction never leaks a handle.
     """
 
-    ledger = SQLiteLedger(temp_root / "ledger.sqlite3")
-    broker = PaperBrokerAdapter(ledger, initial_cash=_seed_initial_cash())
-    journal = SqliteTriggerJournal(temp_root / "journal.sqlite3")
-    active_store = ActiveDecisionStore(temp_root / "active.sqlite3")
+    ledger: SQLiteLedger | None = None
+    journal: SqliteTriggerJournal | None = None
+    active_store: ActiveDecisionStore | None = None
+    try:
+        ledger = SQLiteLedger(temp_root / "ledger.sqlite3")
+        broker = PaperBrokerAdapter(ledger, initial_cash=_seed_initial_cash())
+        journal = SqliteTriggerJournal(temp_root / "journal.sqlite3")
+        active_store = ActiveDecisionStore(temp_root / "active.sqlite3")
 
-    latest = LatestMarketStateStore()
-    rolling = RollingTradeHistoryStore(
-        retention=RollingRetentionPolicy(hard_max_events=1000, hard_max_age_seconds=Decimal("86400"))
-    )
-    calendar = build_explicit_schedule(
-        timezone=_KST, trading_days=[_REPLAY_DAY], window=_REPLAY_WINDOW
-    )
-    tracker = MarketHealthTracker(_replay_thresholds())
-    # connect/subscribe는 decision 시점(09:00)에 기록해 평가 시점(09:30)까지 안정 uptime을 확보한다.
-    tracker.record_transport_event(kind="connected", at=_REPLAY_DECISION_AT, now=_REPLAY_DECISION_AT)
-    tracker.record_transport_event(
-        kind="all_subscribed", at=_REPLAY_DECISION_AT, now=_REPLAY_DECISION_AT
-    )
-    # market-data HEALTHY는 최근 quote를 요구한다(trade만으로는 quote starvation).
-    tracker.record_market_event(event_type="best_bid_ask", at=_REPLAY_EVENT_AT, now=_REPLAY_EVENT_AT)
+        latest = LatestMarketStateStore()
+        rolling = RollingTradeHistoryStore(
+            retention=RollingRetentionPolicy(hard_max_events=1000, hard_max_age_seconds=Decimal("86400"))
+        )
+        calendar = build_explicit_schedule(
+            timezone=_KST, trading_days=[_REPLAY_DAY], window=_REPLAY_WINDOW
+        )
+        tracker = MarketHealthTracker(_replay_thresholds())
+        # connect/subscribe는 decision 시점(09:00)에 기록해 평가 시점(09:30)까지 안정 uptime을 확보한다.
+        tracker.record_transport_event(kind="connected", at=_REPLAY_DECISION_AT, now=_REPLAY_DECISION_AT)
+        tracker.record_transport_event(
+            kind="all_subscribed", at=_REPLAY_DECISION_AT, now=_REPLAY_DECISION_AT
+        )
+        # market-data HEALTHY는 최근 quote를 요구한다(trade만으로는 quote starvation).
+        tracker.record_market_event(event_type="best_bid_ask", at=_REPLAY_EVENT_AT, now=_REPLAY_EVENT_AT)
 
-    bridge = TriggerOrderBridge(
-        journal=journal,
-        generator=OrderIntentGenerator(),
-        resolver=QuantityResolver(),
-        broker=broker,
-        ledger=ledger,
-    )
-    coordinator = PaperExecutionCoordinator(
-        engine=TriggerEngine(),
-        bridge=bridge,
-        portfolio_context_service=PaperPortfolioContextService(
-            ledger_source=ledger, market_state_source=_LatestStateAdapter(latest)
-        ),
-    )
-    orchestrator = FastLoopExecutionOrchestrator(
-        active_reader=active_store,
-        latest_store=latest,
-        rolling_store=rolling,
-        execution_gate=SessionHealthExecutionGate(calendar=calendar, tracker=tracker),
-        execution_inputs_provider=provider,
-        coordinator=coordinator,
-    )
+        bridge = TriggerOrderBridge(
+            journal=journal,
+            generator=OrderIntentGenerator(),
+            resolver=QuantityResolver(),
+            broker=broker,
+            ledger=ledger,
+        )
+        coordinator = PaperExecutionCoordinator(
+            engine=TriggerEngine(),
+            bridge=bridge,
+            portfolio_context_service=PaperPortfolioContextService(
+                ledger_source=ledger, market_state_source=_LatestStateAdapter(latest)
+            ),
+        )
+        orchestrator = FastLoopExecutionOrchestrator(
+            active_reader=active_store,
+            latest_store=latest,
+            rolling_store=rolling,
+            execution_gate=SessionHealthExecutionGate(calendar=calendar, tracker=tracker),
+            execution_inputs_provider=provider,
+            coordinator=coordinator,
+        )
+    except BaseException:
+        # 부분 생성된 SQLite handle을 역순으로 정리하되, cleanup 오류가 원래 예외를 가리지
+        # 않게 한다(원래 construction 예외를 그대로 전파).
+        for resource in (active_store, journal, ledger):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the original error
+                    pass
+        raise
     return PaperFastLoopStack(
         orchestrator=orchestrator,
         latest_store=latest,

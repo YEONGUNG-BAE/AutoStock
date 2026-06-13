@@ -22,6 +22,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from decision.canonical_json import payload_sha256
@@ -105,7 +106,17 @@ _NONTERMINAL_JOURNAL_STATES = frozenset({"reserved", "dispatching"})
 @contextmanager
 def open_read_only(path: str | Path) -> Iterator[sqlite3.Connection]:
     """Open ``path`` strictly read-only. Raises ``SqliteInspectionError`` (never leaks
-    the raw sqlite exception text) if the file is missing or cannot be opened."""
+    the raw sqlite exception text) if the file is missing or cannot be opened.
+
+    A plain ``mode=ro`` open of a WAL-mode database materializes a ``-shm``/``-wal``
+    sidecar even for a reader (SQLite takes a WAL read lock via shared memory), which
+    would silently mutate the operator's filesystem. We therefore add ``immutable=1``
+    **only when the database is already quiescent** (no live ``-wal``/``-shm``/``-journal``
+    sidecar): for a quiescent file ``immutable=1`` reads the main file directly and
+    creates no sidecar, and is safe precisely because nothing else holds the file. When a
+    sidecar *is* present the DB is non-quiescent — callers fail-closed with
+    ``database_not_quiescent`` — so we keep a faithful ``mode=ro`` read there rather than
+    blindly ignoring the live WAL with ``immutable=1``."""
 
     resolved = Path(path)
     if not resolved.exists():
@@ -113,7 +124,8 @@ def open_read_only(path: str | Path) -> Iterator[sqlite3.Connection]:
     if not resolved.is_file():
         raise SqliteInspectionError("sqlite_not_a_file", f"SQLite path is not a regular file: {resolved}")
 
-    uri = f"file:{resolved}?mode=ro"
+    quiescent = not sidecar_files(resolved)
+    uri = f"file:{resolved}?mode=ro&immutable=1" if quiescent else f"file:{resolved}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error as exc:  # pragma: no cover - sanitized, exception text not surfaced
@@ -381,12 +393,32 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
 
 # Integrity reasons surfaced by ``inspect_active_decision``. Sanitized — never raw
 # exception text. ``dangling`` ⇒ pointer references a missing version row;
-# ``corrupt`` ⇒ stored bundle JSON / hash / publication-id / validity columns do
-# not reconcile; ``identity_mismatch`` ⇒ stored columns disagree with the bundle's
-# own internal identity (market/symbol/decision_id/plan_id/created_at).
+# ``corrupt`` ⇒ stored bundle JSON / hash / publication-id / validity columns or
+# validity datetimes (missing / unparseable / naive / valid_from > expires_at) do not
+# reconcile; ``identity_mismatch`` ⇒ the configured pointer (market, symbol), the
+# version columns, the bundle's internal decision identity, or the plan identity
+# disagree with one another.
 _INTEGRITY_DANGLING = "dangling"
 _INTEGRITY_CORRUPT = "corrupt"
 _INTEGRITY_IDENTITY_MISMATCH = "identity_mismatch"
+
+
+def _parse_required_aware_datetime(value: object) -> datetime | None:
+    """Parse a *required*, timezone-aware ISO-8601 datetime. ``None`` ⇒ invalid.
+
+    Returns ``None`` (never raises, never falls back to a naive value) when the input is
+    missing, not a string, unparseable, or naive. Validity is integrity, not best-effort:
+    callers treat ``None`` as corruption (fail-closed), never as "currently valid"."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -480,11 +512,18 @@ def inspect_active_decision(path: str | Path, *, symbol: str, market: str) -> Ac
             has_plan=False,
         )
 
-    return _verify_active_version(version)
+    return _verify_active_version(version, queried_market=market, queried_symbol=symbol)
 
 
-def _verify_active_version(row: sqlite3.Row) -> ActiveDecisionIntegrity:
-    """Reconcile a stored ``decision_bundle_versions`` row read-only; return a verdict."""
+def _verify_active_version(
+    row: sqlite3.Row, *, queried_market: str, queried_symbol: str
+) -> ActiveDecisionIntegrity:
+    """Reconcile a stored ``decision_bundle_versions`` row read-only; return a verdict.
+
+    ``queried_market`` / ``queried_symbol`` are the *configured* pointer key. The version
+    a pointer references MUST belong to that same (market, symbol); a pointer that
+    references a foreign version is ``identity_mismatch`` even if that version is itself
+    internally consistent."""
 
     col_market = str(row["market"])
     col_symbol = str(row["symbol"])
@@ -509,6 +548,10 @@ def _verify_active_version(row: sqlite3.Row) -> ActiveDecisionIntegrity:
             expires_at=col_expires_at,
             has_plan=col_plan_id is not None,
         )
+
+    # 0) configured pointer identity: the referenced version must be for this (market, symbol).
+    if col_market != queried_market or col_symbol != queried_symbol:
+        return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
 
     # 1) bundle_json must parse to a JSON object and hash to the stored bundle_hash.
     try:
@@ -537,8 +580,13 @@ def _verify_active_version(row: sqlite3.Row) -> ActiveDecisionIntegrity:
     if recomputed_pub_id != str(row["publication_id"]):
         return _corrupt()
 
-    # 3) stored payload top-level validity must match the columns.
+    # 3) stored payload top-level validity must match the columns AND be well-formed:
+    #    present, ISO-parseable, timezone-aware, with valid_from <= expires_at.
     if payload.get("valid_from") != col_valid_from or payload.get("expires_at") != col_expires_at:
+        return _corrupt()
+    valid_from_dt = _parse_required_aware_datetime(col_valid_from)
+    expires_at_dt = _parse_required_aware_datetime(col_expires_at)
+    if valid_from_dt is None or expires_at_dt is None or valid_from_dt > expires_at_dt:
         return _corrupt()
 
     decision = payload.get("decision")
@@ -563,6 +611,15 @@ def _verify_active_version(row: sqlite3.Row) -> ActiveDecisionIntegrity:
         or decision.get("created_at") != col_decision_created_at
     ):
         return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
+
+    # 4b) a present plan must agree with the version/decision identity it executes.
+    if isinstance(plan, dict):
+        if (
+            plan.get("market") != col_market
+            or plan.get("symbol") != col_symbol
+            or plan.get("decision_id") != decision_id_internal
+        ):
+            return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
 
     universe = decision.get("universe")
     fund_manager = decision.get("fund_manager")

@@ -150,3 +150,85 @@ def test_replay_unknown_fixture_fails(
     code, payload = _run(["--config", str(config_path), "--replay", "nope", "--json"], capsys)
     assert code == 1
     assert payload["outcome"] == "FAIL"
+
+
+# --- RTM-7c.4b CLI exit-code + sanitization (Section 7.5) ---
+
+from datetime import datetime as _dt  # noqa: E402
+from zoneinfo import ZoneInfo as _ZoneInfo  # noqa: E402
+
+
+class _FixedClock:
+    """Pins ``datetime.now(tz=...)`` to a point inside the seeded validity windows
+    (2026-06-16 09:30 KST == 00:30 UTC == helper._NOW), so a seeded stack is OK."""
+
+    @staticmethod
+    def now(tz: object = None) -> _dt:
+        return _dt(2026, 6, 16, 9, 30, tzinfo=_ZoneInfo("Asia/Seoul"))
+
+
+def _seed_valid_via_helper(tmp_path: Path, settings: RuntimePaperFastLoopSettings) -> None:
+    import test_paper_fast_loop_composition as helper
+
+    helper._seed_valid_stack(tmp_path, settings)
+
+
+def test_inspect_existing_ok_when_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    code, payload = _run(["--config", str(config_path), "--inspect-existing", "--json"], capsys)
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    assert payload["inspection_outcome"] == "ok"
+    assert payload["reasons"] == []
+    assert payload["network_called"] is False
+
+
+def test_inspect_existing_non_quiescent_is_fail_closed_and_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    wal = paths.active_decision_store_path.with_name(
+        paths.active_decision_store_path.name + "-wal"
+    )
+    wal.write_bytes(b"")
+    code = cli.main(["--config", str(config_path), "--inspect-existing", "--json"])
+    out = capsys.readouterr().out
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    assert "database_not_quiescent:active_decision_store" in payload["reasons"]
+    # 출력에는 traceback/raw sqlite 예외 텍스트가 없다(파일 경로의 .sqlite3 확장자는 허용).
+    assert "Traceback" not in out
+    assert "OperationalError" not in out
+    assert "sqlite3.Error" not in out
+
+
+def test_validate_only_opens_no_databases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _write_snapshot(tmp_path, settings)
+    code, payload = _run(["--config", str(config_path), "--validate-only", "--json"], capsys)
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    # validate-only는 어떤 DB도 열거나 만들지 않는다.
+    assert not paths.ledger_path.exists()
+    assert not paths.trigger_journal_path.exists()
+    assert not paths.active_decision_store_path.exists()
