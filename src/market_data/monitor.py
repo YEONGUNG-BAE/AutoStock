@@ -22,7 +22,10 @@ from market_data.models import (
 from market_data.protocols import MarketEventSource
 from market_data.rolling_window import RollingObserveStatus, RollingTradeHistoryStore
 
+from domain.enums import Market
+
 __all__ = [
+    "AppliedMarketUpdate",
     "MonitorState",
     "MonitorEvidence",
     "MonitorSummary",
@@ -127,11 +130,29 @@ class MonitorExhaustedError(Exception):
 
 
 class MonitorInternalError(Exception):
-    """transport 단절이 아닌 monitor 내부/저장소/evidence 결함.
+    """transport 단절이 아닌 monitor 내부/저장소/evidence/post-apply hook 결함.
 
     backoff·reconnect로 숨기지 않고 fail-closed로 즉시 전파한다. 실제 운영 결함을
     transport drop으로 오인해 무한 재접속하는 것을 막기 위한 경계 표식이다.
     """
+
+
+@dataclass(frozen=True)
+class AppliedMarketUpdate:
+    """APPLIED trade/quote 한 건에 대한 중립 post-apply 알림.
+
+    execution/orchestration/broker 의존성 없이 monitor가 orchestration에 넘기는
+    최소 식별자만 담는다(raw frame/credential/account/order/broker result 금지).
+    `applied_at`은 latest apply와 rolling observe가 공유한 exact `now`이다.
+    """
+
+    market: Market
+    symbol: str
+    event_type: MarketEventType
+    provider: str
+    channel: str
+    sequence: int
+    applied_at: datetime
 
 
 def _evidence_meta(event: MarketEvent) -> dict[str, object | None]:
@@ -207,6 +228,7 @@ class MarketMonitor:
         heartbeat_watch: tuple[str, str] | None = None,
         heartbeat_timeout_seconds: float | None = None,
         on_evidence: Callable[[MonitorEvidence], None] | None = None,
+        on_applied_update: Callable[[AppliedMarketUpdate], None] | None = None,
     ) -> None:
         if max_events is not None and max_events < 1:
             raise ValueError("max_events must be >= 1 when set.")
@@ -231,6 +253,7 @@ class MarketMonitor:
         self._heartbeat_watch = heartbeat_watch
         self._heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self._on_evidence = on_evidence
+        self._on_applied_update = on_applied_update
 
         self._state = MonitorState.IDLE
         self._counts = _Counts()
@@ -422,6 +445,28 @@ class MarketMonitor:
             reason_code=result.reason,
             meta=meta,
         )
+        # APPLIED trade/quote만 post-apply hook 후보. heartbeat/duplicate/역순 등은 제외.
+        if (
+            self._on_applied_update is not None
+            and result.status is ApplyStatus.APPLIED
+            and result.event_type in (MarketEventType.TRADE, MarketEventType.BEST_BID_ASK)
+        ):
+            assert isinstance(event, (NormalizedTradeTick, NormalizedBestBidAsk))
+            update = AppliedMarketUpdate(
+                market=event.market,
+                symbol=event.symbol,
+                event_type=result.event_type,
+                provider=event.provider_sequence.provider,
+                channel=event.provider_sequence.channel,
+                sequence=event.provider_sequence.sequence,
+                applied_at=now,
+            )
+            try:
+                self._on_applied_update(update)
+            except MonitorInternalError:
+                raise
+            except Exception as exc:
+                raise MonitorInternalError("post_apply_hook failed") from exc
 
     def _next_event_timeout(self) -> tuple[float | None, str | None]:
         """다음 이벤트를 기다릴 최대 시간(초)과 그 deadline의 원인을 함께 반환한다.

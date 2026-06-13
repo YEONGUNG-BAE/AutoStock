@@ -163,7 +163,8 @@ is re-propagated.
 
 | `MonitorExitReason` | Restart? |
 |---------------------|----------|
-| `TRANSPORT_EXIT` / `TRANSPORT_EXHAUSTED` / `INTERNAL_FAILURE` | yes (transport reason) |
+| `TRANSPORT_EXIT` / `TRANSPORT_EXHAUSTED` | yes (transport reason) |
+| `INTERNAL_FAILURE` | **no** — sticky `FAILED_CLOSED` (execution/monitor internal; not transport) |
 | `CANCELLED` / `SESSION_CLOSED` | no |
 | running monitor + market `STARVED` | **no** (`HOLD_EXECUTION_ONLY`) |
 

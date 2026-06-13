@@ -617,6 +617,7 @@ def test_concurrent_writers_newer_is_final_pointer(tmp_path: Path) -> None:
     store_b = ActiveDecisionStore(path)
     new_at = NOW + timedelta(hours=1)
     results: list[PublicationStatus] = []
+    thread_errors: list[BaseException] = []
     lock = threading.Lock()
     start = threading.Barrier(2)
 
@@ -628,7 +629,12 @@ def test_concurrent_writers_newer_is_final_pointer(tmp_path: Path) -> None:
             expires_at=created + DAY,
         )
         start.wait()
-        res = store.publish(cand, now=new_at)
+        try:
+            res = store.publish(cand, now=new_at)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                thread_errors.append(exc)
+            return
         with lock:
             results.append(res.status)
 
@@ -641,7 +647,8 @@ def test_concurrent_writers_newer_is_final_pointer(tmp_path: Path) -> None:
     for t in threads:
         t.join()
 
-    # 어떤 순서로 직렬화되든 최신 결정이 final pointer여야 한다(older가 newer를 못 덮음).
+    assert thread_errors == []
+    assert len(results) == 2
     a = store_a.read_active(Market.KR, "005930")
     b = store_b.read_active(Market.KR, "005930")
     assert a is not None and a.decision_id == "d-new"

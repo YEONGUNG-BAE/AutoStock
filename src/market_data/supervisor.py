@@ -301,7 +301,6 @@ class MarketSupervisor:
             need_restart = self._pending_exit_reason in (
                 MonitorExitReason.TRANSPORT_EXIT,
                 MonitorExitReason.TRANSPORT_EXHAUSTED,
-                MonitorExitReason.INTERNAL_FAILURE,
             )
             if need_restart and self._task is None:
                 await self._ensure_running(now, session, is_restart=True)
@@ -355,7 +354,6 @@ class MarketSupervisor:
             if self._pending_exit_reason in (
                 MonitorExitReason.TRANSPORT_EXIT,
                 MonitorExitReason.TRANSPORT_EXHAUSTED,
-                MonitorExitReason.INTERNAL_FAILURE,
             ):
                 return SupervisorAction.RESTART_TRANSPORT
             if self._transport_restart_armed:
@@ -454,6 +452,10 @@ class MarketSupervisor:
             return
         self._task = None
         reason = self._classify_exit(task)
+        if reason is MonitorExitReason.INTERNAL_FAILURE:
+            self._pending_exit_reason = MonitorExitReason.NONE
+            self._enter_terminal_failed(reason_code="monitor_internal_failure")
+            return
         if reason is MonitorExitReason.CANCELLED:
             self._pending_exit_reason = MonitorExitReason.NONE
             return
