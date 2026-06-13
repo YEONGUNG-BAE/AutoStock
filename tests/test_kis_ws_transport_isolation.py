@@ -26,7 +26,7 @@ _FORBIDDEN_ROOTS = {
     "llm",
 }
 
-_TRANSPORT_MODULES = ("kis_ws_auth.py", "kis_ws_source.py")
+_TRANSPORT_MODULES = ("kis_ws_auth.py", "kis_ws_source.py", "market_supervisor_adapter.py")
 
 
 def _imported_roots(path: Path) -> set[str]:
