@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from analysis import AnalysisAction
 from decision.canonical_json import payload_sha256
 from orchestration.active_decision_store import deserialize_validated_bundle
 
@@ -400,13 +401,18 @@ def summarize_active_store(path: str | Path, *, symbol: str, market: str) -> Act
 # Integrity reasons surfaced by ``inspect_active_decision``. Sanitized — never raw
 # exception text. ``dangling`` ⇒ pointer references a missing version row;
 # ``corrupt`` ⇒ stored bundle JSON / hash / publication-id / validity columns or
-# validity datetimes (missing / unparseable / naive / valid_from > expires_at) do not
-# reconcile; ``identity_mismatch`` ⇒ the configured pointer (market, symbol), the
-# version columns, the bundle's internal decision identity, or the plan identity
-# disagree with one another.
+# validity/published-at datetimes (missing / unparseable / naive / valid_from >
+# expires_at) do not reconcile, or the bundle is not a restorable
+# ``DecisionTriggerBundle`` (e.g. an unknown action or an incomplete model);
+# ``identity_mismatch`` ⇒ the configured pointer (market, symbol), the version columns,
+# the bundle's internal decision identity, or the plan identity disagree with one
+# another; ``plan_consistency_mismatch`` ⇒ a *recognized* action carries the wrong plan
+# presence (BUY/SELL without a plan, or HOLD with one) — a distinct, actionable operator
+# classification that must not be collapsed into the generic ``corrupt`` bucket.
 _INTEGRITY_DANGLING = "dangling"
 _INTEGRITY_CORRUPT = "corrupt"
 _INTEGRITY_IDENTITY_MISMATCH = "identity_mismatch"
+_INTEGRITY_PLAN_CONSISTENCY_MISMATCH = "plan_consistency_mismatch"
 
 
 def _parse_required_aware_datetime(value: object) -> datetime | None:
@@ -490,7 +496,8 @@ def inspect_active_decision(path: str | Path, *, symbol: str, market: str) -> Ac
             version = conn.execute(
                 """
                 SELECT publication_id, market, symbol, decision_id, plan_id,
-                       decision_created_at, valid_from, expires_at, bundle_json, bundle_hash
+                       decision_created_at, valid_from, expires_at, bundle_json, bundle_hash,
+                       published_at
                 FROM decision_bundle_versions
                 WHERE publication_id = ?
                 """,
@@ -538,6 +545,7 @@ def _verify_active_version(
     col_valid_from = str(row["valid_from"])
     col_expires_at = str(row["expires_at"])
     col_decision_created_at = str(row["decision_created_at"])
+    col_published_at = None if row["published_at"] is None else str(row["published_at"])
 
     def _corrupt(reason: str = _INTEGRITY_CORRUPT) -> ActiveDecisionIntegrity:
         return ActiveDecisionIntegrity(
@@ -595,6 +603,15 @@ def _verify_active_version(
     if valid_from_dt is None or expires_at_dt is None or valid_from_dt > expires_at_dt:
         return _corrupt()
 
+    # 3b) published_at column must itself be a present, ISO-parseable, timezone-aware
+    #     datetime. The runtime reader (ActiveDecisionStore._row_to_active_bundle) parses
+    #     this column via require_timezone_aware_datetime; a malformed/naive value would make
+    #     the row unreadable at activation time. published_at is NOT part of the hashed
+    #     bundle payload (it is set to ``now`` at publish), so the model-restoration gate
+    #     below cannot cover it — it must be validated here for runtime-reader parity.
+    if _parse_required_aware_datetime(col_published_at) is None:
+        return _corrupt()
+
     decision = payload.get("decision")
     plan = payload.get("plan")
     if not isinstance(decision, dict):
@@ -627,21 +644,36 @@ def _verify_active_version(
         ):
             return _corrupt(_INTEGRITY_IDENTITY_MISMATCH)
 
+    # 4c) plan-consistency is a *stable, distinct* operator classification, so check it
+    #     explicitly BEFORE the full model restoration below. DecisionTriggerBundle validates
+    #     the same BUY/SELL-needs-plan / HOLD-forbids-plan invariant, but the shared helper
+    #     would collapse it into the generic ``corrupt`` reason — losing the actionable signal
+    #     that distinguishes a wrong plan presence from a genuinely unreadable bundle. Only a
+    #     *recognized* action with the wrong plan presence is a plan-consistency mismatch; an
+    #     unknown/malformed action falls through to model restoration (rejected as corrupt).
+    fund_manager = decision.get("fund_manager")
+    action = fund_manager.get("action") if isinstance(fund_manager, dict) else None
+    has_plan = plan is not None
+    if action in (AnalysisAction.BUY.value, AnalysisAction.SELL.value):
+        if not has_plan:
+            return _corrupt(_INTEGRITY_PLAN_CONSISTENCY_MISMATCH)
+    elif action == AnalysisAction.HOLD.value:
+        if has_plan:
+            return _corrupt(_INTEGRITY_PLAN_CONSISTENCY_MISMATCH)
+
     # 5) full model-restoration parity with the runtime reader
     #    (ActiveDecisionStore._row_to_active_bundle, via the shared pure helper). Run last so
-    #    the more specific identity/validity reasons above win when both apply; a payload that
-    #    clears every check above but is not a valid DecisionTriggerBundle (incomplete model,
-    #    BUY without plan, plan/decision time binding, etc.) is rejected at activation-read
-    #    time, so inspect must fail-closed here too — never report integrity_ok for a bundle
-    #    the runtime reader cannot load.
+    #    the more specific identity/validity/plan-consistency reasons above win when both
+    #    apply; a payload that clears every check above but is not a valid
+    #    DecisionTriggerBundle (incomplete model, unknown action, plan/decision time binding,
+    #    etc.) is rejected at activation-read time, so inspect must fail-closed here too —
+    #    never report integrity_ok for a bundle the runtime reader cannot load.
     try:
         deserialize_validated_bundle(payload)
     except Exception:  # noqa: BLE001 - fail-closed, sanitized (no model/exception text surfaced)
         return _corrupt()
 
     universe = decision.get("universe")
-    fund_manager = decision.get("fund_manager")
-    action = fund_manager.get("action") if isinstance(fund_manager, dict) else None
     return ActiveDecisionIntegrity(
         present=True,
         integrity_ok=True,

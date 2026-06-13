@@ -525,6 +525,10 @@ def _inspect_active_decision(
     if not integrity.integrity_ok:
         if integrity.integrity_reason == "identity_mismatch":
             reasons.append("active_pointer_identity_mismatch")
+        elif integrity.integrity_reason == "plan_consistency_mismatch":
+            # 인식된 action인데 plan 유무가 어긋남(BUY/SELL without plan 또는 HOLD with plan).
+            # 안정적·구별 가능한 운영 분류이므로 generic corrupt가 아닌 전용 reason으로 표면화한다.
+            reasons.append("active_plan_consistency_mismatch")
         elif integrity.integrity_reason == "dangling":
             # 손상 종류가 "pointer는 있으나 가리키는 version 행이 없음"인 경우, 이미
             # ``_inspect_active_store``가 summary.dangling_pointer_count>0를 보고
@@ -553,8 +557,10 @@ def _inspect_active_decision(
         currently_valid = False
     if snapshot_universe is not None and integrity.universe != snapshot_universe:
         reasons.append("active_execution_universe_mismatch")
-    if not _plan_consistent(integrity.action, integrity.has_plan):
-        reasons.append("active_plan_consistency_mismatch")
+    # plan-consistency(BUY/SELL↔plan 유무)는 integrity 단계에서 이미 fail-closed로 검증된다:
+    # integrity_ok=True에 도달했다는 것은 모델 복원(DecisionTriggerBundle 검증)을 통과했다는
+    # 뜻이므로 여기서는 항상 일치한다. 중복(dead) 재검사를 두지 않고, 어긋남은 integrity의
+    # plan_consistency_mismatch → active_plan_consistency_mismatch 경로로만 보고한다.
     return ActiveDecisionInspection(
         present=True, integrity_valid=True, decision_id=integrity.decision_id,
         plan_id=integrity.plan_id, market=integrity.market, symbol=integrity.symbol,
@@ -571,16 +577,6 @@ def _parse_optional_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:  # pragma: no cover - integrity_ok rows always carry parseable ISO
         return None
-
-
-def _plan_consistent(action: str | None, has_plan: bool) -> bool:
-    """BUY/SELL must carry a plan; HOLD must not. Unknown action ⇒ not consistent."""
-
-    if action in (AnalysisAction.BUY.value, AnalysisAction.SELL.value):
-        return has_plan
-    if action == AnalysisAction.HOLD.value:
-        return not has_plan
-    return False
 
 
 # --- deterministic offline replay ---

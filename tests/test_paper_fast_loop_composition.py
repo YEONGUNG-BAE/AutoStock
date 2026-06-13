@@ -39,6 +39,7 @@ from composition.paper_fast_loop import (
     replay_offline,
 )
 from config.settings import RuntimePaperFastLoopSettings
+from decision.canonical_json import canonical_json_dumps, payload_sha256
 from domain import DateId, DecisionId, Percent
 from execution.sqlite_trigger_journal import SqliteTriggerJournal
 from ledger.sqlite_ledger import SQLiteLedger
@@ -473,6 +474,74 @@ def test_inspect_dangling_pointer_emits_single_reason(tmp_path: Path) -> None:
     assert "dangling_active_pointer" in inspection.reasons
     assert "active_bundle_corrupt" not in inspection.reasons
     assert inspection.reasons.count("dangling_active_pointer") == 1
+
+
+def test_inspect_plan_consistency_mismatch_emits_stable_reason(tmp_path: Path) -> None:
+    # P1-A regression (E2E): a HOLD active decision that nonetheless carries a plan is a
+    # plan-consistency violation. The runtime DecisionTriggerBundle rejects it, but inspect
+    # must surface the distinct, actionable `active_plan_consistency_mismatch` reason exactly
+    # once — never the generic `active_bundle_corrupt`. We hand-seed the row (the real store
+    # would refuse to publish HOLD+plan) with a correctly recomputed hash + publication_id so
+    # only the plan-consistency gate — not the hash/identity gates — can fire.
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)  # creates schema; replaced below.
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+
+    decision = _analysis_decision(
+        action=AnalysisAction.HOLD, symbol=settings.symbol, decision_id="dec-hold"
+    )
+    plan = _buy_plan(symbol=settings.symbol, decision_id=decision.decision_id)
+    valid_from = _DECISION_AT
+    expires_at = _DECISION_AT + timedelta(days=1)
+    bundle_payload = {
+        "decision": decision.model_dump(mode="json"),
+        "plan": plan.model_dump(mode="json"),  # HOLD must NOT carry a plan → inconsistency.
+        "valid_from": valid_from.isoformat(),
+        "expires_at": expires_at.isoformat(),
+    }
+    bundle_json = canonical_json_dumps(bundle_payload)
+    bundle_hash = payload_sha256(json.loads(bundle_json))
+    publication_id = payload_sha256(
+        {
+            "market": decision.market,
+            "symbol": decision.symbol,
+            "decision_id": decision.decision_id.value,
+            "decision_created_at": decision.created_at.isoformat(),
+            "bundle_hash": bundle_hash,
+        }
+    )
+    conn = sqlite3.connect(paths.active_decision_store_path)
+    conn.execute("DELETE FROM active_decision_pointers")
+    conn.execute("DELETE FROM decision_bundle_versions")
+    conn.execute(
+        "INSERT INTO decision_bundle_versions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            publication_id, decision.market, decision.symbol, decision.decision_id.value,
+            plan.plan_id, decision.created_at.isoformat(), valid_from.isoformat(),
+            expires_at.isoformat(), bundle_json, bundle_hash, bundle_hash,
+            _DECISION_AT.isoformat(),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO active_decision_pointers VALUES (?,?,?,?)",
+        (decision.market, decision.symbol, publication_id, _DECISION_AT.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = paths.active_decision_store_path.with_name(
+            paths.active_decision_store_path.name + suffix
+        )
+        if sidecar.exists():
+            sidecar.unlink()
+
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.NO_GO
+    assert "active_plan_consistency_mismatch" in inspection.reasons
+    assert inspection.reasons.count("active_plan_consistency_mismatch") == 1
+    assert "active_bundle_corrupt" not in inspection.reasons
 
 
 def test_inspect_never_constructs_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

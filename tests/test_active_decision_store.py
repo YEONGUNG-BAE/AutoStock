@@ -284,6 +284,32 @@ def test_reader_deserialize_failure_no_fallback(tmp_path: Path) -> None:
         store.read_active(Market.KR, "005930")
 
 
+@pytest.mark.parametrize(
+    "column, bad_value",
+    [
+        ("published_at", "not-a-date"),                 # malformed ISO
+        ("published_at", "2026-06-16T09:00:00"),         # naive (no tz)
+        ("valid_from", "not-a-date"),                    # malformed ISO
+        ("expires_at", "2026-06-17T09:00:00"),           # naive (no tz)
+        ("decision_created_at", "not-a-date"),           # malformed ISO
+    ],
+)
+def test_read_time_stored_datetime_corruption_raises_publication_error(
+    tmp_path: Path, column: str, bad_value: str
+) -> None:
+    # P2-C: a malformed/naive stored datetime column must fail-closed as PublicationError on
+    # the read path — never leak a raw ValueError/timezone error. read_active's contract is
+    # that deserialization/integrity failures surface as PublicationError with no fallback.
+    store = _store(tmp_path)
+    store.publish(_candidate(plan=_plan()), now=NOW)
+    store._conn.execute(  # type: ignore[attr-defined]
+        f"UPDATE decision_bundle_versions SET {column} = ? WHERE 1 = 1", (bad_value,)
+    )
+    store._conn.commit()  # type: ignore[attr-defined]
+    with pytest.raises(PublicationError):
+        store.read_active(Market.KR, "005930")
+
+
 # --- isolation / ordering ----------------------------------------------------
 
 

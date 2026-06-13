@@ -182,7 +182,24 @@ def test_read_only_does_not_create_missing_file(tmp_path: Path) -> None:
 
 # --- active decision integrity (RTM-7c.4b hardening: pointer identity + validity) ---
 
+# Mirrors the real ActiveDecisionStore DDL closely enough for read-only inspection: it
+# includes the two runtime-reader columns (source_payload_hash, published_at) so the
+# integrity SELECT — which now reads published_at for runtime-reader parity (P1-B) — can run.
 _FULL_ACTIVE_SCHEMA = """
+CREATE TABLE decision_bundle_versions (
+    publication_id TEXT PRIMARY KEY, market TEXT, symbol TEXT, decision_id TEXT, plan_id TEXT,
+    decision_created_at TEXT, valid_from TEXT, expires_at TEXT, bundle_json TEXT, bundle_hash TEXT,
+    source_payload_hash TEXT, published_at TEXT
+);
+CREATE TABLE active_decision_pointers (
+    market TEXT, symbol TEXT, publication_id TEXT, PRIMARY KEY (market, symbol)
+);
+CREATE TABLE decision_refresh_slots (publication_id TEXT);
+"""
+
+# Legacy schema missing the two runtime-reader columns — used only to prove schema_issues
+# flags them (the real flow gates on schema_issues before inspect_active_decision runs).
+_LEGACY_ACTIVE_SCHEMA = """
 CREATE TABLE decision_bundle_versions (
     publication_id TEXT PRIMARY KEY, market TEXT, symbol TEXT, decision_id TEXT, plan_id TEXT,
     decision_created_at TEXT, valid_from TEXT, expires_at TEXT, bundle_json TEXT, bundle_hash TEXT
@@ -196,6 +213,7 @@ CREATE TABLE decision_refresh_slots (publication_id TEXT);
 _CREATED_AT = "2026-06-16T09:00:00+09:00"
 _VALID_FROM = "2026-06-16T09:00:00+09:00"
 _EXPIRES_AT = "2026-06-17T09:00:00+09:00"
+_PUBLISHED_AT = "2026-06-16T09:00:01+09:00"
 
 
 def _decision_payload(*, market: str, symbol: str, decision_id: str, created_at: str = _CREATED_AT,
@@ -219,6 +237,7 @@ def _insert_bundle(
     version_market: str, version_symbol: str, decision_id: str = "dec-1",
     plan_id: str | None = None, created_at: str = _CREATED_AT,
     valid_from: str = _VALID_FROM, expires_at: str = _EXPIRES_AT,
+    published_at: str = _PUBLISHED_AT,
     decision_payload: dict | None = None, plan_payload: dict | None = None,
 ) -> None:
     decision = decision_payload if decision_payload is not None else _decision_payload(
@@ -237,9 +256,9 @@ def _insert_bundle(
         }
     )
     conn.execute(
-        "INSERT INTO decision_bundle_versions VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO decision_bundle_versions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (pub, version_market, version_symbol, decision_id, plan_id, created_at,
-         valid_from, expires_at, bundle_json, bundle_hash),
+         valid_from, expires_at, bundle_json, bundle_hash, bundle_hash, published_at),
     )
     conn.execute(
         "INSERT INTO active_decision_pointers VALUES (?,?,?)", (pointer_market, pointer_symbol, pub)
@@ -311,10 +330,11 @@ def test_active_decision_model_invalid_bundle_is_corrupt(tmp_path: Path) -> None
     assert verdict.integrity_reason == "corrupt"
 
 
-def test_active_decision_buy_without_plan_is_corrupt(tmp_path: Path) -> None:
-    # P1-A: a BUY decision with no plan is a malformed DecisionTriggerBundle (BUY requires a
-    # plan). The dict checks do not reject it here (plan-consistency is gated separately), so
-    # the model-restoration gate must fail-closed as corrupt to match the runtime reader.
+def test_active_decision_buy_without_plan_is_plan_consistency_mismatch(tmp_path: Path) -> None:
+    # P1-A regression: a BUY decision with no plan is a *plan-consistency* violation, not
+    # generic corruption. The runtime DecisionTriggerBundle rejects it, but inspect must
+    # surface the distinct, actionable plan_consistency_mismatch reason (checked BEFORE the
+    # model-restoration gate, which would otherwise collapse it into corrupt).
     path, conn = _active_path(tmp_path)
     decision, _plan = _full_model_bundle_dicts()
     created_at = decision["created_at"]
@@ -326,6 +346,61 @@ def test_active_decision_buy_without_plan_is_corrupt(tmp_path: Path) -> None:
     conn.commit(); conn.close()
     verdict = inspect_active_decision(path, symbol="005930", market="KR")
     assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "plan_consistency_mismatch"
+
+
+def test_active_decision_hold_with_plan_is_plan_consistency_mismatch(tmp_path: Path) -> None:
+    # P1-A regression (other arm): a HOLD decision carrying a plan is a plan-consistency
+    # violation. The plan identity matches the decision so the identity gate passes; the
+    # plan-consistency gate must own the verdict (not identity_mismatch, not corrupt).
+    path, conn = _active_path(tmp_path)
+    decision = _decision_payload(market="KR", symbol="005930", decision_id="dec-1", action="hold")
+    plan = _plan_payload(market="KR", symbol="005930", decision_id="dec-1", plan_id="plan-1")
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930", plan_id="plan-1",
+                   decision_payload=decision, plan_payload=plan)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "plan_consistency_mismatch"
+
+
+def test_active_decision_unknown_action_is_corrupt_not_plan_consistency(tmp_path: Path) -> None:
+    # P1-A boundary: an *unrecognized* action is not a plan-consistency classification — it is
+    # an unreadable bundle. It must fall through to the model-restoration gate and report
+    # corrupt (the runtime reader cannot model_validate an unknown action).
+    path, conn = _active_path(tmp_path)
+    decision = _decision_payload(market="KR", symbol="005930", decision_id="dec-1", action="teleport")
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930",
+                   decision_payload=decision, plan_payload=None)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_ok is False
+    assert verdict.integrity_reason == "corrupt"
+
+
+@pytest.mark.parametrize("published_at", ["not-a-date", "2026-06-16T09:00:01"])
+def test_active_decision_malformed_published_at_is_corrupt(
+    tmp_path: Path, published_at: str
+) -> None:
+    # P1-B: published_at is a runtime-reader column (ActiveDecisionStore._row_to_active_bundle
+    # parses it as a timezone-aware datetime) that is NOT part of the hashed bundle payload.
+    # A malformed ISO or a naive value would make the row unreadable at activation time, so an
+    # otherwise-valid bundle with a bad published_at must fail-closed as corrupt — inspect must
+    # never accept a bundle the runtime reader would reject.
+    path, conn = _active_path(tmp_path)
+    decision, plan = _full_model_bundle_dicts()
+    created_at = decision["created_at"]
+    _insert_bundle(conn, pointer_market="KR", pointer_symbol="005930",
+                   version_market="KR", version_symbol="005930",
+                   decision_id=decision["decision_id"], plan_id=plan["plan_id"],
+                   created_at=created_at, valid_from=created_at, expires_at=_EXPIRES_AT,
+                   published_at=published_at,
+                   decision_payload=decision, plan_payload=plan)
+    conn.commit(); conn.close()
+    verdict = inspect_active_decision(path, symbol="005930", market="KR")
+    assert verdict.integrity_ok is False
     assert verdict.integrity_reason == "corrupt"
 
 
@@ -333,7 +408,8 @@ def test_active_store_schema_requires_runtime_reader_columns(tmp_path: Path) -> 
     # P1-A: the required schema must include every column the runtime reader reads
     # (source_payload_hash, published_at). A store missing them is unreadable at activation
     # time, so it must be flagged rather than silently treated as inspectable.
-    path, conn = _active_path(tmp_path)  # _FULL_ACTIVE_SCHEMA omits the two runtime columns
+    path = tmp_path / "legacy_active.sqlite3"
+    conn = _make_db(path, _LEGACY_ACTIVE_SCHEMA)  # omits the two runtime columns
     conn.commit(); conn.close()
     issues = schema_issues(path, ACTIVE_STORE_REQUIRED_SCHEMA)
     assert "missing_column:decision_bundle_versions.source_payload_hash" in issues

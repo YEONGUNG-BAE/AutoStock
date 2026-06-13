@@ -122,28 +122,42 @@ corruption (never silently downgraded to "currently valid").
 through `orchestration.active_decision_store.deserialize_validated_bundle` — the
 *same* pure helper the runtime reader uses — so it must restore into a valid
 `DecisionTriggerBundle` (`AnalysisDecision` + `TriggerPlan` model validation,
-BUY/SELL plan-binding, plan/decision time binding). A payload that clears the
-hash / publication-id / identity / validity checks but is **not** a restorable
-bundle (incomplete model, BUY without a plan, etc.) is `active_bundle_corrupt`,
+plan/decision time binding). A payload that clears the hash / publication-id /
+identity / validity checks but is **not** a restorable bundle (incomplete model,
+an unknown action, plan/decision time binding, etc.) is `active_bundle_corrupt`,
 never reported as integrity-OK — inspect can never accept a bundle the runtime
-reader would reject. The required schema therefore also includes the columns the
-runtime reader reads (`source_payload_hash`, `published_at`); a store missing them
-fails the schema check rather than being treated as inspectable. Reasons:
+reader would reject. **Plan-presence consistency is classified separately** (see
+`active_plan_consistency_mismatch` below): a *recognized* action carrying the
+wrong plan presence is checked **before** model restoration, so it surfaces as the
+distinct, actionable plan-consistency reason rather than being collapsed into the
+generic corrupt bucket. The required schema also includes the columns the runtime
+reader reads (`source_payload_hash`, `published_at`); a store missing them fails
+the schema check rather than being treated as inspectable. Beyond presence,
+`published_at` is **value-validated** for runtime-reader parity — it must be a
+present, ISO-parseable, timezone-aware datetime (the runtime reader parses it as
+one, and it is *not* part of the hashed bundle payload, so a malformed/naive value
+would be unreadable at activation time yet invisible to the hash check) — a bad
+value is `active_bundle_corrupt`. Reasons:
 
 - `missing_active_decision` — no pointer for the configured key.
 - `active_pointer_identity_mismatch` — pointer/version/bundle/plan identity
   disagree (distinct from `dangling_active_pointer`, which is a pointer to a
   missing version row).
 - `active_bundle_corrupt` — bundle JSON / hash / publication-id / validity
-  columns / validity datetimes / **full model restoration** do not reconcile.
-  A missing-version pointer is **not** reported here: it is exactly one
-  `dangling_active_pointer` (the store summary detects it via LEFT JOIN), never
-  also `active_bundle_corrupt`.
+  columns / validity datetimes / `published_at` datetime / **full model
+  restoration** (including an unknown action) do not reconcile. A missing-version
+  pointer is **not** reported here: it is exactly one `dangling_active_pointer`
+  (the store summary detects it via LEFT JOIN), never also `active_bundle_corrupt`.
+  A *recognized* action with the wrong plan presence is **not** reported here
+  either: it is exactly one `active_plan_consistency_mismatch` (below).
 - `active_decision_not_yet_valid`, `active_decision_expired` — `now` is outside a
   well-formed validity window.
 - `active_execution_universe_mismatch` — active decision universe ≠ snapshot
   universe.
-- `active_plan_consistency_mismatch` — BUY/SELL without a plan, or HOLD with one.
+- `active_plan_consistency_mismatch` — a recognized action carries the wrong plan
+  presence (BUY/SELL without a plan, or HOLD with one). Checked **before** model
+  restoration so it stays distinct from `active_bundle_corrupt`; an *unknown*
+  action is `active_bundle_corrupt`, not this.
 
 A single root cause emits a single reason — no duplicate/contradictory codes for
 the same fault.

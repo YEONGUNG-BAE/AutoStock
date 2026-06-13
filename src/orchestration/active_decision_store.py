@@ -21,7 +21,8 @@ network/broker/ledger/paper_execution/LLM 접근이 없다. 게시 정책은 fai
   - 더 오래된 결정으로 최신 결정 교체 → REJECTED_OLDER
   - 게시 시점에 이미 만료 → REJECTED_EXPIRED
   - pointer가 존재하지 않는 version을 가리킴(손상) → PublicationError (fail-closed)
-  - reader 역직렬화/무결성(해시·identity) 실패 → PublicationError (fallback 없음)
+  - reader 역직렬화/무결성(해시·identity)·저장 datetime 파싱(malformed/naive) 실패 →
+    PublicationError (fallback 없음; 원시 ValueError를 누출하지 않는다)
 """
 
 from __future__ import annotations
@@ -639,9 +640,10 @@ class ActiveDecisionStore:
     def read_active(self, market: Market | str, symbol: str) -> ActiveBundle | None:
         """현재 pointer가 가리키는 완성된 활성 bundle을 반환한다.
 
-        pointer가 없으면 None. pointer가 존재하지 않는 version을 가리키면(손상) 또는
-        bundle_json 역직렬화/무결성(해시·identity) 검증이 실패하면 PublicationError로
-        fail-closed한다(fallback 없음)."""
+        pointer가 없으면 None. pointer가 존재하지 않는 version을 가리키면(손상), bundle_json
+        역직렬화/무결성(해시·identity) 검증이 실패하면, 또는 저장된 datetime 컬럼이
+        malformed/naive면 PublicationError로 fail-closed한다(fallback 없음; 원시 ValueError를
+        누출하지 않는다)."""
         market_value = _market_value(market)
         with self._lock:
             pointer = self._conn.execute(
@@ -1029,9 +1031,13 @@ def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
     decision = bundle.decision
     plan = bundle.plan
 
-    valid_from = _parse(row["valid_from"])
-    expires_at = _parse(row["expires_at"])
-    decision_created_at = _parse(row["decision_created_at"])
+    # 저장된 datetime 컬럼 파싱 실패(malformed ISO/naive)는 read_active 계약에 따라
+    # 원시 ValueError가 아니라 PublicationError로 fail-closed한다(역직렬화/무결성 실패).
+    valid_from = _parse_stored_datetime(row["valid_from"], field="valid_from")
+    expires_at = _parse_stored_datetime(row["expires_at"], field="expires_at")
+    decision_created_at = _parse_stored_datetime(
+        row["decision_created_at"], field="decision_created_at"
+    )
 
     # 3) publication_id 재계산 일치(식별 + hash 결합) 검증.
     recomputed_pub_id = _publication_id(
@@ -1074,7 +1080,7 @@ def _row_to_active_bundle(row: sqlite3.Row) -> ActiveBundle:
         bundle=bundle,
         bundle_hash=row["bundle_hash"],
         source_payload_hash=row["source_payload_hash"],
-        published_at=_parse(row["published_at"]),
+        published_at=_parse_stored_datetime(row["published_at"], field="published_at"),
     )
 
 
@@ -1086,3 +1092,18 @@ def _parse(value: str) -> datetime:
     return require_timezone_aware_datetime(
         datetime.fromisoformat(value), field_name="stored_datetime"
     )
+
+
+def _parse_stored_datetime(value: object, *, field: str) -> datetime:
+    """Parse a required, timezone-aware stored datetime on the read path, normalizing any
+    malformation (non-string, malformed ISO via ``ValueError``, or naive value) into a
+    fail-closed ``PublicationError``. The original exception is chained for diagnostics but
+    the surfaced message is sanitized (field name only — never the raw stored value), and
+    the reader performs no fallback and no state change."""
+
+    try:
+        return _parse(value)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 - fail-closed, no fallback
+        raise PublicationError(
+            f"stored {field} is not a valid timezone-aware datetime."
+        ) from exc
