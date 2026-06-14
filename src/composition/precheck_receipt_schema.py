@@ -57,7 +57,8 @@ ALLOWED_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 _SQLITE_ARTIFACT_NAMES = frozenset({"ledger", "trigger_journal", "active_decision_store"})
 _JSON_SNAPSHOT_NAME = "execution_inputs_snapshot"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_SYMBOL_PATTERN = re.compile(r"^\d{6}$")
+# KRX 종목코드는 ASCII 숫자 6자리만 허용 — Unicode decimal digit(전각·아랍-인디크 등) 거부.
+_SYMBOL_PATTERN = re.compile(r"^[0-9]{6}$")
 _SUPPORTED_MARKET = "KR"
 
 
@@ -187,43 +188,111 @@ def validate_receipt_fingerprints(
     validate_fingerprint_sequence(fingerprints_after)
 
 
-def validate_artifact_fingerprint(fp: Any) -> None:
-    """``ArtifactFingerprint`` semantic validation — builder 경로."""
-    present = fp.present
-    is_regular_file = fp.is_regular_file
-    if not present:
-        if fp.size is not None or fp.sha256 is not None or fp.user_version is not None:
-            raise PrecheckReceiptError("receipt_invalid_fingerprint")
-        return
-    if not is_regular_file:
-        if fp.size is not None or fp.sha256 is not None or fp.user_version is not None:
-            raise PrecheckReceiptError("receipt_invalid_fingerprint")
-        _validate_sidecar_suffixes(fp.sidecar_suffixes)
-        return
-    if fp.size is None or fp.size < 0 or not is_hex64(fp.sha256):
-        raise PrecheckReceiptError("receipt_invalid_fingerprint")
-    if fp.user_version is not None:
-        if type(fp.user_version) is not int or isinstance(fp.user_version, bool) or fp.user_version < 0:
-            raise PrecheckReceiptError("receipt_invalid_fingerprint")
-    if fp.name == _JSON_SNAPSHOT_NAME and fp.user_version is not None:
-        raise PrecheckReceiptError("receipt_invalid_fingerprint")
-    if fp.name not in PRECHECK_RECEIPT_ARTIFACT_NAMES:
-        raise PrecheckReceiptError("receipt_invalid_fingerprint")
-    _validate_sidecar_suffixes(fp.sidecar_suffixes)
-
-
-def _validate_sidecar_suffixes(sidecars: tuple[str, ...]) -> None:
+def _sidecar_suffixes_valid(sidecars: tuple[str, ...]) -> bool:
+    """허용 suffix만, duplicate 없음, canonical generator 순서."""
     seen: set[str] = set()
     ordered: list[str] = []
     for suffix in sidecars:
-        if suffix not in ALLOWED_SIDECAR_SUFFIXES:
-            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        if type(suffix) is not str or suffix not in ALLOWED_SIDECAR_SUFFIXES:
+            return False
         if suffix in seen:
-            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+            return False
         seen.add(suffix)
         ordered.append(suffix)
     canonical = [suffix for suffix in ALLOWED_SIDECAR_SUFFIXES if suffix in seen]
-    if ordered != canonical:
+    return ordered == canonical
+
+
+def validate_fingerprint_semantics(
+    *,
+    name: str,
+    present: bool,
+    is_regular_file: bool,
+    size: int | None,
+    sha256: str | None,
+    user_version: int | None,
+    sidecar_suffixes: tuple[str, ...],
+) -> None:
+    """Builder·verifier 공통 fingerprint 의미 규칙 — 실패 시 ``PrecheckReceiptError``."""
+    if type(name) is not str:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    if not present:
+        if is_regular_file:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        if size is not None or sha256 is not None or user_version is not None:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        if sidecar_suffixes:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        return
+
+    if not is_regular_file:
+        if size is not None or sha256 is not None or user_version is not None:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        if not _sidecar_suffixes_valid(sidecar_suffixes):
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+        return
+
+    if size is None or size < 0 or not is_hex64(sha256):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+    if user_version is not None and user_version < 0:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+    if name == _JSON_SNAPSHOT_NAME and user_version is not None:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+    if name not in PRECHECK_RECEIPT_ARTIFACT_NAMES:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+    if not _sidecar_suffixes_valid(sidecar_suffixes):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+
+def _strict_fingerprint_fields_from_object(fp: Any) -> dict[str, Any]:
+    """``ArtifactFingerprint`` → strict typed record. 실패 시 ``PrecheckReceiptError``."""
+    present = strict_bool(fp.present)
+    if present is None:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+    is_regular_file = strict_bool(fp.is_regular_file)
+    if is_regular_file is None:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    size: int | None = None
+    if fp.size is not None:
+        size = strict_int(fp.size)
+        if size is None:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    sha256: str | None = fp.sha256
+    if sha256 is not None and type(sha256) is not str:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    user_version: int | None = None
+    if fp.user_version is not None:
+        user_version = strict_int(fp.user_version)
+        if user_version is None:
+            raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    sidecars = fp.sidecar_suffixes
+    if not isinstance(sidecars, tuple):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint")
+
+    return {
+        "name": fp.name,
+        "present": present,
+        "is_regular_file": is_regular_file,
+        "size": size,
+        "sha256": sha256,
+        "user_version": user_version,
+        "sidecar_suffixes": sidecars,
+    }
+
+
+def validate_artifact_fingerprint(fp: Any) -> None:
+    """``ArtifactFingerprint`` semantic validation — builder 경로."""
+    record = _strict_fingerprint_fields_from_object(fp)
+    validate_fingerprint_semantics(**record)
+
+
+def _validate_sidecar_suffixes(sidecars: tuple[str, ...]) -> None:
+    if not _sidecar_suffixes_valid(sidecars):
         raise PrecheckReceiptError("receipt_invalid_fingerprint")
 
 
@@ -369,6 +438,10 @@ def parse_fingerprint_dict(value: object) -> tuple[dict[str, Any], str | None]:
     if not present:
         if size_raw is not None or sha256_raw is not None or user_version_raw is not None:
             return {}, "receipt_invalid_fingerprint"
+        if is_regular_file:
+            return {}, "receipt_invalid_fingerprint"
+        if sidecars:
+            return {}, "receipt_invalid_fingerprint"
         size = None
         sha256 = None
         user_version = None
@@ -382,7 +455,7 @@ def parse_fingerprint_dict(value: object) -> tuple[dict[str, Any], str | None]:
         size = strict_int(size_raw)
         if size is None or size < 0:
             return {}, "receipt_invalid_fingerprint"
-        if not is_hex64(sha256_raw):
+        if type(sha256_raw) is not str or not is_hex64(sha256_raw):
             return {}, "receipt_invalid_fingerprint"
         sha256 = sha256_raw
         if user_version_raw is None:
@@ -397,6 +470,19 @@ def parse_fingerprint_dict(value: object) -> tuple[dict[str, Any], str | None]:
             return {}, "receipt_invalid_fingerprint"
     elif name not in _SQLITE_ARTIFACT_NAMES:
         return {}, "receipt_invalid_fingerprint"
+
+    try:
+        validate_fingerprint_semantics(
+            name=name,
+            present=present,
+            is_regular_file=is_regular_file,
+            size=size,
+            sha256=sha256,
+            user_version=user_version,
+            sidecar_suffixes=sidecars,
+        )
+    except PrecheckReceiptError as exc:
+        return {}, exc.reason_code
 
     return (
         {

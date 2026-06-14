@@ -11,7 +11,7 @@ left for the operator to commit.
 
 ## Scope (hard boundaries)
 
-- Single KR symbol, 6-digit code, `PAPER` account role, `KRW` currency.
+- Single KR symbol, 6-digit **ASCII** code (`[0-9]{6}`), `PAPER` account role, `KRW` currency.
 - Network calls: **0**. KIS frames/transport: **0**. Credential reads: **0**.
 - Production runtime DB writes: **0**. Runtime directory creation: **0**.
 - Slow loop is manual/offline; a prepublished active decision is assumed.

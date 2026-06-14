@@ -56,7 +56,7 @@ Rules:
 - `receipt_sha256`: lowercase 64-char hex.
 - `checked_at`: ISO string, timezone-aware (no TTL/expiry/freshness check).
 - `market`: exactly `"KR"`.
-- `symbol`: exactly six decimal digits.
+- `symbol`: exactly six **ASCII** decimal digits (`[0-9]{6}` — full-width or Arabic-Indic digits rejected).
 - `machine_outcome`: `pass` | `no_go`.
 - `inspection_outcome`: `ok` | `no_go`.
 - `reasons`: `list[str]`, each nonblank; order is part of the hash.
@@ -95,9 +95,22 @@ sidecar_suffixes
 Sidecar suffixes: subset of `-wal`, `-shm`, `-journal` in that canonical generator
 order; no duplicates.
 
-Consistency: absent → null size/hash/user_version; irregular present → null
-size/hash/user_version; regular present → non-negative `size` + hex `sha256`;
-JSON snapshot → `user_version` null.
+Consistency rules (strict types — no bool/int coercion; `type(x) is bool` / strict int only):
+
+- **Absent** (`present=false`): canonical state is
+  `is_regular_file=false`, `size=null`, `sha256=null`, `user_version=null`,
+  `sidecar_suffixes=[]`. Rejects absent + regular true, absent + any
+  size/hash/user_version, absent + nonempty/invalid/duplicate sidecar, int-as-bool.
+- **Present irregular** (`present=true`, `is_regular_file=false`): null
+  size/hash/user_version; sidecar suffixes canonical allowed set only.
+- **Present regular** (`present=true`, `is_regular_file=true`): non-negative int
+  `size` + lowercase hex `sha256` required; `user_version` null or non-negative int;
+  JSON snapshot → `user_version` null; SQLite → null or non-negative int.
+
+Builder and verifier share `validate_fingerprint_semantics` in
+`composition.precheck_receipt_schema`. Invariant: every receipt returned
+successfully by `build_runtime_precheck_receipt()` verifies `VALID` after JSON dict
+conversion.
 
 ## Hash verification
 
@@ -137,6 +150,7 @@ receipt_input_not_json
 receipt_input_too_large
 receipt_input_too_deep
 receipt_input_duplicate_key
+receipt_input_read_error
 ```
 
 ### Stdin JSON fail-closed (RTM-7c.4e safety closure)
@@ -148,6 +162,7 @@ Pathological stdin never escapes as an uncaught exception:
 - duplicate object member (any nesting depth) → `receipt_input_duplicate_key`
 - non-standard constants (`NaN`, `Infinity`, `-Infinity`) via `parse_constant` →
   `receipt_input_not_json`
+- `OSError` from stdin buffer read → `receipt_input_read_error`
 
 Output never includes raw JSON, offending numbers, duplicate key names, nesting
 content, tracebacks, or exception reprs. All invalid parse cases: exit `1`,

@@ -472,11 +472,20 @@ def test_builder_rejects_verifier_invalid_inputs(kwargs: dict[str, Any], code: s
 @pytest.mark.parametrize(
     ("fp_kwargs",),
     [
+        ({"present": 1},),
+        ({"is_regular_file": 1},),
+        ({"size": 1.5},),
+        ({"size": True},),
         ({"present": False, "is_regular_file": True, "size": 1},),
         ({"present": False, "is_regular_file": False, "sha256": "ab" * 32},),
+        ({"present": False, "is_regular_file": False, "sidecar_suffixes": ("-wal",)},),
+        ({"present": False, "is_regular_file": False, "sidecar_suffixes": ("-invalid",)},),
+        ({"present": False, "is_regular_file": False, "sidecar_suffixes": ("-wal", "-wal")},),
         ({"present": True, "is_regular_file": False, "size": 10},),
         ({"present": True, "is_regular_file": True, "sha256": None},),
+        ({"present": True, "is_regular_file": True, "sha256": "AB" * 32},),
         ({"name": "execution_inputs_snapshot", "user_version": 1},),
+        ({"user_version": -1},),
         ({"sidecar_suffixes": ("-bad",)},),
         ({"sidecar_suffixes": ("-wal", "-wal")},),
     ],
@@ -485,7 +494,7 @@ def test_builder_rejects_invalid_fingerprint_semantics(fp_kwargs: dict[str, Any]
     name = fp_kwargs.pop("name", "ledger")
     bad = _fp(name, **fp_kwargs)
     fps = _four_fps(**{name: bad})
-    with pytest.raises(PrecheckReceiptError, match="receipt_invalid_fingerprint"):
+    with pytest.raises(PrecheckReceiptError) as exc:
         build_runtime_precheck_receipt(
             checked_at=_CHECKED_AT,
             market="KR",
@@ -497,3 +506,124 @@ def test_builder_rejects_invalid_fingerprint_semantics(fp_kwargs: dict[str, Any]
             fingerprints_before=fps,
             fingerprints_after=fps,
         )
+    assert exc.value.reason_code in (
+        "receipt_invalid_fingerprint",
+        "receipt_invalid_fingerprint_order",
+    )
+    assert str(exc.value) == exc.value.reason_code
+
+
+def _absent_fp(name: str) -> ArtifactFingerprint:
+    return ArtifactFingerprint(
+        name=name,
+        present=False,
+        is_regular_file=False,
+        size=None,
+        sha256=None,
+        user_version=None,
+        sidecar_suffixes=(),
+    )
+
+
+def _irregular_fp(name: str, *, sidecars: tuple[str, ...] = ()) -> ArtifactFingerprint:
+    return ArtifactFingerprint(
+        name=name,
+        present=True,
+        is_regular_file=False,
+        size=None,
+        sha256=None,
+        user_version=None,
+        sidecar_suffixes=sidecars,
+    )
+
+
+@pytest.mark.parametrize(
+    "fps_factory",
+    [
+        lambda: _four_fps(),
+        lambda: (
+            _absent_fp("execution_inputs_snapshot"),
+            _absent_fp("ledger"),
+            _absent_fp("trigger_journal"),
+            _absent_fp("active_decision_store"),
+        ),
+        lambda: (
+            _irregular_fp("execution_inputs_snapshot"),
+            _irregular_fp("ledger"),
+            _irregular_fp("trigger_journal"),
+            _irregular_fp("active_decision_store"),
+        ),
+        lambda: _four_fps(
+            ledger=_fp("ledger", user_version=1),
+            trigger_journal=_fp("trigger_journal", user_version=1),
+            active_decision_store=_fp("active_decision_store", user_version=1),
+        ),
+        lambda: _four_fps(
+            ledger=_fp("ledger", user_version=None),
+            trigger_journal=_fp("trigger_journal", user_version=None),
+            active_decision_store=_fp("active_decision_store", user_version=None),
+        ),
+    ],
+    ids=["regular-json", "absent-canonical", "irregular-canonical", "sqlite-user-version", "sqlite-null-user-version"],
+)
+def test_builder_success_implies_verifier_valid_matrix(fps_factory: Callable[[], tuple[ArtifactFingerprint, ...]]) -> None:
+    fps = fps_factory()
+    receipt = build_runtime_precheck_receipt(
+        checked_at=_CHECKED_AT,
+        market="KR",
+        symbol="005930",
+        enabled=True,
+        machine_outcome=MachineCheckOutcome.PASS,
+        inspection_outcome=InspectionOutcome.OK,
+        reasons=(),
+        fingerprints_before=fps,
+        fingerprints_after=fps,
+    )
+    result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert result.outcome is ReceiptVerificationOutcome.VALID
+
+
+# --- ASCII-only KRX symbol ---
+
+
+@pytest.mark.parametrize(
+    ("symbol", "valid"),
+    [
+        ("005930", True),
+        ("１２３４５６", False),
+        ("١٢٣٤٥٦", False),
+        ("00593０", False),
+    ],
+)
+def test_symbol_ascii_digits_only(symbol: str, valid: bool) -> None:
+    from composition.precheck_receipt_schema import symbol_valid, validate_symbol
+
+    assert symbol_valid(symbol) is valid
+    if valid:
+        validate_symbol(symbol)
+    else:
+        with pytest.raises(PrecheckReceiptError, match="receipt_invalid_symbol"):
+            validate_symbol(symbol)
+
+
+def test_builder_rejects_unicode_symbol() -> None:
+    fps = _four_fps()
+    with pytest.raises(PrecheckReceiptError, match="receipt_invalid_symbol"):
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="１２３４５６",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.PASS,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=(),
+            fingerprints_before=fps,
+            fingerprints_after=fps,
+        )
+
+
+def test_verifier_rejects_unicode_symbol() -> None:
+    payload = _valid_receipt()
+    payload["symbol"] = "１２３４５６"
+    result = verify_runtime_precheck_receipt_payload(payload)
+    assert result.reason_codes == ("receipt_invalid_symbol",)

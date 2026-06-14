@@ -168,7 +168,8 @@ class LlmSettings:
 
 RUNTIME_PAPER_FAST_LOOP_MARKET = "KR"
 _RUNTIME_ROOT_DIR = "runtime"
-_KRX_SYMBOL_PATTERN = re.compile(r"\A\d{6}\Z")
+# KRX 종목코드는 ASCII 숫자 6자리만 허용 — Unicode decimal digit(전각·아랍-인디크 등) 거부.
+_KRX_SYMBOL_PATTERN = re.compile(r"\A[0-9]{6}\Z")
 
 
 def _validate_runtime_relative_path(value: str, *, field_path: str) -> str:

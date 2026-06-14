@@ -529,6 +529,22 @@ symbol = "AAPL"
         load_settings(config_path)
 
 
+@pytest.mark.parametrize(
+    "symbol",
+    ["１２３４５６", "١٢٣٤٥٦", "00593０"],
+)
+def test_runtime_paper_fast_loop_rejects_unicode_digit_symbol(tmp_path: Path, symbol: str) -> None:
+    config_path = write_config(
+        tmp_path,
+        f"""
+[runtime.paper_fast_loop]
+symbol = "{symbol}"
+""",
+    )
+    with pytest.raises(SettingsError, match="must be a 6-digit KRX symbol"):
+        load_settings(config_path)
+
+
 def test_runtime_paper_fast_loop_rejects_absolute_path(tmp_path: Path) -> None:
     config_path = write_config(
         tmp_path,

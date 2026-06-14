@@ -77,6 +77,14 @@ Artifact order follows `_PRECHECK_ARTIFACTS`:
 3. `trigger_journal`
 4. `active_decision_store`
 
+### Fingerprint semantics (shared with RTM-7c.4e verifier)
+
+Strict types: `present`/`is_regular_file` require `type(x) is bool` (int-as-bool
+rejected). Absent canonical: `present=false`, `is_regular_file=false`, all other
+fields null/empty sidecar. Builder validation uses the same
+`validate_fingerprint_semantics` as the verifier; builder success → verifier VALID
+after JSON dict conversion.
+
 ## Explicit exclusions from receipt payload
 
 Never included in the hash or CLI JSON receipt:

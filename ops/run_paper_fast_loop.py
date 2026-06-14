@@ -313,7 +313,10 @@ def _verify_receipt_input_fail(reason_code: str, *, as_json: bool, out: TextIO) 
 
 def _read_verify_stdin_payload() -> tuple[object | None, str | None]:
     """stdin에서 최대 ``_VERIFY_RECEIPT_STDIN_LIMIT + 1`` byte만 읽는다."""
-    data = sys.stdin.buffer.read(_VERIFY_RECEIPT_STDIN_LIMIT + 1)
+    try:
+        data = sys.stdin.buffer.read(_VERIFY_RECEIPT_STDIN_LIMIT + 1)
+    except OSError:
+        return None, "receipt_input_read_error"
     if not data:
         return None, "receipt_input_empty"
     if len(data) > _VERIFY_RECEIPT_STDIN_LIMIT:

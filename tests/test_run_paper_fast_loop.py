@@ -745,6 +745,30 @@ def test_verify_cli_rejects_infinity_constant(capsys: pytest.CaptureFixture[str]
     _assert_verify_invalid_sanitized(b"[Infinity]", capsys, reason="receipt_input_not_json")
 
 
+def test_verify_cli_rejects_stdin_read_oserror(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _read_raises(_size: int = -1) -> bytes:
+        raise OSError("simulated stdin read failure")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read_raises)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main(["--verify-precheck-receipt", "--json"])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["receipt_input_read_error"]
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert "Traceback" not in combined
+    assert "OSError" not in combined
+    assert "simulated" not in combined
+
+
 def test_verify_cli_subprocess_no_traceback_on_pathological_json() -> None:
     import os
     import subprocess
