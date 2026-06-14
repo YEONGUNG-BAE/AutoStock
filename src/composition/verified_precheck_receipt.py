@@ -135,7 +135,8 @@ def _clone_receipt_payload(payload: object) -> dict[str, Any] | None:
         return None
     try:
         cloned = _clone_json_tree(payload, active_container_ids=set())
-    except RecursionError:
+    except (RecursionError, RuntimeError):
+        # container iteration 중 caller mutation 등으로 발생하는 RuntimeError도 fail-closed.
         return None
     if cloned is _CLONE_FAILURE or type(cloned) is not dict:
         return None

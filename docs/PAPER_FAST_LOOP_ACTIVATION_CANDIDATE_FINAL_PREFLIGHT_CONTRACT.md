@@ -218,6 +218,7 @@ cannot mix observations (hash from one read, age from another). See
 - `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — single immutable snapshot all stages read
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md` — composed 4g byte-state lane
 - `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — composed 4i receipt time observation
+- `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — explicit max-age evaluation (RTM-7c.4k; **not** composed here)
 - `PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md` — composed fresh-precheck semantics
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` — verifier semantics
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model

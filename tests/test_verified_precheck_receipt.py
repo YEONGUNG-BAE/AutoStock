@@ -575,6 +575,34 @@ def test_deep_nesting_recursion_error_fails_closed(
     assert "Traceback" not in captured.err
 
 
+def test_dict_iteration_runtime_error_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """dict iteration 중 RuntimeError가 public API 밖으로 탈출하지 않는다."""
+
+    payload = vrf_helper._valid_receipt()
+    import composition.verified_precheck_receipt as snap_mod
+
+    real_clone_tree = snap_mod._clone_json_tree
+    _RUNTIME_MSG = "dictionary changed size during iteration"
+
+    def _raise_on_dict_items(value: object, *, active_container_ids: set[int]) -> object:
+        if type(value) is dict:
+            raise RuntimeError(_RUNTIME_MSG)
+        return real_clone_tree(value, active_container_ids=active_container_ids)
+
+    monkeypatch.setattr(snap_mod, "_clone_json_tree", _raise_on_dict_items)
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+    captured = capsys.readouterr()
+    assert _RUNTIME_MSG not in captured.out
+    assert _RUNTIME_MSG not in captured.err
+    assert "RuntimeError" not in captured.out
+    assert "RuntimeError" not in captured.err
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
 class _CustomStr(str):
     pass
 

@@ -84,7 +84,9 @@ appear in reasons.
 
 ## Out of scope (this lane)
 
-- Max-age / TTL / freshness threshold selection or evaluation
+- Max-age / TTL / freshness threshold selection or evaluation (see
+  `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — RTM-7c.4k evaluates an **explicit**
+  caller-supplied policy only; this lane still sets `freshness_policy_evaluated=false`)
 - Receipt signing / HMAC / authenticity
 - Operator approval input or storage
 - Activation token / activation CLI / caller
@@ -112,6 +114,7 @@ exists in this lane. See `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` — reused verifier semantics
 - `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — immutable snapshot consumed by the core
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — composes this lane
+- `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — explicit max-age evaluation (RTM-7c.4k; separate, not composed into final preflight)
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes
 - `docs/TECH_DEBT.md` (OPEN items)

@@ -83,6 +83,7 @@ exception/value/path leak):
 - Top-level or nested custom container/scalar subclass
 - Cyclic dict/list structures (not valid JSON trees)
 - Excessive nesting (`RecursionError` during clone)
+- Container iteration `RuntimeError` (e.g. dict mutated during clone iteration)
 - Non-JSON scalar types (including `float` — receipt schema uses integers only)
 
 Clone failure (including the above) is fail-closed with no raw exception, key, value, or path

@@ -99,9 +99,11 @@ observation** between the 4g revalidation and the fresh precheck: it records the
 caller `now`, `candidate_receipt_time_in_future`, `fresh_precheck_executed=false`); the
 per-call `receipt_age_evaluated` flag flips `true` once that comparison runs. It still does
 **not** apply any receipt-age threshold, TTL, or freshness policy
-(`freshness_policy_evaluated=false`) — age is observed, never thresholded. Receipt
-freshness, receipt-age **TTL/max-age policy**, authenticity, and Operator approval binding
-remain **OPEN**.
+(`freshness_policy_evaluated=false`) — age is observed, never thresholded. RTM-7c.4k adds a
+**separate pure evaluator** (`evaluate_receipt_freshness`) that verdicts against an explicit
+caller-supplied max-age when invoked — it is **not** wired into this final preflight lane.
+Receipt freshness threshold selection, authenticity, and Operator approval binding remain
+**OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -207,4 +209,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md`
 - `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`
 - `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`
+- `docs/PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` (RTM-7c.4k — explicit policy only; not composed into final preflight)
 - `docs/TECH_DEBT.md` (OPEN items)
