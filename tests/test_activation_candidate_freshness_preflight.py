@@ -953,6 +953,60 @@ def test_freshness_cli_age_boundary_matrix(
         _assert_freshness_posture(payload, policy_evaluated=True)
 
 
+import re as _re  # noqa: E402
+
+_HEX64_RE = _re.compile(r"[0-9a-f]{64}")
+
+
+def test_freshness_cli_pass_emits_evidence_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    digest = payload["candidate_evidence_sha256"]
+    assert isinstance(digest, str) and _HEX64_RE.fullmatch(digest)
+    assert payload["candidate_evidence_schema_version"] == 1
+    _assert_freshness_posture(payload, policy_evaluated=True)
+
+
+def test_freshness_cli_stale_null_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _AgedClock(101))
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    assert payload["reasons"] == ["candidate_receipt_stale"]
+    assert payload["candidate_evidence_sha256"] is None
+    assert payload["candidate_evidence_schema_version"] is None
+
+
+def test_freshness_cli_input_failure_null_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload = _run_freshness_cli(
+        ["--freshness-preflight-activation-candidate", "--json"], None, capsys
+    )
+    assert code == 1
+    assert payload["reasons"] == ["freshness_policy_input_missing"]
+    assert payload["candidate_evidence_sha256"] is None
+    assert payload["candidate_evidence_schema_version"] is None
+
+
 def test_freshness_cli_missing_max_age(capsys: pytest.CaptureFixture[str]) -> None:
     code, payload = _run_freshness_cli(
         ["--freshness-preflight-activation-candidate", "--json"],

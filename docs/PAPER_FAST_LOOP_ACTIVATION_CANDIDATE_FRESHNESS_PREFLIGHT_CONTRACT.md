@@ -197,6 +197,21 @@ final-preflight `NO_GO` short-circuits.
 
 `--final-preflight-activation-candidate` remains policy-neutral and unchanged.
 
+### Canonical evidence digest (RTM-7c.4n)
+
+On a freshness-qualified PASS the CLI also emits two optional fields:
+
+```text
+candidate_evidence_sha256        # lowercase hex64 on CREATED PASS, else null
+candidate_evidence_schema_version # 1 on CREATED PASS, else null
+```
+
+`NO_GO`/`STALE`/input-failure → both `null`. The CLI runs the qualified preflight once and
+reuses the same KST `now` as the evidence `evaluated_at` (no second qualified run, no extra
+clock read) via `freshness_qualify_and_build_candidate_evidence`. The digest is **not**
+approval or activation authorization — see
+`PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`.
+
 ## Out of scope (unchanged)
 
 - Default max-age / config/env max-age field
@@ -211,6 +226,7 @@ final-preflight `NO_GO` short-circuits.
 
 ## Related contracts
 
+- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` — canonical evidence digest from a qualified PASS (RTM-7c.4n)
 - `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — pure evaluator + shared policy validation
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — verified core reused here
 - `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — age observation reused via final preflight

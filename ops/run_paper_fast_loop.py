@@ -69,9 +69,12 @@ from composition.activation_candidate_final_preflight import (
     ActivationCandidateFinalPreflightOutcome,
     final_preflight_activation_candidate,
 )
+from composition.activation_candidate_evidence import (
+    ActivationCandidateEvidenceOutcome,
+    freshness_qualify_and_build_candidate_evidence,
+)
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
-    freshness_qualify_activation_candidate,
 )
 from composition.freshness_policy_cli_input import parse_max_age_microseconds_cli_input
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
@@ -468,11 +471,23 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
 
 
 def _freshness_preflight_summary(
-    result: Any, *, parsed_max_age: int | None
+    result: Any, *, parsed_max_age: int | None, evidence_result: Any = None
 ) -> dict[str, Any]:
     passed = result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
     final_result = result.final_preflight_result
     freshness_eval = result.freshness_evaluation
+
+    # canonical evidence digest는 PASS+FRESH(CREATED)에서만 노출한다. NO_GO/STALE/builder
+    # 미생성에서는 null — evidence digest는 approval/activation 인가가 아니다.
+    evidence_sha256: str | None = None
+    evidence_schema_version: int | None = None
+    if (
+        evidence_result is not None
+        and evidence_result.outcome is ActivationCandidateEvidenceOutcome.CREATED
+        and evidence_result.evidence is not None
+    ):
+        evidence_sha256 = evidence_result.evidence.evidence_sha256
+        evidence_schema_version = evidence_result.evidence.schema_version
 
     if freshness_eval is not None:
         receipt_age = freshness_eval.receipt_age_microseconds
@@ -506,6 +521,8 @@ def _freshness_preflight_summary(
         "max_age_microseconds": max_age,
         "final_preflight_outcome": final_outcome,
         "final_preflight_reasons": final_reasons,
+        "candidate_evidence_sha256": evidence_sha256,
+        "candidate_evidence_schema_version": evidence_schema_version,
         "activation_authorized": result.activation_authorized,
         "runtime_activation_outcome": result.runtime_activation_outcome,
         "explicit_operator_approval_required": result.explicit_operator_approval_required,
@@ -534,6 +551,8 @@ def _freshness_preflight_input_fail(reason_code: str, *, as_json: bool, out: Tex
         "max_age_microseconds": None,
         "final_preflight_outcome": None,
         "final_preflight_reasons": [],
+        "candidate_evidence_sha256": None,
+        "candidate_evidence_schema_version": None,
         "activation_authorized": False,
         "runtime_activation_outcome": "no_go",
         "explicit_operator_approval_required": True,
@@ -743,7 +762,9 @@ def main(argv: list[str] | None = None) -> int:
         fast_loop = settings.runtime.paper_fast_loop
         policy = ReceiptFreshnessPolicy(max_age_microseconds=parsed_max_age)
         try:
-            result = freshness_qualify_activation_candidate(
+            # 같은 KST now를 qualified call과 evidence evaluated_at에 한 번만 사용한다
+            # (clock 추가 read 0; PASS일 때만 evidence builder가 돈다).
+            combined = freshness_qualify_and_build_candidate_evidence(
                 settings=fast_loop,
                 receipt_payload=payload,
                 now=datetime.now(tz=_KST),
@@ -753,7 +774,11 @@ def main(argv: list[str] | None = None) -> int:
             return _freshness_preflight_input_fail(
                 f"freshness-preflight error: {type(exc).__name__}", as_json=as_json, out=out
             )
-        summary = _freshness_preflight_summary(result, parsed_max_age=parsed_max_age)
+        summary = _freshness_preflight_summary(
+            combined.qualified_result,
+            parsed_max_age=parsed_max_age,
+            evidence_result=combined.evidence_result,
+        )
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

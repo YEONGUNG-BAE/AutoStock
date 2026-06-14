@@ -108,7 +108,13 @@ closure:** processing order is policy snapshot → shared `now` guard → receip
 verified final core → freshness evaluation (snapshot policy only); invalid `now` yields
 `candidate_invalid_now` with zero receipt/artifact observation; caller policy mutation after
 snapshot does not change verdict. Receipt freshness threshold selection, config/CLI binding,
-authenticity, and Operator approval binding remain **OPEN**.
+authenticity, and Operator approval binding remain **OPEN**. RTM-7c.4n adds **canonical
+freshness-qualified candidate evidence** (`build_activation_candidate_evidence`): a qualified
+PASS/FRESH is frozen into one immutable canonical payload (`evidence_sha256` over 14 fields,
+schema version 1) that a *future* approval stage can reference. Evidence is generated **only**
+for PASS/FRESH (`NO_GO`/`STALE` → no digest); it is **not** authenticity, signing, approval,
+writer-stop, an activation token, or activation authorization, is never persisted, and the
+posture stays constant NO-GO. The binding of approval to this evidence remains **OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -216,4 +222,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`
 - `docs/PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` (RTM-7c.4k — explicit policy only; not composed into final-preflight wrapper)
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` (RTM-7c.4l — API-only qualified preflight)
+- `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` (RTM-7c.4n — canonical evidence digest; not approval/activation)
 - `docs/TECH_DEBT.md` (OPEN items)
