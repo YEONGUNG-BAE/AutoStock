@@ -173,7 +173,8 @@ snapshot fields, and calls **no** verifier and never touches the raw payload dic
 public `revalidate_activation_candidate` is now a raw-payload wrapper that builds a snapshot
 once (`verify_and_snapshot_precheck_receipt`; non-VALID → `candidate_receipt_invalid`) and
 delegates to the core. `fingerprints_after` is read straight off the snapshot — no re-parse.
-The snapshot builder deep-copies the caller payload before verify/extract so caller mutation
+The snapshot builder strict-clones the caller payload to a detached built-in JSON tree before
+verify/extract (no `copy.deepcopy` / caller hooks); once clone completes, caller mutation
 cannot affect the frozen observation. See `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
 
 ## Related contracts

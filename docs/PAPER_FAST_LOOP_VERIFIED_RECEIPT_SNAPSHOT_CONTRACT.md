@@ -39,19 +39,54 @@ Processing order:
 
 ```text
 caller payload
-  → private detached JSON tree copy (_clone_receipt_payload)
+  → strict built-in JSON-tree clone (_clone_receipt_payload / _clone_json_tree)
+  → private detached built-in tree
   → detached tree verifier (verify_runtime_precheck_receipt_payload)
   → same detached tree immutable snapshot (_snapshot_from_verified_payload)
 ```
 
-The verifier argument object and snapshot extraction object are **identical** detached trees
-with identity separate from the caller input. The caller-owned payload is **never** passed
-directly to the verifier and is **not** re-read after clone. A mutation of the caller payload
-(or its nested lists) during or after verification therefore cannot mix hash and field
-observations — the verify/copy TOCTOU defect is closed.
+The verifier argument object and snapshot extraction object are **identical** detached
+built-in trees with identity separate from the caller input (top-level and every mutable
+nested container). The caller-owned payload is **never** passed directly to the verifier and
+is **not** re-read after clone. Once the strict detached clone completes, subsequent caller
+mutation cannot affect verifier or snapshot observation.
 
-Clone failure (including custom `__deepcopy__` exceptions) is fail-closed to
-`receipt_snapshot_invalid` with no raw exception, key, value, or path leak.
+**Concurrency contract (precise):** this lane does **not** claim point-in-time atomic snapshot
+across concurrent caller mutation during clone; it does **not** use locks or thread
+synchronization. The guarantee is post-clone isolation: verifier and snapshot extraction share
+the same detached built-in tree, which must pass schema/semantic/hash validation.
+
+## Strict detached JSON-tree clone (RTM-7c.4j closure)
+
+Clone uses `_clone_json_tree` — **not** `copy.deepcopy` and **not** caller-defined
+`__deepcopy__` hooks.
+
+**Allowed exact built-in types only** (`isinstance` is **not** used — `type(value) is …`):
+
+```text
+type(value) is dict
+type(value) is list
+type(value) is str
+type(value) is int
+type(value) is bool
+value is None
+```
+
+Custom container/scalar subclasses are rejected at clone time. Dict keys must be exact `str`.
+Each dict/list node is a new built-in container; caller references are never retained.
+Repeated non-cyclic references are cloned independently at each position (JSON has no alias
+semantics).
+
+**Fail-closed clone paths** (all → `receipt_snapshot_invalid`, verifier call count `0`, no raw
+exception/value/path leak):
+
+- Top-level or nested custom container/scalar subclass
+- Cyclic dict/list structures (not valid JSON trees)
+- Excessive nesting (`RecursionError` during clone)
+- Non-JSON scalar types (including `float` — receipt schema uses integers only)
+
+Clone failure (including the above) is fail-closed with no raw exception, key, value, or path
+leak.
 
 ## Immutability guarantees
 
@@ -69,7 +104,7 @@ Clone failure (including custom `__deepcopy__` exceptions) is fail-closed to
 
 Reuses the existing `verify_runtime_precheck_receipt_payload` and the shared schema parse
 helpers (`parse_fingerprint_list`, `strict_bool`). It builds **no** new canonical verifier,
-hash, or JSON parser. Detached copy uses `copy.deepcopy` on the built-in JSON tree only.
+hash, or JSON parser. Detached copy uses strict built-in JSON-tree clone only.
 
 ## Verified cores
 

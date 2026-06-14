@@ -100,9 +100,10 @@ already-aware `checked_at` off an immutable `VerifiedPrecheckReceipt` and perfor
 verifier call and **no** `checked_at` parse. The public `assess_receipt_time` is now a
 raw-payload wrapper that guards `now` first (preserving the 4i precedence — an invalid `now`
 fail-closes before the receipt is verified), then builds a snapshot once (non-VALID →
-`receipt_time_receipt_invalid`) and delegates to the core. The snapshot builder deep-copies
-the caller payload before verify/extract so caller mutation cannot affect the frozen
-observation. Because the verifier already guarantees a parseable aware `checked_at`, the former
+`receipt_time_receipt_invalid`) and delegates to the core. The snapshot builder strict-clones
+the caller payload to a detached built-in JSON tree before verify/extract (no `copy.deepcopy` /
+caller hooks); once clone completes, caller mutation cannot affect the frozen observation.
+Because the verifier already guarantees a parseable aware `checked_at`, the former
 `receipt_time_invalid_checked_at` reason is absorbed at snapshot-build time and no longer
 exists in this lane. See `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
 

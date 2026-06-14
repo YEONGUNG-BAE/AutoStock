@@ -210,12 +210,13 @@ input, activation token, runtime activation.
 
 This verifier returns only `outcome` / `schema_version` / `receipt_sha256` / `reason_codes`
 — never the parsed fields. RTM-7c.4j adds `verify_and_snapshot_precheck_receipt`, which
-deep-copies the caller payload to a private detached JSON tree, calls this verifier **once** on
-that detached tree, then extracts every retained field from the **same** detached tree into an
-immutable `VerifiedPrecheckReceipt`. The caller-owned payload is never passed directly to this
-verifier; a caller mutation during or after verification cannot mix hash and field
-observations (verify/copy TOCTOU closed). Downstream stages consume that snapshot instead of
-re-verifying the raw payload, so a final preflight calls this verifier exactly once. See
+strict-clones the caller payload to a private detached built-in JSON tree (no `copy.deepcopy`
+/ caller hooks), calls this verifier **once** on that detached tree, then extracts every
+retained field from the **same** detached tree into an immutable `VerifiedPrecheckReceipt`.
+The caller-owned payload is never passed directly to this verifier. Once clone completes,
+subsequent caller mutation cannot affect verifier or snapshot observation; mixed hash/field
+observation is closed. Downstream stages consume that snapshot instead of re-verifying the
+raw payload, so a final preflight calls this verifier exactly once. See
 `docs/PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
 
 See also `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`.

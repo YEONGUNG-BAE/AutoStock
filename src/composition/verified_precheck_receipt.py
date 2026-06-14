@@ -3,12 +3,13 @@
 Freezes a verifier-``VALID`` precheck receipt payload into a single immutable observation so
 that downstream stages (4g byte-state revalidation, 4i receipt time observation) read the
 *same* receipt instead of re-verifying and re-reading the raw mutable ``dict`` independently.
-The caller payload is deep-copied to a private detached JSON tree first; verifier and snapshot
-extraction both read that same detached tree — never the caller object — closing verify/copy
-TOCTOU. A snapshot is built **once** from the untrusted payload; every retained field is
-copied to an immutable value (frozen ``ArtifactFingerprint`` tuples, an aware ``datetime``,
-``str``/``bool`` scalars). No reference to the raw receipt object, no raw absolute/config path,
-and no credential/env data is retained.
+The caller payload is strict-cloned to a private detached built-in JSON tree first; verifier
+and snapshot extraction both read that same detached tree — never the caller object — closing
+verify/copy TOCTOU without relying on caller-defined deepcopy hooks. A snapshot is
+built **once** from the untrusted payload; every retained field is copied to an immutable value
+(frozen ``ArtifactFingerprint`` tuples, an aware ``datetime``, ``str``/``bool`` scalars). No
+reference to the raw receipt object, no raw absolute/config path, and no credential/env data
+is retained.
 
 This module reuses the existing ``verify_runtime_precheck_receipt_payload`` and the shared
 schema parse helpers — it builds **no** new canonical verifier, hash, or JSON parser. A
@@ -18,11 +19,10 @@ freshness/TTL verdict, and not activation authorization.
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 from composition.precheck_receipt_schema import parse_fingerprint_list, strict_bool
 from composition.precheck_receipt_verifier import (
@@ -37,6 +37,8 @@ __all__ = [
     "VerifiedPrecheckReceiptResult",
     "verify_and_snapshot_precheck_receipt",
 ]
+
+_CLONE_FAILURE: Final[object] = object()
 
 
 class VerifiedReceiptSnapshotOutcome(StrEnum):
@@ -85,14 +87,16 @@ class VerifiedPrecheckReceiptResult:
 def verify_and_snapshot_precheck_receipt(payload: object) -> VerifiedPrecheckReceiptResult:
     """Verify an untrusted receipt payload once and freeze it into an immutable snapshot.
 
-    The caller-owned ``payload`` is deep-copied to a private detached JSON tree first; the
-    verifier and snapshot extraction both read that same detached tree — never the caller
-    object — so a concurrent mutation of the raw dict cannot produce a mixed observation
-    (hash from one read, fields from another). Reuses ``verify_runtime_precheck_receipt_payload``;
-    on INVALID or clone failure returns the single stable ``receipt_snapshot_invalid`` reason.
-    On VALID it copies every retained field into an immutable value immediately. Any post-VALID
-    structural surprise (defensive only — unreachable on a truly VALID payload) also fails
-    closed to ``receipt_snapshot_invalid``. No raw key/value, exception, or path is surfaced."""
+    The caller-owned ``payload`` is strict-cloned to a private detached built-in JSON tree
+    first; the verifier and snapshot extraction both read that same detached tree — never the
+    caller object. Once the strict detached clone completes, subsequent caller mutation cannot
+    affect verifier or snapshot observation; the verifier and extraction share the same
+    detached built-in tree, which must pass schema/semantic/hash validation. Reuses
+    ``verify_runtime_precheck_receipt_payload``; on INVALID or clone failure returns the single
+    stable ``receipt_snapshot_invalid`` reason. On VALID it copies every retained field into an
+    immutable value immediately. Any post-VALID structural surprise (defensive only — unreachable
+    on a truly VALID payload) also fails closed to ``receipt_snapshot_invalid``. No raw key/value,
+    exception, or path is surfaced."""
 
     detached = _clone_receipt_payload(payload)
     if detached is None:
@@ -120,21 +124,79 @@ def verify_and_snapshot_precheck_receipt(payload: object) -> VerifiedPrecheckRec
 
 
 def _clone_receipt_payload(payload: object) -> dict[str, Any] | None:
-    """Deep-copy a JSON-compatible receipt tree into a private detached dict.
+    """Strict-clone a JSON-compatible receipt tree into a private detached built-in dict.
 
-    Uses ``copy.deepcopy`` on a built-in ``dict`` only; caller-owned references are never
-    retained. Clone failure (including custom ``__deepcopy__`` exceptions) is fail-closed with
-    no raw exception, key, value, or path surfaced."""
+    ``copy.deepcopy`` 및 caller-defined ``__deepcopy__`` hook을 사용하지 않는다.
+    ``dict``/``list``/``str``/``int``/``bool``/``None`` 만 허용하며 custom container/scalar
+    subclass, cycle, 과도한 nesting(``RecursionError``)은 fail-closed — raw exception/key/value/path
+    미노출."""
 
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         return None
     try:
-        cloned = copy.deepcopy(payload)
-    except Exception:
+        cloned = _clone_json_tree(payload, active_container_ids=set())
+    except RecursionError:
         return None
-    if not isinstance(cloned, dict):
+    if cloned is _CLONE_FAILURE or type(cloned) is not dict:
         return None
     return cloned
+
+
+def _clone_json_tree(
+    value: object,
+    *,
+    active_container_ids: set[int],
+) -> object:
+    """Exact built-in JSON tree만 재귀 복제한다. 실패 시 ``_CLONE_FAILURE`` sentinel."""
+
+    if value is None:
+        return None
+
+    value_type = type(value)
+    if value_type is bool:
+        return value
+    if value_type is int:
+        return value
+    if value_type is str:
+        return value
+    if value_type is float:
+        return _CLONE_FAILURE
+
+    if value_type is list:
+        container_id = id(value)
+        if container_id in active_container_ids:
+            return _CLONE_FAILURE
+        active_container_ids.add(container_id)
+        try:
+            cloned_list: list[object] = []
+            for item in value:
+                cloned_item = _clone_json_tree(item, active_container_ids=active_container_ids)
+                if cloned_item is _CLONE_FAILURE:
+                    return _CLONE_FAILURE
+                cloned_list.append(cloned_item)
+            return cloned_list
+        finally:
+            active_container_ids.discard(container_id)
+
+    if value_type is dict:
+        container_id = id(value)
+        if container_id in active_container_ids:
+            return _CLONE_FAILURE
+        active_container_ids.add(container_id)
+        try:
+            cloned_dict: dict[str, object] = {}
+            for key, nested in value.items():
+                if type(key) is not str:
+                    return _CLONE_FAILURE
+                cloned_nested = _clone_json_tree(nested, active_container_ids=active_container_ids)
+                if cloned_nested is _CLONE_FAILURE:
+                    return _CLONE_FAILURE
+                cloned_dict[key] = cloned_nested
+            return cloned_dict
+        finally:
+            active_container_ids.discard(container_id)
+
+    return _CLONE_FAILURE
 
 
 def _snapshot_from_verified_payload(

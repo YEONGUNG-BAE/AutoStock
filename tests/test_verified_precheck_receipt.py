@@ -5,9 +5,10 @@ Covers: VALID build produces a fully immutable observation (frozen dataclass, fr
 ``receipt_snapshot_invalid`` reason; a post-build mutation of the raw payload dict (and its
 nested lists) cannot change the snapshot or its hash; ``checked_at`` is aware and
 ``checked_at_iso`` is the exact verified source string bound into the receipt hash;
-activation posture is the canonical NO-GO; atomic verify-and-snapshot uses a detached copy
-so verify-return and nested mutations cannot mix hash vs field observations; and the module
-reads no clock of its own.
+activation posture is the canonical NO-GO; strict detached built-in JSON-tree clone (no
+``copy.deepcopy`` / caller hooks) so verify-return and nested mutations cannot mix hash vs
+field observations; custom container/scalar subclass, cycle, and deep-input rejection; and
+the module reads no clock of its own.
 """
 
 from __future__ import annotations
@@ -318,6 +319,27 @@ def test_nested_mutation_during_verify_does_not_change_snapshot(
     assert receipt.fingerprints_before[0].sidecar_suffixes == ()
 
 
+class _SelfReturningDeepcopyDict(dict):
+    """``copy.deepcopy`` alias — strict clone이 거부해야 한다."""
+
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        return self
+
+
+class _SelfReturningList(list):
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        return self
+
+
+class _SelfReturningDict(dict):
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        return self
+
+
+class _OrdinaryDictSubclass(dict):
+    pass
+
+
 class _PoisonDeepcopyDict(dict):
     """``copy.deepcopy`` 중 예외를 유발하는 sentinel — stdout/stderr leak 테스트용."""
 
@@ -327,23 +349,280 @@ class _PoisonDeepcopyDict(dict):
         raise RuntimeError(self._SENTINEL)
 
 
-def test_clone_failure_fails_closed_without_leak(
-    capsys: pytest.CaptureFixture[str],
+def _assert_clone_invalid_no_verifier(
+    payload: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    poison = _PoisonDeepcopyDict(vrf_helper._valid_receipt())
+    calls: list[int] = []
 
-    result = verify_and_snapshot_precheck_receipt(poison)
-    captured = capsys.readouterr()
+    def _fail_verifier(_: object) -> object:
+        calls.append(1)
+        raise AssertionError("verifier must not run on clone failure")
 
+    monkeypatch.setattr(
+        "composition.verified_precheck_receipt.verify_runtime_precheck_receipt_payload",
+        _fail_verifier,
+    )
+    result = verify_and_snapshot_precheck_receipt(payload)
     assert result.outcome is VerifiedReceiptSnapshotOutcome.INVALID
     assert result.reasons == ("receipt_snapshot_invalid",)
     assert result.receipt is None
+    assert calls == []
+
+
+def test_top_level_self_returning_deepcopy_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _SelfReturningDeepcopyDict(vrf_helper._valid_receipt())
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_top_level_exception_deepcopy_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    poison = _PoisonDeepcopyDict(vrf_helper._valid_receipt())
+    _assert_clone_invalid_no_verifier(poison, monkeypatch)
+    captured = capsys.readouterr()
     assert _PoisonDeepcopyDict._SENTINEL not in captured.out
     assert _PoisonDeepcopyDict._SENTINEL not in captured.err
     assert "RuntimeError" not in captured.out
     assert "RuntimeError" not in captured.err
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
+
+
+def test_top_level_ordinary_dict_subclass_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _OrdinaryDictSubclass(vrf_helper._valid_receipt())
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_self_returning_top_level_mutation_no_longer_mixes_hash_and_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict clone이 self-returning top-level alias를 거부 — mixed observation 불가."""
+
+    payload = _SelfReturningDeepcopyDict(vrf_helper._valid_receipt())
+    real_verifier = verify_runtime_precheck_receipt_payload
+
+    def _mutate_on_valid(detached: object) -> Any:
+        result = real_verifier(detached)
+        if result.outcome is ReceiptVerificationOutcome.VALID:
+            payload["symbol"] = _MUTATED_SYMBOL
+            payload["checked_at"] = _MUTATED_CHECKED_AT
+        return result
+
+    monkeypatch.setattr(
+        "composition.verified_precheck_receipt.verify_runtime_precheck_receipt_payload",
+        _mutate_on_valid,
+    )
+    result = verify_and_snapshot_precheck_receipt(payload)
+    assert result.outcome is VerifiedReceiptSnapshotOutcome.INVALID
+    assert result.receipt is None
+
+
+def _make_nested_subclass_payload(
+    *,
+    reasons: bool = False,
+    fp_before: bool = False,
+    fp_after: bool = False,
+    fp_item: bool = False,
+    sidecar: bool = False,
+) -> dict[str, Any]:
+    payload = vrf_helper._valid_receipt()
+    if reasons:
+        payload["reasons"] = _SelfReturningList(payload["reasons"])
+    if fp_before:
+        payload["fingerprints_before"] = _SelfReturningList(payload["fingerprints_before"])
+    if fp_after:
+        payload["fingerprints_after"] = _SelfReturningList(payload["fingerprints_after"])
+    if fp_item:
+        payload["fingerprints_after"][0] = _SelfReturningDict(payload["fingerprints_after"][0])
+    if sidecar:
+        payload["fingerprints_after"][0]["sidecar_suffixes"] = _SelfReturningList(
+            payload["fingerprints_after"][0]["sidecar_suffixes"]
+        )
+    return payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _make_nested_subclass_payload(reasons=True),
+        _make_nested_subclass_payload(fp_before=True),
+        _make_nested_subclass_payload(fp_after=True),
+        _make_nested_subclass_payload(fp_item=True),
+        _make_nested_subclass_payload(sidecar=True),
+    ],
+    ids=[
+        "reasons_list",
+        "fingerprints_before_list",
+        "fingerprints_after_list",
+        "fingerprint_item_dict",
+        "sidecar_suffixes_list",
+    ],
+)
+def test_nested_subclass_matrix(
+    payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_nested_self_returning_alias_would_share_identity_without_strict_clone() -> None:
+    """Regression anchor: ``copy.deepcopy`` nested alias는 caller와 identity를 공유한다."""
+
+    payload = vrf_helper._valid_receipt()
+    payload["reasons"] = _SelfReturningList(payload["reasons"])
+    cloned = copy.deepcopy(payload)
+    assert cloned["reasons"] is payload["reasons"]
+
+
+def _make_dict_self_cycle() -> dict[str, Any]:
+    payload = vrf_helper._valid_receipt()
+    payload["reasons"] = []
+    payload["reasons"].append(payload)
+    return payload
+
+
+def _make_list_self_cycle() -> dict[str, Any]:
+    payload = vrf_helper._valid_receipt()
+    cyclic: list[Any] = []
+    cyclic.append(cyclic)
+    payload["reasons"] = cyclic
+    return payload
+
+
+def _make_indirect_cycle() -> dict[str, Any]:
+    payload = vrf_helper._valid_receipt()
+    inner: list[Any] = []
+    outer: dict[str, Any] = {"loop": inner}
+    inner.append(outer)
+    payload["reasons"] = [outer]
+    return payload
+
+
+@pytest.mark.parametrize(
+    "payload_factory",
+    [_make_dict_self_cycle, _make_list_self_cycle, _make_indirect_cycle],
+    ids=["dict_self_cycle", "list_self_cycle", "indirect_dict_list_cycle"],
+)
+def test_cyclic_input_fails_closed(
+    payload_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = payload_factory()
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_valid_builtin_tree_identity_separation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = vrf_helper._valid_receipt()
+    import composition.verified_precheck_receipt as snap_mod
+
+    real_clone = snap_mod._clone_receipt_payload
+    cloned_ids: list[int] = []
+
+    def _spy_clone(arg: object) -> Any:
+        cloned = real_clone(arg)
+        if cloned is not None:
+            cloned_ids.append(id(cloned))
+            assert id(cloned) != id(payload)
+            assert id(cloned["reasons"]) != id(payload["reasons"])
+            assert id(cloned["fingerprints_after"]) != id(payload["fingerprints_after"])
+            assert id(cloned["fingerprints_after"][0]) != id(payload["fingerprints_after"][0])
+            assert id(cloned["fingerprints_after"][0]["sidecar_suffixes"]) != id(
+                payload["fingerprints_after"][0]["sidecar_suffixes"]
+            )
+        return cloned
+
+    monkeypatch.setattr(snap_mod, "_clone_receipt_payload", _spy_clone)
+    receipt = _snapshot(payload)
+    assert len(cloned_ids) == 1
+    assert type(receipt) is VerifiedPrecheckReceipt
+
+
+def _make_deep_nested_list(depth: int) -> dict[str, Any]:
+    payload = vrf_helper._valid_receipt()
+    node: list[Any] = []
+    current: list[Any] = node
+    for _ in range(depth):
+        inner: list[Any] = []
+        current.append(inner)
+        current = inner
+    current.append("leaf")
+    payload["reasons"] = node
+    return payload
+
+
+def test_deep_nesting_recursion_error_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = _make_deep_nested_list(5000)
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+    captured = capsys.readouterr()
+    assert "RecursionError" not in captured.out
+    assert "RecursionError" not in captured.err
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+class _CustomStr(str):
+    pass
+
+
+class _CustomInt(int):
+    pass
+
+
+def test_custom_str_scalar_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = vrf_helper._valid_receipt()
+    payload["symbol"] = _CustomStr("005930")
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_custom_int_scalar_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = vrf_helper._valid_receipt()
+    payload["schema_version"] = _CustomInt(1)
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_float_scalar_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = vrf_helper._valid_receipt()
+    payload["schema_version"] = 1.0
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_arbitrary_object_scalar_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = vrf_helper._valid_receipt()
+    payload["market"] = object()
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_custom_bool_like_scalar_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Python은 ``bool`` subclass를 허용하지 않으므로 truthy non-bool scalar로 대체."""
+
+    class _FakeBool:
+        def __bool__(self) -> bool:
+            return True
+
+    payload = vrf_helper._valid_receipt()
+    payload["enabled"] = _FakeBool()
+    _assert_clone_invalid_no_verifier(payload, monkeypatch)
+
+
+def test_module_source_uses_no_copy_deepcopy() -> None:
+    source = Path("src/composition/verified_precheck_receipt.py").read_text(encoding="utf-8")
+    assert "import copy" not in source
+    assert "copy.deepcopy(" not in source
 
 
 def test_non_dict_payload_never_reaches_verifier(

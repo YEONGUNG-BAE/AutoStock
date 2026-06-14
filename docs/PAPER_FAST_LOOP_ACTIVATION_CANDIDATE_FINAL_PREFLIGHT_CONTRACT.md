@@ -200,12 +200,13 @@ connection is ever opened and the DB bytes / `user_version` / sidecar set are un
 
 ## RTM-7c.4j — single verified snapshot
 
-The untrusted `receipt_payload` is deep-copied to a private detached JSON tree, verified and
-frozen into one immutable `VerifiedPrecheckReceipt` **once** (`verify_and_snapshot_precheck_receipt`)
-after the `now` guard; a non-VALID snapshot fails closed to `candidate_receipt_invalid` before
-any stage runs. The verifier and snapshot extraction read the **same** detached tree — never
-the caller object — so a caller mutation during or after verification cannot mix hash and field
-observations (verify/copy TOCTOU closed). The 4g byte-state revalidation
+The untrusted `receipt_payload` is strict-cloned to a private detached built-in JSON tree,
+verified and frozen into one immutable `VerifiedPrecheckReceipt` **once**
+(`verify_and_snapshot_precheck_receipt`) after the `now` guard; a non-VALID snapshot fails
+closed to `candidate_receipt_invalid` before any stage runs. The verifier and snapshot
+extraction read the **same** detached built-in tree — never the caller object. Once clone
+completes, subsequent caller mutation cannot affect verifier or snapshot observation. The 4g
+byte-state revalidation
 (`revalidate_verified_activation_candidate`) and the 4i receipt time observation
 (`assess_verified_receipt_time`) then read that **same** snapshot. The raw receipt verifier is
 therefore called exactly once per preflight, and a cross-stage mutation of the raw payload
