@@ -3,10 +3,12 @@
 Freezes a verifier-``VALID`` precheck receipt payload into a single immutable observation so
 that downstream stages (4g byte-state revalidation, 4i receipt time observation) read the
 *same* receipt instead of re-verifying and re-reading the raw mutable ``dict`` independently.
-A snapshot is built **once** from the untrusted payload; every retained field is copied to an
-immutable value (frozen ``ArtifactFingerprint`` tuples, an aware ``datetime``, ``str``/``bool``
-scalars). No reference to the raw receipt object, no raw absolute/config path, and no
-credential/env data is retained.
+The caller payload is deep-copied to a private detached JSON tree first; verifier and snapshot
+extraction both read that same detached tree — never the caller object — closing verify/copy
+TOCTOU. A snapshot is built **once** from the untrusted payload; every retained field is
+copied to an immutable value (frozen ``ArtifactFingerprint`` tuples, an aware ``datetime``,
+``str``/``bool`` scalars). No reference to the raw receipt object, no raw absolute/config path,
+and no credential/env data is retained.
 
 This module reuses the existing ``verify_runtime_precheck_receipt_payload`` and the shared
 schema parse helpers — it builds **no** new canonical verifier, hash, or JSON parser. A
@@ -16,6 +18,7 @@ freshness/TTL verdict, and not activation authorization.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -46,8 +49,8 @@ class VerifiedPrecheckReceipt:
     """Fully immutable verified receipt observation — raw payload/path/secret 미보관.
 
     ``checked_at`` is a timezone-aware ``datetime`` parsed from the verified ``checked_at``
-    string; ``checked_at_iso`` is that exact original canonical string (the one bound into the
-    receipt hash). ``receipt_sha256`` is the verifier-confirmed stored hash. ``fingerprints_*``
+    string; ``checked_at_iso`` is the exact verified source string bound into the receipt hash.
+    ``receipt_sha256`` is the verifier-confirmed stored hash. ``fingerprints_*``
     are frozen ``ArtifactFingerprint`` tuples (each ``sidecar_suffixes`` a tuple) — no mutable
     list/dict reference is retained. A snapshot is an observation, NOT authenticity, approval,
     freshness, or activation authorization."""
@@ -82,23 +85,27 @@ class VerifiedPrecheckReceiptResult:
 def verify_and_snapshot_precheck_receipt(payload: object) -> VerifiedPrecheckReceiptResult:
     """Verify an untrusted receipt payload once and freeze it into an immutable snapshot.
 
-    Reuses ``verify_runtime_precheck_receipt_payload``; on INVALID returns the single stable
-    ``receipt_snapshot_invalid`` reason. On VALID it copies every retained field into an
-    immutable value immediately, so a later mutation of the raw ``payload`` dict cannot change
-    the snapshot. Any post-VALID structural surprise (defensive only — unreachable on a truly
-    VALID payload) also fails closed to ``receipt_snapshot_invalid``. No raw key/value,
-    exception, or path is surfaced."""
+    The caller-owned ``payload`` is deep-copied to a private detached JSON tree first; the
+    verifier and snapshot extraction both read that same detached tree — never the caller
+    object — so a concurrent mutation of the raw dict cannot produce a mixed observation
+    (hash from one read, fields from another). Reuses ``verify_runtime_precheck_receipt_payload``;
+    on INVALID or clone failure returns the single stable ``receipt_snapshot_invalid`` reason.
+    On VALID it copies every retained field into an immutable value immediately. Any post-VALID
+    structural surprise (defensive only — unreachable on a truly VALID payload) also fails
+    closed to ``receipt_snapshot_invalid``. No raw key/value, exception, or path is surfaced."""
 
-    verification = verify_runtime_precheck_receipt_payload(payload)
+    detached = _clone_receipt_payload(payload)
+    if detached is None:
+        return _invalid()
+
+    verification = verify_runtime_precheck_receipt_payload(detached)
     if verification.outcome is not ReceiptVerificationOutcome.VALID:
         return _invalid()
 
-    # verifier VALID guarantees a dict with strictly validated fields; copy them defensively.
-    assert isinstance(payload, dict)
     assert verification.receipt_sha256 is not None
     assert verification.schema_version is not None
     snapshot = _snapshot_from_verified_payload(
-        payload=payload,
+        payload=detached,
         receipt_sha256=verification.receipt_sha256,
         schema_version=verification.schema_version,
     )
@@ -110,6 +117,24 @@ def verify_and_snapshot_precheck_receipt(payload: object) -> VerifiedPrecheckRec
         reasons=(),
         receipt=snapshot,
     )
+
+
+def _clone_receipt_payload(payload: object) -> dict[str, Any] | None:
+    """Deep-copy a JSON-compatible receipt tree into a private detached dict.
+
+    Uses ``copy.deepcopy`` on a built-in ``dict`` only; caller-owned references are never
+    retained. Clone failure (including custom ``__deepcopy__`` exceptions) is fail-closed with
+    no raw exception, key, value, or path surfaced."""
+
+    if not isinstance(payload, dict):
+        return None
+    try:
+        cloned = copy.deepcopy(payload)
+    except Exception:
+        return None
+    if not isinstance(cloned, dict):
+        return None
+    return cloned
 
 
 def _snapshot_from_verified_payload(

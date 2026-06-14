@@ -21,9 +21,9 @@ composition.verified_precheck_receipt.verify_and_snapshot_precheck_receipt(paylo
 
 Input: untrusted JSON-decoded object. Output carries `outcome` (`valid` / `invalid`), stable
 `reasons`, and (on VALID) the frozen `receipt: VerifiedPrecheckReceipt`. On any non-VALID
-verification or post-VALID structural surprise it returns the single stable reason
-`receipt_snapshot_invalid` and `receipt = None`. No raw key/value, exception, or path is
-surfaced.
+verification, clone failure, or post-VALID structural surprise it returns the single stable
+reason `receipt_snapshot_invalid` and `receipt = None`. No raw key/value, exception, or path
+is surfaced.
 
 ## Why a single snapshot
 
@@ -33,11 +33,33 @@ verifier and re-read the raw mutable dict, so a cross-stage mutation could produ
 observation* — a hash read from one state and an age read from another. The snapshot closes
 this: verify once, freeze once, and have every stage read frozen fields.
 
+## Atomic verify-and-snapshot (verify/copy TOCTOU closure)
+
+Processing order:
+
+```text
+caller payload
+  → private detached JSON tree copy (_clone_receipt_payload)
+  → detached tree verifier (verify_runtime_precheck_receipt_payload)
+  → same detached tree immutable snapshot (_snapshot_from_verified_payload)
+```
+
+The verifier argument object and snapshot extraction object are **identical** detached trees
+with identity separate from the caller input. The caller-owned payload is **never** passed
+directly to the verifier and is **not** re-read after clone. A mutation of the caller payload
+(or its nested lists) during or after verification therefore cannot mix hash and field
+observations — the verify/copy TOCTOU defect is closed.
+
+Clone failure (including custom `__deepcopy__` exceptions) is fail-closed to
+`receipt_snapshot_invalid` with no raw exception, key, value, or path leak.
+
 ## Immutability guarantees
 
 - `VerifiedPrecheckReceipt` is a `@dataclass(frozen=True)`.
-- `checked_at` is a timezone-aware `datetime`; `checked_at_iso` is the exact original
-  canonical string bound into the receipt hash.
+- `checked_at` is a timezone-aware `datetime`; `checked_at_iso` is the exact verified source
+  string bound into the receipt hash (the verifier validates a parseable timezone-aware ISO
+  string; it does not canonicalize datetime strings — different ISO forms may denote the same
+  instant).
 - `fingerprints_before` / `fingerprints_after` are tuples of frozen `ArtifactFingerprint`
   (each `sidecar_suffixes` a tuple) — no mutable list/dict reference is retained.
 - A later mutation of the raw payload dict (or its nested lists) cannot change the snapshot
@@ -47,9 +69,7 @@ this: verify once, freeze once, and have every stage read frozen fields.
 
 Reuses the existing `verify_runtime_precheck_receipt_payload` and the shared schema parse
 helpers (`parse_fingerprint_list`, `strict_bool`). It builds **no** new canonical verifier,
-hash, or JSON parser. The verifier returns only `outcome` / `schema_version` /
-`receipt_sha256` / `reason_codes`, so the snapshot builder re-reads the already-verified dict
-to copy the parsed fields.
+hash, or JSON parser. Detached copy uses `copy.deepcopy` on the built-in JSON tree only.
 
 ## Verified cores
 
