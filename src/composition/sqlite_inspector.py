@@ -246,7 +246,11 @@ class ArtifactFingerprint:
     regular-file-ness, byte size, byte SHA-256 of the *main* file, the SQLite
     ``user_version`` (from the header bytes; ``None`` for non-SQLite or absent files), and
     the set of live sidecar suffixes. Two fingerprints taken around a read-only operation
-    must be equal — any difference proves the operation mutated operator state."""
+    must be equal for *net* drift to be absent — any difference proves observable state
+    changed during that window (not necessarily that the operation itself wrote: a
+    concurrent writer or mutate-then-restore within the window can also differ). Equality
+    proves no net fingerprint drift; it does not prove concurrent-writer absence (writer-stop
+    stays a manual confirmation)."""
 
     name: str
     present: bool

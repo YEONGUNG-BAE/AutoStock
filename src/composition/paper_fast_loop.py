@@ -500,7 +500,8 @@ def precheck_runtime(
             precheck_reasons.append(f"precheck_artifact_not_regular_file:{fb.name}")
             irregular_names.add(fb.name)
     # Read-only proof: every artifact must be byte-identical (and same sidecar set) across
-    # the inspection. Any difference means the precheck mutated operator state → NO_GO.
+    # the inspection window. Any net difference means observable state drifted → NO_GO
+    # (does not by itself prove the precheck wrote — concurrent writers are out of scope).
     for fb, fa in zip(before, after):
         if fb != fa:
             precheck_reasons.append(f"precheck_artifact_changed:{fb.name}")

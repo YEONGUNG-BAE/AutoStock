@@ -751,49 +751,81 @@ def test_precheck_flags_artifact_changed_when_inspection_mutates(
     assert result.fingerprints_before != result.fingerprints_after
 
 
-def test_precheck_flags_artifact_not_regular_file(tmp_path: Path) -> None:
-    # Fail-closed: a present-but-irregular artifact (here the snapshot replaced by a directory)
-    # cannot be trusted read-only. The fingerprint covers the JSON snapshot uniformly with the
-    # DBs, so even a non-SQLite artifact is caught.
+def _replace_with_irregular_directory(path: Path, *, is_sqlite: bool) -> None:
+    """Replace a regular artifact path with a directory (present-but-irregular)."""
+    if is_sqlite:
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = path.with_name(path.name + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+    path.unlink()
+    path.mkdir()
+
+
+@pytest.mark.parametrize(
+    ("artifact_attr", "canonical_reason", "diagnostic_reason", "is_sqlite"),
+    [
+        (
+            "snapshot_path",
+            "precheck_artifact_not_regular_file:execution_inputs_snapshot",
+            "execution_inputs_invalid",
+            False,
+        ),
+        (
+            "ledger_path",
+            "precheck_artifact_not_regular_file:ledger",
+            "ledger_unreadable:sqlite_not_a_file",
+            True,
+        ),
+        (
+            "trigger_journal_path",
+            "precheck_artifact_not_regular_file:trigger_journal",
+            "journal_unreadable:sqlite_not_a_file",
+            True,
+        ),
+        (
+            "active_decision_store_path",
+            "precheck_artifact_not_regular_file:active_decision_store",
+            "active_store_unreadable:sqlite_not_a_file",
+            True,
+        ),
+    ],
+    ids=[
+        "execution_inputs_snapshot",
+        "ledger",
+        "trigger_journal",
+        "active_decision_store",
+    ],
+)
+def test_precheck_irregular_artifact_single_canonical_reason(
+    tmp_path: Path,
+    artifact_attr: str,
+    canonical_reason: str,
+    diagnostic_reason: str,
+    is_sqlite: bool,
+) -> None:
+    # Fail-closed: a present-but-irregular artifact (directory) cannot be trusted read-only.
+    # Aggregate reasons carry exactly one canonical precheck reason; the inspection layer's
+    # generic unreadable/invalid reason for the same artifact stays in inspection.reasons only.
     settings = _settings(tmp_path)
     _seed_valid_stack(tmp_path, settings)
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
-    paths.snapshot_path.unlink()
-    paths.snapshot_path.mkdir()
+    db_paths = _precheck_db_paths(settings, tmp_path)
+    sidecars_before = {p: _pfl.sqlite_inspector.sidecar_files(p) for p in db_paths}
+
+    target = getattr(paths, artifact_attr)
+    _replace_with_irregular_directory(target, is_sqlite=is_sqlite)
 
     result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
 
     assert result.machine_outcome is MachineCheckOutcome.NO_GO
     _assert_activation_never_authorized(result)
-    # Single canonical reason: exactly the precheck reason in the aggregate, NOT also the
-    # inspection layer's generic `execution_inputs_invalid` (that stays in inspection.reasons
-    # for diagnostics).
-    assert result.reasons == ("precheck_artifact_not_regular_file:execution_inputs_snapshot",)
-    assert "execution_inputs_invalid" not in result.reasons
-    assert "execution_inputs_invalid" in result.inspection.reasons
-
-
-def test_precheck_irregular_db_artifact_single_canonical_reason(tmp_path: Path) -> None:
-    # Same single-reason rule for a SQLite artifact: an irregular ledger (directory) surfaces
-    # as exactly `precheck_artifact_not_regular_file:ledger`, not also the inspection layer's
-    # `ledger_unreadable:sqlite_not_a_file` (kept in inspection.reasons for diagnostics).
-    settings = _settings(tmp_path)
-    _seed_valid_stack(tmp_path, settings)
-    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
-    for suffix in ("-wal", "-shm", "-journal"):
-        sidecar = paths.ledger_path.with_name(paths.ledger_path.name + suffix)
-        if sidecar.exists():
-            sidecar.unlink()
-    paths.ledger_path.unlink()
-    paths.ledger_path.mkdir()
-
-    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
-
-    assert result.machine_outcome is MachineCheckOutcome.NO_GO
-    _assert_activation_never_authorized(result)
-    assert result.reasons == ("precheck_artifact_not_regular_file:ledger",)
-    assert "ledger_unreadable:sqlite_not_a_file" not in result.reasons
-    assert "ledger_unreadable:sqlite_not_a_file" in result.inspection.reasons
+    assert result.reasons == (canonical_reason,)
+    assert diagnostic_reason not in result.reasons
+    assert diagnostic_reason in result.inspection.reasons
+    assert len(result.reasons) == 1
+    for p in db_paths:
+        assert _pfl.sqlite_inspector.sidecar_files(p) == sidecars_before[p]
 
 
 def test_precheck_missing_artifact_keeps_only_inspection_reason(tmp_path: Path) -> None:

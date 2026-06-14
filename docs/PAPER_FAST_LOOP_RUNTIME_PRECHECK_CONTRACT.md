@@ -79,9 +79,11 @@ disagree with the bytes that were hashed.
 ### Precheck-specific reasons
 
 - `precheck_artifact_changed:<name>` — the before fingerprint differs from the
-  after fingerprint for that artifact. Proves the precheck (or anything it
-  invoked) mutated operator state → fail closed `NO_GO`, regardless of the
-  inspection verdict.
+  after fingerprint for that artifact. Proves observable state changed during the
+  precheck window → fail closed `NO_GO`, regardless of the inspection verdict.
+  Does **not** by itself prove the precheck wrote (a concurrent writer or
+  mutate-then-restore within the window can also differ); see net-equality limits
+  below.
 - `precheck_artifact_not_regular_file:<name>` — the artifact is present but not a
   regular file (directory/socket/fifo) and cannot be trusted read-only. Inspect's
   `open_read_only` catches this for the DBs it opens (`sqlite_not_a_file`), but
