@@ -264,6 +264,13 @@ def test_precheck_runtime_pass_when_seeded(
     assert payload["broker_called"] is False
     assert payload["production_db_written"] is False
     assert payload["runtime_file_created"] is False
+    receipt = payload["precheck_receipt"]
+    assert receipt["machine_outcome"] == "pass"
+    assert receipt["activation_authorized"] is False
+    assert receipt["runtime_activation_outcome"] == "no_go"
+    assert receipt["receipt_sha256"]
+    assert len(receipt["receipt_sha256"]) == 64
+    assert payload["activation_authorized"] == receipt["activation_authorized"]
 
 
 def test_precheck_runtime_no_go_when_missing_dbs(
@@ -370,12 +377,13 @@ def _patch_settings_environ_spy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _write_live_config(tmp_path: Path) -> Path:
+    # Live-mode gate mismatch: RuntimeGateError without any ${ENV} or credential env read.
     config_path = tmp_path / "config_live.toml"
     config_path.write_text(
         """
 [trading]
 mode = "live"
-allow_live_trading = true
+allow_live_trading = false
 
 [broker]
 adapter = "kis_live"
@@ -440,12 +448,22 @@ symbol = "${KIS_LIVE_APP_KEY}"
 def test_precheck_runtime_live_config_fails_closed_without_environ_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A live-trading config (which at activation time would need confirmation/credential env)
-    # also fails closed under precheck without reading os.environ.
+    # Live-mode runtime gate mismatch must fail closed under precheck without reading
+    # os.environ — no credential resolution, no confirmation phrase lookup.
     monkeypatch.chdir(tmp_path)
     _patch_settings_environ_spy(monkeypatch)
     config_path = _write_live_config(tmp_path)
-    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    code = cli.main(["--config", str(config_path), "--precheck-runtime", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    combined = captured.out + captured.err
     assert code == 1
     assert payload["outcome"] == "FAIL"
-    assert payload["reason_code"].startswith("config error:")
+    assert payload["reason_code"] == "config error: RuntimeGateError"
+    assert "KIS" not in combined
+    assert "APP_KEY" not in combined
+    assert "APP_SECRET" not in combined
+    assert "Traceback" not in combined
+    assert "RuntimeGateError(" not in combined
+    assert str(config_path) not in json.dumps(payload)
+    assert "allow_live_trading" not in json.dumps(payload)

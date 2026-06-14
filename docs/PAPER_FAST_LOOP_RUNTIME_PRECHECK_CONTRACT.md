@@ -150,14 +150,17 @@ above never touch it before raising.
 
 The read-only proof rests on SQLite **sidecar quiescence**: a quiescent DB (no
 live `-wal`/`-shm`/`-journal`) can be read with `immutable=1`, creating no
-sidecar, and a fingerprint that is byte-identical before/after proves the read
-touched nothing. But sidecar absence proves only **momentary** quiescence at the
-instant of the check. It does **not** prove that every writer process is stopped:
-there is no process scan, no PID inspection, and no OS-level lock acquisition in
-scope. A writer could be paused, or could start immediately after the check.
-Therefore writer-stop is a **machine-unverified manual requirement**
+sidecar. Before/after fingerprint **equality** proves no **net observable
+fingerprint drift** across the precheck window — not that every read path
+touched nothing at every instant, and not that concurrent writers were absent.
+Sidecar absence proves only **momentary** quiescence at the instant of the
+check. It does **not** prove that every writer process is stopped: there is no
+process scan, no PID inspection, and no OS-level lock acquisition in scope. A
+writer could be paused, or could start immediately after the check. Mutate-then-
+restore within the window is also not detected (net fingerprints would still
+match). Therefore writer-stop is a **machine-unverified manual requirement**
 (`writers_stopped_manual_confirmation_required=true`), never inferred from a
-machine `PASS`.
+machine `PASS` or from fingerprint equality alone.
 
 ## Read-only filesystem invariants (proven by tests)
 
@@ -209,7 +212,9 @@ persistent activation-epoch restore.
   `runtime_activation_outcome` (`"no_go"`), `explicit_operator_approval_required`
   (`true`), `writers_stopped_manual_confirmation_required` (`true`), `reasons`,
   `inspection_outcome`, `inspection_reasons`, `missing_databases`,
-  `fingerprints_before` / `fingerprints_after`, and the no-side-effect
+  `fingerprints_before` / `fingerprints_after`, nested `precheck_receipt` (RTM-7c.4d;
+  ephemeral stdout-only observation binding — see
+  `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`), and the no-side-effect
   attestations `network_called` / `credential_read` / `broker_called` /
   `production_db_written` / `runtime_file_created`, all `false`.
 - Internal failures are caught in `main()` and emitted as sanitized

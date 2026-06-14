@@ -195,6 +195,41 @@ def _inspect_summary(inspection: Any, *, config_path: str, enabled: bool) -> dic
     }
 
 
+def _fingerprint_dict(fp: Any) -> dict[str, Any]:
+    return {
+        "name": fp.name,
+        "present": fp.present,
+        "is_regular_file": fp.is_regular_file,
+        "size": fp.size,
+        "sha256": fp.sha256,
+        "user_version": fp.user_version,
+        "sidecar_suffixes": list(fp.sidecar_suffixes),
+    }
+
+
+def _receipt_to_dict(receipt: Any) -> dict[str, Any]:
+    """Sanitized receipt JSON — 경로/config/secret/DB 내용/traceback 제외."""
+    return {
+        "schema_version": receipt.schema_version,
+        "checked_at": receipt.checked_at,
+        "market": receipt.market,
+        "symbol": receipt.symbol,
+        "enabled": receipt.enabled,
+        "machine_outcome": receipt.machine_outcome,
+        "inspection_outcome": receipt.inspection_outcome,
+        "reasons": list(receipt.reasons),
+        "fingerprints_before": [_fingerprint_dict(fp) for fp in receipt.fingerprints_before],
+        "fingerprints_after": [_fingerprint_dict(fp) for fp in receipt.fingerprints_after],
+        "activation_authorized": receipt.activation_authorized,
+        "runtime_activation_outcome": receipt.runtime_activation_outcome,
+        "explicit_operator_approval_required": receipt.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            receipt.writers_stopped_manual_confirmation_required
+        ),
+        "receipt_sha256": receipt.receipt_sha256,
+    }
+
+
 def _precheck_summary(result: Any, *, config_path: str, enabled: bool) -> dict[str, Any]:
     passed = result.machine_outcome is MachineCheckOutcome.PASS
     return {
@@ -216,8 +251,9 @@ def _precheck_summary(result: Any, *, config_path: str, enabled: bool) -> dict[s
         "inspection_outcome": result.inspection.outcome.value,
         "inspection_reasons": list(result.inspection.reasons),
         "missing_databases": list(result.inspection.missing_databases),
-        "fingerprints_before": [asdict(fp) for fp in result.fingerprints_before],
-        "fingerprints_after": [asdict(fp) for fp in result.fingerprints_after],
+        "fingerprints_before": [_fingerprint_dict(fp) for fp in result.fingerprints_before],
+        "fingerprints_after": [_fingerprint_dict(fp) for fp in result.fingerprints_after],
+        "precheck_receipt": _receipt_to_dict(result.receipt),
         "network_called": False,
         "credential_read": False,
         "broker_called": False,

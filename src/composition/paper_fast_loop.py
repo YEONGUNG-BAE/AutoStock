@@ -89,6 +89,8 @@ from orchestration.fast_loop_execution import (
     StaticExecutionInputsProvider,
 )
 
+from decision.canonical_json import payload_sha256
+
 __all__ = [
     "PaperFastLoopPaths",
     "PaperFastLoopOutcome",
@@ -99,6 +101,9 @@ __all__ = [
     "ExecutionInputsInspection",
     "ActiveDecisionInspection",
     "RuntimePrecheckResult",
+    "RuntimePrecheckReceipt",
+    "PRECHECK_RECEIPT_SCHEMA_VERSION",
+    "build_runtime_precheck_receipt",
     "OfflineReplayResult",
     "PaperFastLoopStack",
     "build_offline_paper_fast_loop_stack",
@@ -232,14 +237,42 @@ class PaperFastLoopInspection:
 
 
 @dataclass(frozen=True)
+class RuntimePrecheckReceipt:
+    """Ephemeral stdout-only precheck observation receipt (RTM-7c.4d).
+
+    Binds the mechanical precheck outcome to the exact observed artifact fingerprints and
+    reason set at ``checked_at``. ``receipt_sha256`` is a deterministic identifier for the
+    canonical observation payload — **not** a signature, MAC, approval, runtime authorization,
+    freshness proof, concurrent-writer absence proof, or mutate-then-restore detection.
+    Anyone can recompute the hash from the payload; it carries no trust-anchor semantics.
+    Never persisted to disk by this lane."""
+
+    schema_version: int
+    checked_at: str
+    market: str
+    symbol: str
+    enabled: bool
+    machine_outcome: str
+    inspection_outcome: str
+    reasons: tuple[str, ...]
+    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...]
+    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...]
+    activation_authorized: bool
+    runtime_activation_outcome: str
+    explicit_operator_approval_required: bool
+    writers_stopped_manual_confirmation_required: bool
+    receipt_sha256: str
+
+
+@dataclass(frozen=True)
 class RuntimePrecheckResult:
     """Attended bounded fast-loop runtime precheck verdict (read-only; runs no runtime).
 
     ``machine_outcome`` is the *mechanical* verdict: ``PASS`` only when the reused
     ``inspect_paper_fast_loop`` is OK AND every artifact fingerprint is byte-identical
-    before and after the inspection (proving the precheck mutated nothing). It is **never**
-    an authorization to activate the runtime — the activation fields below are constants that
-    always hold:
+    before and after the inspection (no net observable fingerprint drift across the window).
+    It is **never** an authorization to activate the runtime — the activation fields below
+    (mirrored identically in ``receipt``) are constants that always hold:
 
     * ``activation_authorized`` is always ``False``;
     * ``runtime_activation_outcome`` is always ``"no_go"``;
@@ -265,6 +298,7 @@ class RuntimePrecheckResult:
     fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...]
     fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...]
     reasons: tuple[str, ...]
+    receipt: RuntimePrecheckReceipt
 
 
 @dataclass(frozen=True)
@@ -455,6 +489,114 @@ _IRREGULAR_ARTIFACT_OWNED_INSPECTION_REASONS: dict[str, tuple[str, ...]] = {
     "active_decision_store": ("active_store_unreadable:sqlite_not_a_file",),
 }
 
+PRECHECK_RECEIPT_SCHEMA_VERSION = 1
+
+
+def _precheck_activation_posture() -> dict[str, bool | str]:
+    """단일 출처: precheck/receipt/CLI activation 필드 — drift 방지."""
+    return {
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+    }
+
+
+def _fingerprint_to_receipt_payload(fp: sqlite_inspector.ArtifactFingerprint) -> dict[str, object]:
+    """Receipt canonical hash용 fingerprint dict — 경로/DB 내용/secret 제외."""
+    return {
+        "name": fp.name,
+        "present": fp.present,
+        "is_regular_file": fp.is_regular_file,
+        "size": fp.size,
+        "sha256": fp.sha256,
+        "user_version": fp.user_version,
+        "sidecar_suffixes": list(fp.sidecar_suffixes),
+    }
+
+
+def _build_receipt_hash_payload(
+    *,
+    schema_version: int,
+    checked_at: str,
+    market: str,
+    symbol: str,
+    enabled: bool,
+    machine_outcome: str,
+    inspection_outcome: str,
+    reasons: tuple[str, ...],
+    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+    activation_authorized: bool,
+    runtime_activation_outcome: str,
+    explicit_operator_approval_required: bool,
+    writers_stopped_manual_confirmation_required: bool,
+) -> dict[str, object]:
+    """``receipt_sha256`` 입력 payload — ``receipt_sha256`` 자체는 포함하지 않는다."""
+    return {
+        "schema_version": schema_version,
+        "checked_at": checked_at,
+        "market": market,
+        "symbol": symbol,
+        "enabled": enabled,
+        "machine_outcome": machine_outcome,
+        "inspection_outcome": inspection_outcome,
+        "reasons": list(reasons),
+        "fingerprints_before": [_fingerprint_to_receipt_payload(fp) for fp in fingerprints_before],
+        "fingerprints_after": [_fingerprint_to_receipt_payload(fp) for fp in fingerprints_after],
+        "activation_authorized": activation_authorized,
+        "runtime_activation_outcome": runtime_activation_outcome,
+        "explicit_operator_approval_required": explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": writers_stopped_manual_confirmation_required,
+    }
+
+
+def build_runtime_precheck_receipt(
+    *,
+    checked_at: str,
+    market: str,
+    symbol: str,
+    enabled: bool,
+    machine_outcome: MachineCheckOutcome,
+    inspection_outcome: InspectionOutcome,
+    reasons: tuple[str, ...],
+    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+) -> RuntimePrecheckReceipt:
+    """관찰 상태와 기계적 verdict를 결합한 ephemeral receipt를 생성한다.
+
+    ``checked_at``은 ``precheck_runtime``에 전달된 timezone-aware ``now``의 ISO 문자열이어야
+    한다(별도 clock read 없음). ``receipt_sha256``은 canonical observation identifier이며
+    전자서명·승인·runtime authorization이 아니다."""
+    posture = _precheck_activation_posture()
+    hash_payload = _build_receipt_hash_payload(
+        schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        enabled=enabled,
+        machine_outcome=machine_outcome.value,
+        inspection_outcome=inspection_outcome.value,
+        reasons=reasons,
+        fingerprints_before=fingerprints_before,
+        fingerprints_after=fingerprints_after,
+        **posture,  # type: ignore[arg-type]
+    )
+    return RuntimePrecheckReceipt(
+        schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        enabled=enabled,
+        machine_outcome=machine_outcome.value,
+        inspection_outcome=inspection_outcome.value,
+        reasons=reasons,
+        fingerprints_before=fingerprints_before,
+        fingerprints_after=fingerprints_after,
+        receipt_sha256=payload_sha256(hash_payload),
+        **posture,  # type: ignore[arg-type]
+    )
+
 
 def _fingerprint_artifacts(paths: PaperFastLoopPaths) -> tuple[sqlite_inspector.ArtifactFingerprint, ...]:
     return tuple(
@@ -519,18 +661,28 @@ def precheck_runtime(
     reasons = aggregate_inspection_reasons + tuple(precheck_reasons)
     machine_no_go = inspection.outcome is InspectionOutcome.NO_GO or bool(precheck_reasons)
     machine_outcome = MachineCheckOutcome.NO_GO if machine_no_go else MachineCheckOutcome.PASS
+    posture = _precheck_activation_posture()
+    receipt = build_runtime_precheck_receipt(
+        checked_at=now.isoformat(),
+        market=settings.market,
+        symbol=settings.symbol,
+        enabled=settings.enabled,
+        machine_outcome=machine_outcome,
+        inspection_outcome=inspection.outcome,
+        reasons=reasons,
+        fingerprints_before=before,
+        fingerprints_after=after,
+    )
     return RuntimePrecheckResult(
         machine_outcome=machine_outcome,
-        activation_authorized=False,
-        runtime_activation_outcome="no_go",
-        explicit_operator_approval_required=True,
-        writers_stopped_manual_confirmation_required=True,
         market=settings.market,
         symbol=settings.symbol,
         inspection=inspection,
         fingerprints_before=before,
         fingerprints_after=after,
         reasons=reasons,
+        receipt=receipt,
+        **posture,  # type: ignore[arg-type]
     )
 
 

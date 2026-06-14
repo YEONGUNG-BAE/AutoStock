@@ -267,7 +267,7 @@ Five mutually-exclusive modes (default `--validate-only`):
 |------|-----------|-------|
 | `--validate-only` | 0 if `PASS` (READY), else 1 | snapshot only (no DB open) |
 | `--inspect-existing` | 0 if `PASS` (`OK`), else 1 (`NO_GO`) | read-only, fail-closed |
-| `--precheck-runtime` | 0 if machine `PASS`, else 1 (`NO_GO`) | read-only attended precheck; machine PASS is **not** an activation authorization (see `PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md`) |
+| `--precheck-runtime` | 0 if machine `PASS`, else 1 (`NO_GO`) | read-only attended precheck; machine PASS is **not** an activation authorization; JSON includes nested `precheck_receipt` (RTM-7c.4d — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 

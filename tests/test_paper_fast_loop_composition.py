@@ -29,17 +29,22 @@ from composition.paper_fast_loop import (
     AVAILABLE_REPLAY_FIXTURES,
     InspectionOutcome,
     MachineCheckOutcome,
+    PRECHECK_RECEIPT_SCHEMA_VERSION,
     PaperFastLoopOutcome,
     PaperFastLoopPaths,
+    RuntimePrecheckReceipt,
     _analysis_decision,
     _buy_plan,
     _snapshot,
     build_paper_fast_loop_plan,
     build_replay_snapshot_payload,
+    build_runtime_precheck_receipt,
     inspect_paper_fast_loop,
     precheck_runtime,
     replay_offline,
 )
+from composition import sqlite_inspector
+from composition.sqlite_inspector import ArtifactFingerprint
 from config.settings import RuntimePaperFastLoopSettings
 from decision.canonical_json import canonical_json_dumps, payload_sha256
 from domain import DateId, DecisionId, Percent
@@ -657,11 +662,23 @@ def _precheck_db_paths(settings: RuntimePaperFastLoopSettings, base_dir: Path) -
 
 def _assert_activation_never_authorized(result: Any) -> None:
     # Machine PASS is NEVER an activation authorization: the four activation fields are
-    # constants that must hold regardless of the mechanical verdict.
+    # constants that must hold regardless of the mechanical verdict (outer + receipt).
     assert result.activation_authorized is False
     assert result.runtime_activation_outcome == "no_go"
     assert result.explicit_operator_approval_required is True
     assert result.writers_stopped_manual_confirmation_required is True
+    receipt = result.receipt
+    assert receipt.activation_authorized is False
+    assert receipt.runtime_activation_outcome == "no_go"
+    assert receipt.explicit_operator_approval_required is True
+    assert receipt.writers_stopped_manual_confirmation_required is True
+    assert receipt.activation_authorized == result.activation_authorized
+    assert receipt.runtime_activation_outcome == result.runtime_activation_outcome
+    assert receipt.explicit_operator_approval_required == result.explicit_operator_approval_required
+    assert (
+        receipt.writers_stopped_manual_confirmation_required
+        == result.writers_stopped_manual_confirmation_required
+    )
 
 
 def test_precheck_passes_on_fully_seeded_quiescent_stack(tmp_path: Path) -> None:
@@ -896,3 +913,243 @@ def test_precheck_requires_timezone_aware_now(tmp_path: Path) -> None:
     naive = datetime(2026, 6, 16, 9, 30)
     with pytest.raises(ValueError, match="timezone-aware"):
         precheck_runtime(settings=settings, now=naive, base_dir=tmp_path)
+
+
+# --- RTM-7c.4d ephemeral precheck receipt ---
+
+_CHECKED_AT = "2026-06-16T00:30:00+00:00"
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+
+def _receipt_fingerprint(
+    name: str,
+    *,
+    sha256: str = "ab" * 32,
+    size: int = 4096,
+    sidecar_suffixes: tuple[str, ...] = (),
+    user_version: int | None = 1,
+    is_sqlite: bool = True,
+) -> ArtifactFingerprint:
+    return ArtifactFingerprint(
+        name=name,
+        present=True,
+        is_regular_file=True,
+        size=size,
+        sha256=sha256,
+        user_version=user_version if is_sqlite and name != "execution_inputs_snapshot" else None,
+        sidecar_suffixes=sidecar_suffixes,
+    )
+
+
+def _four_artifact_fingerprints(**overrides: ArtifactFingerprint) -> tuple[ArtifactFingerprint, ...]:
+    names = (
+        "execution_inputs_snapshot",
+        "ledger",
+        "trigger_journal",
+        "active_decision_store",
+    )
+    base = tuple(_receipt_fingerprint(n, is_sqlite=(n != "execution_inputs_snapshot")) for n in names)
+    if not overrides:
+        return base
+    merged = []
+    for fp in base:
+        merged.append(overrides.get(fp.name, fp))
+    return tuple(merged)
+
+
+def _independent_receipt_hash_payload(
+    *,
+    schema_version: int = PRECHECK_RECEIPT_SCHEMA_VERSION,
+    checked_at: str = _CHECKED_AT,
+    market: str = "KR",
+    symbol: str = "005930",
+    enabled: bool = True,
+    machine_outcome: str = "pass",
+    inspection_outcome: str = "ok",
+    reasons: tuple[str, ...] = (),
+    fingerprints_before: tuple[ArtifactFingerprint, ...] | None = None,
+    fingerprints_after: tuple[ArtifactFingerprint, ...] | None = None,
+) -> dict[str, object]:
+    """테스트 전용 — 프로덕션 helper와 별도로 canonical payload를 구성한다."""
+    fps = fingerprints_before or _four_artifact_fingerprints()
+    fpa = fingerprints_after if fingerprints_after is not None else fps
+
+    def _fp_dict(fp: ArtifactFingerprint) -> dict[str, object]:
+        return {
+            "name": fp.name,
+            "present": fp.present,
+            "is_regular_file": fp.is_regular_file,
+            "size": fp.size,
+            "sha256": fp.sha256,
+            "user_version": fp.user_version,
+            "sidecar_suffixes": list(fp.sidecar_suffixes),
+        }
+
+    return {
+        "schema_version": schema_version,
+        "checked_at": checked_at,
+        "market": market,
+        "symbol": symbol,
+        "enabled": enabled,
+        "machine_outcome": machine_outcome,
+        "inspection_outcome": inspection_outcome,
+        "reasons": list(reasons),
+        "fingerprints_before": [_fp_dict(fp) for fp in fps],
+        "fingerprints_after": [_fp_dict(fp) for fp in fpa],
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+    }
+
+
+def _build_pure_receipt(**kwargs: object) -> RuntimePrecheckReceipt:
+    fps = kwargs.pop("fingerprints_before", _four_artifact_fingerprints())
+    fpa = kwargs.pop("fingerprints_after", fps)
+    return build_runtime_precheck_receipt(
+        checked_at=kwargs.pop("checked_at", _CHECKED_AT),
+        market=kwargs.pop("market", "KR"),
+        symbol=kwargs.pop("symbol", "005930"),
+        enabled=kwargs.pop("enabled", True),
+        machine_outcome=kwargs.pop("machine_outcome", MachineCheckOutcome.PASS),
+        inspection_outcome=kwargs.pop("inspection_outcome", InspectionOutcome.OK),
+        reasons=kwargs.pop("reasons", ()),
+        fingerprints_before=fps,
+        fingerprints_after=fpa,
+    )
+
+
+def test_receipt_is_deterministic_for_fixed_observation() -> None:
+    fps = _four_artifact_fingerprints()
+    first = _build_pure_receipt(fingerprints_before=fps, fingerprints_after=fps)
+    second = _build_pure_receipt(fingerprints_before=fps, fingerprints_after=fps)
+    assert first.receipt_sha256 == second.receipt_sha256
+    assert payload_sha256(_independent_receipt_hash_payload()) == first.receipt_sha256
+
+
+@pytest.mark.parametrize(
+    ("field", "override"),
+    [
+        ("sha256", {"ledger": _receipt_fingerprint("ledger", sha256="cd" * 32)}),
+        ("size", {"ledger": _receipt_fingerprint("ledger", size=8192)}),
+        ("sidecar", {"ledger": _receipt_fingerprint("ledger", sidecar_suffixes=("-wal",))}),
+        ("user_version", {"ledger": _receipt_fingerprint("ledger", user_version=2)}),
+        ("market", {}),  # handled via kwargs below
+    ],
+    ids=["sha256", "size", "sidecar", "user_version", "market"],
+)
+def test_receipt_hash_changes_on_state_mutation(field: str, override: dict[str, ArtifactFingerprint]) -> None:
+    baseline = _build_pure_receipt()
+    if field == "market":
+        mutated = _build_pure_receipt(market="US")
+    elif field == "symbol":
+        mutated = _build_pure_receipt(symbol="000660")
+    elif field == "machine_outcome":
+        mutated = _build_pure_receipt(machine_outcome=MachineCheckOutcome.NO_GO)
+    elif field == "reason":
+        mutated = _build_pure_receipt(reasons=("missing_database:ledger",))
+    elif field == "checked_at":
+        mutated = _build_pure_receipt(checked_at="2026-06-16T01:00:00+00:00")
+    else:
+        fps = _four_artifact_fingerprints(**override)
+        mutated = _build_pure_receipt(fingerprints_before=fps, fingerprints_after=fps)
+    assert mutated.receipt_sha256 != baseline.receipt_sha256
+
+
+def test_receipt_hash_changes_on_symbol_machine_reason_and_checked_at() -> None:
+    baseline = _build_pure_receipt()
+    assert _build_pure_receipt(symbol="000660").receipt_sha256 != baseline.receipt_sha256
+    assert (
+        _build_pure_receipt(machine_outcome=MachineCheckOutcome.NO_GO).receipt_sha256
+        != baseline.receipt_sha256
+    )
+    assert (
+        _build_pure_receipt(reasons=("missing_database:ledger",)).receipt_sha256
+        != baseline.receipt_sha256
+    )
+    assert (
+        _build_pure_receipt(checked_at="2026-06-16T01:00:00+00:00").receipt_sha256
+        != baseline.receipt_sha256
+    )
+
+
+def test_receipt_hash_recomputes_independently() -> None:
+    receipt = _build_pure_receipt(reasons=("missing_database:ledger",))
+    independent = _independent_receipt_hash_payload(reasons=("missing_database:ledger",))
+    assert payload_sha256(independent) == receipt.receipt_sha256
+
+
+def test_receipt_json_excludes_sensitive_fields() -> None:
+    receipt = _build_pure_receipt()
+    serialized = json.dumps(
+        {
+            "schema_version": receipt.schema_version,
+            "checked_at": receipt.checked_at,
+            "market": receipt.market,
+            "symbol": receipt.symbol,
+            "reasons": list(receipt.reasons),
+            "receipt_sha256": receipt.receipt_sha256,
+            "fingerprints_before": [
+                {
+                    "name": fp.name,
+                    "sha256": fp.sha256,
+                    "sidecar_suffixes": list(fp.sidecar_suffixes),
+                }
+                for fp in receipt.fingerprints_before
+            ],
+        }
+    )
+    assert "/home/" not in serialized
+    assert _REPO_ROOT not in serialized
+    assert "KIS_" not in serialized
+    assert "APP_KEY" not in serialized
+    assert "APP_SECRET" not in serialized
+    assert "Traceback" not in serialized
+    assert "OperationalError" not in serialized
+
+
+def test_precheck_pass_receipt_binds_observation(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert result.machine_outcome is MachineCheckOutcome.PASS
+    _assert_activation_never_authorized(result)
+    receipt = result.receipt
+    assert receipt.machine_outcome == "pass"
+    assert receipt.inspection_outcome == "ok"
+    assert receipt.checked_at == _NOW.isoformat()
+    assert receipt.market == settings.market
+    assert receipt.symbol == settings.symbol
+    assert receipt.enabled == settings.enabled
+    assert receipt.reasons == result.reasons
+    assert receipt.fingerprints_before == result.fingerprints_before
+    assert receipt.fingerprints_after == result.fingerprints_after
+    independent = _independent_receipt_hash_payload(
+        checked_at=receipt.checked_at,
+        market=receipt.market,
+        symbol=receipt.symbol,
+        enabled=receipt.enabled,
+        machine_outcome=receipt.machine_outcome,
+        inspection_outcome=receipt.inspection_outcome,
+        reasons=receipt.reasons,
+        fingerprints_before=receipt.fingerprints_before,
+        fingerprints_after=receipt.fingerprints_after,
+    )
+    assert payload_sha256(independent) == receipt.receipt_sha256
+
+
+def test_precheck_no_go_receipt_binds_exact_reasons(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _write_snapshot(tmp_path, settings, _snapshot_payload())
+    no_go_result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert no_go_result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(no_go_result)
+    assert "missing_database:ledger" in no_go_result.receipt.reasons
+    assert no_go_result.receipt.reasons == no_go_result.reasons
+
+    pass_dir = tmp_path / "pass"
+    pass_settings = _settings(pass_dir)
+    _seed_valid_stack(pass_dir, pass_settings)
+    pass_result = precheck_runtime(settings=pass_settings, now=_NOW, base_dir=pass_dir)
+    assert pass_result.machine_outcome is MachineCheckOutcome.PASS
+    assert no_go_result.receipt.receipt_sha256 != pass_result.receipt.receipt_sha256
