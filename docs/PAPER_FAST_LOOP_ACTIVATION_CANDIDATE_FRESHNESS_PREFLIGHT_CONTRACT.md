@@ -132,7 +132,16 @@ writers_stopped_manual_confirmation_required = true
 Operator CLI: `ops/run_paper_fast_loop.py --freshness-preflight-activation-candidate`
 
 9th mutually-exclusive mode. Requires stdin raw receipt object, `--config`, and **required**
-`--max-age-microseconds` (strict ASCII decimal `^[0-9]+$`; no default/config/env threshold).
+`--max-age-microseconds`. The token is validated as an **entire-string** ASCII decimal
+(`re.fullmatch(r"[0-9]+", token)`), so **all** whitespace — including a trailing newline,
+`\r`, `\t`, `\v`, `\f`, and leading/embedded whitespace — is rejected (`re.match` + `$` would
+have accepted a trailing `\n`). Only an exact built-in `str` is accepted (`type(raw) is str`),
+so a non-`str` object or a `str` subclass fails closed rather than raising. Integer conversion
+is guarded: a Python integer-string-conversion `ValueError` (a token longer than the runtime
+digit limit) is normalized to `freshness_policy_input_invalid`, never escaping as a traceback;
+only `ValueError` is caught, so `MemoryError`/`KeyboardInterrupt`/`SystemExit` are not
+swallowed. A rejected over-long token is a **CLI-input-invalid** event, **not** a selection of
+any freshness max-age upper bound. No default/config/env threshold.
 
 Recommended invocation:
 
@@ -156,7 +165,10 @@ PYTHONPATH=src uv run python ops/run_paper_fast_loop.py \
 8. `freshness_qualify_activation_candidate(..., policy=ReceiptFreshnessPolicy(...))`
 9. Path-free sanitized JSON/text output
 
-Invalid max-age: stdin read 0, config load 0, env access 0, clock read 0, DB/filesystem 0.
+Invalid max-age (wrong-object, non-ASCII/whitespace token, trailing newline, over-long token,
+or integer-conversion `ValueError`): stdin read 0, config load 0, env access 0, clock read 0,
+DB/filesystem 0, freshness evaluator 0. The raw token, exception type/message, and any
+traceback never appear in stdout/stderr.
 
 ### CLI exit codes
 

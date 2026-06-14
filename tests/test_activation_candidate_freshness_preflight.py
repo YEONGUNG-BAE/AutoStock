@@ -1005,6 +1005,90 @@ def test_freshness_cli_invalid_max_age_no_side_effects(
     assert load_calls == []
 
 
+@pytest.mark.parametrize(
+    "bad_token",
+    ["-1", "1\n", "1 ", " 1", "1.0", "abc", "１２３", "9" * 5000],
+    ids=["negative", "trailing_lf", "trailing_space", "leading_space",
+         "decimal", "alpha", "fullwidth", "overlong"],
+)
+def test_freshness_cli_invalid_max_age_matrix_zero_side_effects(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], bad_token: str
+) -> None:
+    """Every invalid max-age token fails closed before any stdin/config/clock/env access."""
+
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+
+    def _spy_load(*_a: object, **_k: object) -> object:
+        raise AssertionError("config must not load on invalid max-age")
+
+    monkeypatch.setattr(cli, "load_settings", _spy_load)
+
+    class _RaisingDatetime:
+        @staticmethod
+        def now(tz: object = None) -> datetime:
+            raise AssertionError("clock must not read on invalid max-age")
+
+    monkeypatch.setattr(cli, "datetime", _RaisingDatetime)
+    monkeypatch.setattr(_settings_mod, "os", type("_Os", (), {"environ": {}})())
+
+    code, payload = _run_freshness_cli(
+        ["--freshness-preflight-activation-candidate", "--max-age-microseconds", bad_token, "--json"],
+        None,
+        capsys,
+    )
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["reasons"] == ["freshness_policy_input_invalid"]
+    assert payload["max_age_microseconds"] is None
+    assert stdin_reads == []
+    _assert_freshness_posture(payload, policy_evaluated=False)
+    # raw token never echoed; no traceback / ValueError leak.
+    assert bad_token not in combined
+    assert "Traceback" not in combined
+    assert "ValueError" not in combined
+
+
+def test_freshness_cli_conversion_failure_spy_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A deterministic integer-conversion ``ValueError`` is sanitized at the CLI, not raised."""
+
+    import composition.freshness_policy_cli_input as parser_mod
+
+    def _raising_int(_: str) -> int:
+        raise ValueError("POISON_MAX_AGE")
+
+    monkeypatch.setattr(parser_mod, "int", _raising_int, raising=False)
+
+    def _spy_load(*_a: object, **_k: object) -> object:
+        raise AssertionError("config must not load on conversion failure")
+
+    monkeypatch.setattr(cli, "load_settings", _spy_load)
+
+    code, payload = _run_freshness_cli(
+        ["--freshness-preflight-activation-candidate", "--max-age-microseconds", "1", "--json"],
+        None,
+        capsys,
+    )
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["reasons"] == ["freshness_policy_input_invalid"]
+    assert "POISON_MAX_AGE" not in combined
+    assert "Traceback" not in combined
+    assert "ValueError" not in combined
+
+
 def test_freshness_cli_max_age_not_applicable_on_final_preflight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

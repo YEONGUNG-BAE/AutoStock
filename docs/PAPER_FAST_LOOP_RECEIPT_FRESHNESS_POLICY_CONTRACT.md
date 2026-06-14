@@ -118,8 +118,15 @@ the same `ReceiptTimeAssessment` object to this evaluator (required explicit `po
 no default threshold).
 
 **RTM-7c.4m CLI input:** `composition.freshness_policy_cli_input.parse_max_age_microseconds_cli_input`
-parses `--max-age-microseconds` only (strict ASCII decimal; stable reasons
-`freshness_policy_input_missing` / `freshness_policy_input_invalid`). Wired into
+parses `--max-age-microseconds` only. Validation is **entire-token** ASCII decimal
+(`re.fullmatch(r"[0-9]+", token)`), so all whitespace — including a trailing newline — is
+rejected; only an exact built-in `str` is accepted (a non-`str` or `str` subclass fails closed
+rather than raising); and integer conversion is guarded so a Python integer-string-conversion
+`ValueError` (over-long token) is normalized to `freshness_policy_input_invalid` instead of
+escaping (only `ValueError` is caught — `MemoryError`/`KeyboardInterrupt`/`SystemExit` are not
+swallowed). A rejected over-long token is a CLI-input-invalid event, **not** a freshness max-age
+upper-bound policy. Stable reasons `freshness_policy_input_missing` (token absent) /
+`freshness_policy_input_invalid` (everything else); the raw token is never echoed. Wired into
 `--freshness-preflight-activation-candidate` only — not into final-preflight CLI.
 
 **RTM-7c.4l closure — policy snapshot:** `snapshot_receipt_freshness_policy(policy)` validates

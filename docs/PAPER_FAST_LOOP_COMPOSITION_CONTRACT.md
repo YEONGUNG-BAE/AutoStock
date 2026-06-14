@@ -274,7 +274,7 @@ Nine mutually-exclusive modes (default `--validate-only`):
 | `--verify-precheck-receipt` | 0 if `VALID`, else 1 | stdin-only receipt schema + hash verification; no config/env/DB/fs write (RTM-7c.4e — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`) |
 | `--revalidate-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); read-only approval-time state revalidation; mechanical PASS is **not** activation authorization (RTM-7c.4g — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md`) |
 | `--final-preflight-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); composes 4g revalidation + policy-neutral receipt time observation (exact `receipt_age_microseconds`; future `checked_at` fail-closed) + fresh current-time precheck (`now=datetime.now(tz=KST)`); catches byte-identical time-window expiry; the untrusted receipt is verified and frozen into one immutable snapshot **once** and both the revalidation and receipt-time stages read that same snapshot (RTM-7c.4j — receipt verifier called exactly once per preflight, no cross-stage mixed observation); path-free summary (no `config` field); `freshness_policy_evaluated=false` always — explicit max-age evaluation is **not** composed into this CLI mode; mechanical PASS is **not** activation authorization (RTM-7c.4h + 7c.4i + 7c.4j — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md`, `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`) |
-| `--freshness-preflight-activation-candidate` | 0 if freshness-qualified mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`) + **required** `--max-age-microseconds` (strict ASCII decimal parser; no default/config/env threshold); composes verified final preflight + explicit freshness policy (`now=datetime.now(tz=KST)`); path-free summary; mechanical FRESH PASS is **not** activation authorization (RTM-7c.4m — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`) |
+| `--freshness-preflight-activation-candidate` | 0 if freshness-qualified mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`) + **required** `--max-age-microseconds` (strict entire-token ASCII decimal parser via `re.fullmatch` — rejects trailing newline / all whitespace / non-`str` / over-long-token `ValueError`; no default/config/env threshold); composes verified final preflight + explicit freshness policy (`now=datetime.now(tz=KST)`); path-free summary; mechanical FRESH PASS is **not** activation authorization (RTM-7c.4m — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 
@@ -309,9 +309,15 @@ Nine mutually-exclusive modes (default `--validate-only`):
 
 API: `freshness_qualify_activation_candidate` (required explicit `ReceiptFreshnessPolicy`).
 CLI (RTM-7c.4m): `--freshness-preflight-activation-candidate` with required
-`--max-age-microseconds` (strict ASCII decimal; no default/config/env threshold).
-Closure processing order: max-age parse → policy snapshot → shared `now` guard → receipt
-snapshot → verified final core → freshness evaluation (snapshot policy).
+`--max-age-microseconds`. The parser validates the **entire token** as ASCII decimal
+(`re.fullmatch`), rejecting all whitespace (incl. a trailing newline) and any non-`str` /
+`str`-subclass object, and normalizes an integer-conversion `ValueError` (over-long token) to
+`freshness_policy_input_invalid` without leaking a traceback — a rejected over-long token is a
+CLI-input-invalid event, not a max-age upper-bound policy. No default/config/env threshold.
+Invalid max-age fails closed before stdin read, config load, env access, clock read, DB/
+filesystem access, and freshness evaluation. Closure processing order: max-age parse → policy
+snapshot → shared `now` guard → receipt snapshot → verified final core → freshness evaluation
+(snapshot policy).
 `--final-preflight-activation-candidate` and the policy-neutral wrapper remain unchanged
 (`freshness_policy_evaluated=false`). See
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`.

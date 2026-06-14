@@ -2,6 +2,15 @@
 
 Parses ``--max-age-microseconds`` only. No default threshold, no config/env binding,
 no implicit coercion of non-ASCII digits or scientific notation.
+
+The token is validated as an **entire-string** ASCII decimal (``fullmatch``), so any
+surrounding/embedded whitespace — including a trailing newline — is rejected; ``re.match``
+plus ``$`` would have accepted a trailing ``\\n``. Only an exact built-in ``str`` is accepted
+(``type(raw) is str``), so a non-``str`` object or a ``str`` subclass fails closed rather than
+raising. Integer conversion is guarded: a Python integer-string-conversion ``ValueError`` (a
+token longer than the runtime digit limit) is normalized to the stable invalid reason, never
+escaping as a traceback. A rejected over-long token is a CLI-input-invalid event, **not** a
+selection of any freshness max-age upper bound.
 """
 
 from __future__ import annotations
@@ -12,10 +21,10 @@ __all__ = [
     "parse_max_age_microseconds_cli_input",
 ]
 
-_ASCII_DECIMAL = re.compile(r"^[0-9]+$")
+_ASCII_DECIMAL = re.compile(r"[0-9]+")
 
 
-def parse_max_age_microseconds_cli_input(raw: str | None) -> tuple[int | None, str | None]:
+def parse_max_age_microseconds_cli_input(raw: object) -> tuple[int | None, str | None]:
     """Parse explicit CLI max-age microsecond token.
 
     Returns ``(value, None)`` on success or ``(None, reason_code)`` on failure.
@@ -23,7 +32,12 @@ def parse_max_age_microseconds_cli_input(raw: str | None) -> tuple[int | None, s
 
     if raw is None:
         return None, "freshness_policy_input_missing"
-    if not _ASCII_DECIMAL.match(raw):
+    if type(raw) is not str:
         return None, "freshness_policy_input_invalid"
-    # ``^[0-9]+$`` guarantees a non-empty ASCII decimal; ``int`` is exact built-in.
-    return int(raw), None
+    if _ASCII_DECIMAL.fullmatch(raw) is None:
+        return None, "freshness_policy_input_invalid"
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, "freshness_policy_input_invalid"
+    return value, None
