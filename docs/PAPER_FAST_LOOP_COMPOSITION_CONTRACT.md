@@ -377,8 +377,9 @@ Production validation does not use `asdict`/`deepcopy` on caller evidence. Combi
 non-exact declarations, invalid `declared_at`, or qualified identity/posture mismatch →
 `INVALID`. **Declared-time snapshot:** `snapshot_declared_at` freezes caller `declared_at` via
 one `isoformat()` call; stateful tzinfo cannot escape after snapshot. **Qualified consistency:**
-combined `PASS` requires qualified `PASS` identity/posture matching validated evidence. Pure
-function: no clock read, no verifier/precheck/evaluator/evidence-builder re-invocation, no
+combined `PASS` requires qualified `PASS` identity/posture matching validated evidence.
+**Strict scalar comparison:** PASS reasons exact empty tuple; qualified strings exact built-in
+`str` before equality — no caller comparison hooks. Pure function: no clock read, no verifier/precheck/evaluator/evidence-builder re-invocation, no
 persistence. Intent is **not** identity, signature, writer-stop machine proof, approval
 consumption, replay prevention, or activation authorization. The existing CLI
 `--freshness-preflight-activation-candidate` is unchanged (evidence fields only). See

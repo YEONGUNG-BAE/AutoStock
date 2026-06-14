@@ -762,6 +762,214 @@ def test_qualified_single_read_locals_snippets_in_source() -> None:
         assert snippet in source
 
 
+# --- RTM-7c.4o strict result-scalar comparison closure ---
+
+
+class _AlwaysEqual:
+    """모든 equality 비교를 True로 우회하는 poison scalar."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _PoisonCompare:
+    """equality 비교 시 RuntimeError를 발생시키는 poison scalar."""
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("POISON_QUALIFIED_COMPARE")
+
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError("POISON_QUALIFIED_COMPARE")
+
+
+class _StrSub(str):
+    """built-in str subclass — exact type guard 거부 대상."""
+
+
+class _TupleSub(tuple):
+    """built-in tuple subclass — exact empty-reasons 거부 대상."""
+
+
+_FORBIDDEN_OUTPUT = (
+    "POISON_QUALIFIED_COMPARE",
+    "RuntimeError",
+    "Traceback",
+    "/home/",
+    "KIS_",
+    "APP_KEY",
+    "APP_SECRET",
+)
+
+
+def _assert_invalid_no_escape(result: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    captured = capsys.readouterr()
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    assert result.reasons == ("approval_intent_invalid_input",)
+    assert result.intent is None
+    combined = captured.out + captured.err
+    for forbidden in _FORBIDDEN_OUTPUT:
+        assert forbidden not in combined
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param("receipt_sha256", id="receipt_sha256"),
+        pytest.param("market", id="market"),
+        pytest.param("symbol", id="symbol"),
+        pytest.param("runtime_activation_outcome", id="runtime_activation_outcome"),
+    ],
+)
+def test_always_equal_qualified_scalar_is_invalid(
+    field: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    qualified = replace(ev_helper._qualified_pass(), **{field: _AlwaysEqual()})
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    _assert_invalid_no_escape(result, capsys)
+
+
+@pytest.mark.parametrize(
+    "target,field",
+    [
+        pytest.param("combined", "reasons", id="combined_reasons"),
+        pytest.param("evidence_result", "reasons", id="evidence_result_reasons"),
+        pytest.param("qualified", "reasons", id="qualified_reasons"),
+        pytest.param("qualified", "receipt_sha256", id="qualified_receipt_sha256"),
+        pytest.param("qualified", "market", id="qualified_market"),
+        pytest.param("qualified", "symbol", id="qualified_symbol"),
+        pytest.param("qualified", "runtime_activation_outcome", id="qualified_runtime"),
+    ],
+)
+def test_poison_compare_scalar_is_invalid_without_escape(
+    target: str, field: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    poison = _PoisonCompare()
+    if target == "combined":
+        combined = _combined_pass(**{field: poison})
+    elif target == "evidence_result":
+        er = _combined_pass().evidence_result
+        assert er is not None
+        combined = _combined_pass(evidence_result=replace(er, **{field: poison}))
+    else:
+        qualified = replace(ev_helper._qualified_pass(), **{field: poison})
+        combined = _combined_pass(qualified_result=qualified)
+    result = build_operator_approval_intent(
+        combined_result=combined,
+        declared_at=_DECL_AT,
+        operator_approval_declared=True,
+        writers_stopped_manually_confirmed=True,
+        live_orders_forbidden_confirmed=True,
+    )
+    _assert_invalid_no_escape(result, capsys)
+
+
+@pytest.mark.parametrize(
+    "target,bad",
+    [
+        pytest.param("combined", ("x",), id="combined_nonempty"),
+        pytest.param("combined", [], id="combined_list"),
+        pytest.param("combined", None, id="combined_none"),
+        pytest.param("combined", "", id="combined_str"),
+        pytest.param("combined", object(), id="combined_object"),
+        pytest.param("combined", _TupleSub(), id="combined_tuple_subclass"),
+        pytest.param("combined", _AlwaysEqual(), id="combined_always_equal"),
+        pytest.param("combined", _PoisonCompare(), id="combined_poison"),
+        pytest.param("evidence_result", ("x",), id="er_nonempty"),
+        pytest.param("evidence_result", [], id="er_list"),
+        pytest.param("evidence_result", None, id="er_none"),
+        pytest.param("evidence_result", _AlwaysEqual(), id="er_always_equal"),
+        pytest.param("evidence_result", _PoisonCompare(), id="er_poison"),
+        pytest.param("qualified", ("x",), id="qr_nonempty"),
+        pytest.param("qualified", [], id="qr_list"),
+        pytest.param("qualified", None, id="qr_none"),
+        pytest.param("qualified", _AlwaysEqual(), id="qr_always_equal"),
+        pytest.param("qualified", _PoisonCompare(), id="qr_poison"),
+    ],
+)
+def test_non_exact_empty_reasons_is_invalid(
+    target: str, bad: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if target == "combined":
+        combined = _combined_pass(reasons=bad)  # type: ignore[arg-type]
+    elif target == "evidence_result":
+        er = _combined_pass().evidence_result
+        assert er is not None
+        combined = _combined_pass(evidence_result=replace(er, reasons=bad))  # type: ignore[arg-type]
+    else:
+        qualified = replace(ev_helper._qualified_pass(), reasons=bad)  # type: ignore[arg-type]
+        combined = _combined_pass(qualified_result=qualified)
+    result = build_operator_approval_intent(
+        combined_result=combined,
+        declared_at=_DECL_AT,
+        operator_approval_declared=True,
+        writers_stopped_manually_confirmed=True,
+        live_orders_forbidden_confirmed=True,
+    )
+    _assert_invalid_no_escape(result, capsys)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        pytest.param("receipt_sha256", _StrSub("a" * 64), id="receipt_str_subclass"),
+        pytest.param("receipt_sha256", None, id="receipt_none"),
+        pytest.param("receipt_sha256", 0, id="receipt_int"),
+        pytest.param("receipt_sha256", b"hash", id="receipt_bytes"),
+        pytest.param("receipt_sha256", _AlwaysEqual(), id="receipt_always_equal"),
+        pytest.param("receipt_sha256", _PoisonCompare(), id="receipt_poison"),
+        pytest.param("market", _StrSub("KR"), id="market_str_subclass"),
+        pytest.param("market", None, id="market_none"),
+        pytest.param("market", _AlwaysEqual(), id="market_always_equal"),
+        pytest.param("market", _PoisonCompare(), id="market_poison"),
+        pytest.param("symbol", _StrSub("005930"), id="symbol_str_subclass"),
+        pytest.param("symbol", None, id="symbol_none"),
+        pytest.param("symbol", _AlwaysEqual(), id="symbol_always_equal"),
+        pytest.param("symbol", _PoisonCompare(), id="symbol_poison"),
+        pytest.param("runtime_activation_outcome", _StrSub("no_go"), id="runtime_str_subclass"),
+        pytest.param("runtime_activation_outcome", None, id="runtime_none"),
+        pytest.param("runtime_activation_outcome", _AlwaysEqual(), id="runtime_always_equal"),
+        pytest.param("runtime_activation_outcome", _PoisonCompare(), id="runtime_poison"),
+    ],
+)
+def test_qualified_non_exact_string_scalar_is_invalid(
+    field: str, bad: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    qualified = replace(ev_helper._qualified_pass(), **{field: bad})
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    _assert_invalid_no_escape(result, capsys)
+
+
+def test_strict_scalar_source_guards() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "operator_approval_intent.py"
+    ).read_text(encoding="utf-8")
+    for forbidden in (
+        "combined_reasons != ()",
+        "combined_reasons == ()",
+        "er_reasons != ()",
+        "er_reasons == ()",
+        "qr_reasons != ()",
+        "qr_reasons == ()",
+    ):
+        assert forbidden not in source
+    for required in (
+        "_is_exact_empty_reasons(combined_reasons)",
+        "_is_exact_empty_reasons(er_reasons)",
+        "_is_exact_empty_reasons(qr_reasons)",
+        "type(qr_receipt_sha256) is not str",
+        "type(qr_market) is not str",
+        "type(qr_symbol) is not str",
+        "type(qr_runtime) is not str",
+    ):
+        assert required in source
+
+
 # --- canonical hash determinism ---
 
 
@@ -828,6 +1036,10 @@ def test_builder_uses_single_read_locals_for_combined_and_evidence() -> None:
     assert "asdict(evidence)" not in source
     assert "declared_at.isoformat()" not in source
     assert "final_preflight_now_is_invalid" not in source
+    assert "combined_reasons != ()" not in source
+    assert "er_reasons != ()" not in source
+    assert "qr_reasons != ()" not in source
+    assert "_is_exact_empty_reasons(combined_reasons)" in source
 
 
 # --- isolation ---

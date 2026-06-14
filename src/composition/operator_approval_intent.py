@@ -123,8 +123,8 @@ def build_operator_approval_intent(
     if combined_outcome is not FreshnessQualifiedEvidenceOutcome.PASS:
         return _invalid()
 
-    # A combined PASS with non-empty reasons is contradictory — fail closed.
-    if combined_reasons != ():
+    # A combined PASS with contradictory reasons fail closed — exact empty tuple only.
+    if not _is_exact_empty_reasons(combined_reasons):
         return _invalid()
 
     if type(evidence_result) is not ActivationCandidateEvidenceResult:
@@ -140,7 +140,7 @@ def build_operator_approval_intent(
 
     if er_outcome is not ActivationCandidateEvidenceOutcome.CREATED:
         return _invalid()
-    if er_reasons != ():
+    if not _is_exact_empty_reasons(er_reasons):
         return _invalid()
     if evidence is None:
         return _invalid()
@@ -208,19 +208,19 @@ def build_operator_approval_intent(
 
     if qr_outcome is not ActivationCandidateFreshnessPreflightOutcome.PASS:
         return _invalid()
-    if qr_reasons != ():
+    if not _is_exact_empty_reasons(qr_reasons):
         return _invalid()
-    if qr_receipt_sha256 != validated.receipt_sha256:
+    if type(qr_receipt_sha256) is not str or qr_receipt_sha256 != validated.receipt_sha256:
         return _invalid()
-    if qr_market != validated.market:
+    if type(qr_market) is not str or qr_market != validated.market:
         return _invalid()
-    if qr_symbol != validated.symbol:
+    if type(qr_symbol) is not str or qr_symbol != validated.symbol:
         return _invalid()
     if not _exact_true_bool(qr_freshness_policy_evaluated):
         return _invalid()
     if not _exact_false_bool(qr_activation):
         return _invalid()
-    if qr_runtime != "no_go":
+    if type(qr_runtime) is not str or qr_runtime != "no_go":
         return _invalid()
     if not _exact_true_bool(qr_explicit_approval):
         return _invalid()
@@ -333,6 +333,12 @@ def snapshot_declared_at(value: object) -> tuple[str, datetime] | None:
     if offset is None:
         return None
     return (canonical_iso, parsed)
+
+
+def _is_exact_empty_reasons(value: object) -> bool:
+    """Exact built-in empty tuple only — caller ``__eq__``/``__ne__`` hook을 실행하지 않는다."""
+
+    return type(value) is tuple and len(value) == 0
 
 
 def _exact_true_bool(value: object) -> bool:

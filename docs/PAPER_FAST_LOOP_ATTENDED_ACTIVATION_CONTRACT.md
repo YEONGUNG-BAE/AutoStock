@@ -145,7 +145,10 @@ on caller evidence. **Declared-time snapshot closure:** `snapshot_declared_at` o
 after snapshot. **Combined-PASS qualified consistency closure:** combined `PASS` also requires
 a consistent qualified `PASS` identity/posture matching validated evidence (receipt hash,
 market, symbol, freshness-policy flag, constant NO-GO posture, approval/writer flags); evidence
-semantic validation remains owned by the shared validator. Intent is **not** identity, signature,
+semantic validation remains owned by the shared validator. **Strict result-scalar comparison
+closure:** PASS reasons require exact built-in empty tuple; qualified identity/runtime scalars
+require exact built-in `str` before equality — caller `__eq__`/`__ne__` hooks are not invoked.
+Intent is **not** identity, signature,
 writer-stop machine proof, approval consumption, replay prevention, or activation authorization;
 it is never persisted and is not wired into CLI in this lane. Approval consumption and activation
 caller remain **OPEN**.

@@ -105,6 +105,15 @@ nested final/freshness machine proof. Combined PASS with contradictory qualified
 (e.g. qualified `NO_GO`, identity mismatch, wrong object/subclass, posture mismatch) →
 `INVALID`.
 
+**RTM-7c.4o strict result-scalar comparison closure:** Exact result dataclass type alone
+does not trust field runtime types. PASS-path reasons (`combined_reasons`, `er_reasons`,
+`qr_reasons`) require exact built-in empty tuple via `_is_exact_empty_reasons` — never
+`value == ()` / `value != ()` (caller `__eq__`/`__ne__` hooks are not invoked). Qualified
+identity/runtime scalars (`receipt_sha256`, `market`, `symbol`, `runtime_activation_outcome`)
+require `type(value) is str` before built-in string equality; str subclass, arbitrary object,
+custom always-equal, or raising comparator → `INVALID` with no exception escape. Malformed
+comparison objects surface only the stable reason `approval_intent_invalid_input`.
+
 Combined `NO_GO` → `NOT_ELIGIBLE` (`approval_intent_not_eligible`). A contradictory combined
 `PASS` (non-empty reasons, missing/`None`/wrong-type evidence result, evidence not `CREATED`,
 semantically invalid evidence even with matching hash, hash mismatch, invalid declarations, or
@@ -195,6 +204,10 @@ and `evidence_result` are read once from the combined result; qualified identity
 scalars are read once from `qualified_result`. No post-validation re-read of caller
 combined/qualified objects.
 
+**Strict scalar comparison:** `_is_exact_empty_reasons` validates PASS-path reasons as
+exact built-in empty tuple (no `== ()`). Qualified string scalars use `type(value) is str`
+before equality — caller-defined comparison hooks are never invoked.
+
 Production validation does **not** use `dataclasses.asdict` or `copy.deepcopy` on
 caller-owned evidence. Caller-defined `__deepcopy__` hooks are never invoked. After the
 single-read snapshot, strict semantic validation runs via the shared
@@ -225,6 +238,15 @@ Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
 - Combined `PASS` requires consistent qualified `PASS` identity/posture (receipt hash, market,
   symbol, freshness-policy flag, constant NO-GO posture, approval/writer flags).
 - Evidence semantic validation remains owned by the shared evidence validator.
+- Intent remains unauthenticated, unconsumed, unpersisted; activation remains NO-GO.
+
+## RTM-7c.4o strict result-scalar comparison closure
+
+- Exact result dataclass type does not trust field runtime types.
+- PASS reasons require exact built-in empty tuple (`_is_exact_empty_reasons`).
+- Qualified identity/runtime requires exact built-in `str` before equality.
+- Caller-defined equality hooks are not used in validation.
+- Malformed comparison objects → stable `approval_intent_invalid_input`.
 - Intent remains unauthenticated, unconsumed, unpersisted; activation remains NO-GO.
 
 ## Integration scope (this lane)
