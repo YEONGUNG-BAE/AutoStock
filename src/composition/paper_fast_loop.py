@@ -440,6 +440,21 @@ _PRECHECK_ARTIFACTS: tuple[tuple[str, str, bool], ...] = (
     ("active_decision_store", "active_decision_store_path", True),
 )
 
+# Inspection reasons a *present-but-irregular* artifact (directory/socket/fifo) produces,
+# keyed by precheck artifact name. When the precheck ``not_regular_file`` reason fires for an
+# artifact, these are dropped from the AGGREGATE reasons (kept in ``inspection.reasons``) so a
+# single root cause yields a single canonical reason. Note the inspection reason prefixes differ
+# from the artifact names (``trigger_journal`` → ``journal_unreadable``,
+# ``active_decision_store`` → ``active_store_unreadable``). An irregular SQLite path fails
+# ``open_read_only`` with ``sqlite_not_a_file``; an irregular JSON snapshot fails to load and the
+# inspect layer maps the unexpected error to the generic ``execution_inputs_invalid``.
+_IRREGULAR_ARTIFACT_OWNED_INSPECTION_REASONS: dict[str, tuple[str, ...]] = {
+    "execution_inputs_snapshot": ("execution_inputs_invalid",),
+    "ledger": ("ledger_unreadable:sqlite_not_a_file",),
+    "trigger_journal": ("journal_unreadable:sqlite_not_a_file",),
+    "active_decision_store": ("active_store_unreadable:sqlite_not_a_file",),
+}
+
 
 def _fingerprint_artifacts(paths: PaperFastLoopPaths) -> tuple[sqlite_inspector.ArtifactFingerprint, ...]:
     return tuple(
@@ -476,19 +491,31 @@ def precheck_runtime(
     after = _fingerprint_artifacts(paths)
 
     precheck_reasons: list[str] = []
+    irregular_names: set[str] = set()
     # A present-but-irregular artifact (directory/socket/fifo) cannot be trusted read-only.
     # Inspect's open_read_only catches this for the DBs it opens (``sqlite_not_a_file``), but
     # not for the JSON snapshot, so the fingerprint covers all four uniformly, fail-closed.
     for fb in before:
         if fb.present and not fb.is_regular_file:
             precheck_reasons.append(f"precheck_artifact_not_regular_file:{fb.name}")
+            irregular_names.add(fb.name)
     # Read-only proof: every artifact must be byte-identical (and same sidecar set) across
     # the inspection. Any difference means the precheck mutated operator state → NO_GO.
     for fb, fa in zip(before, after):
         if fb != fa:
             precheck_reasons.append(f"precheck_artifact_changed:{fb.name}")
 
-    reasons = tuple(inspection.reasons) + tuple(precheck_reasons)
+    # Single canonical reason per root cause: when an artifact is present-but-irregular, the
+    # precheck ``not_regular_file`` reason OWNS that condition; drop the inspection layer's
+    # generic unreadable/invalid reason for the SAME artifact from the AGGREGATE (it is kept
+    # verbatim in ``inspection.reasons`` for diagnostics), so an irregular artifact surfaces
+    # as exactly one reason — matching the missing/dangling/identity single-reason precedent.
+    owned_to_drop: set[str] = set()
+    for name in irregular_names:
+        owned_to_drop.update(_IRREGULAR_ARTIFACT_OWNED_INSPECTION_REASONS.get(name, ()))
+    aggregate_inspection_reasons = tuple(r for r in inspection.reasons if r not in owned_to_drop)
+
+    reasons = aggregate_inspection_reasons + tuple(precheck_reasons)
     machine_no_go = inspection.outcome is InspectionOutcome.NO_GO or bool(precheck_reasons)
     machine_outcome = MachineCheckOutcome.NO_GO if machine_no_go else MachineCheckOutcome.PASS
     return RuntimePrecheckResult(

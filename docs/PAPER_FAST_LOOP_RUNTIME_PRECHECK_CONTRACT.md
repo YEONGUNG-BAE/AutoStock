@@ -63,11 +63,18 @@ timezone-aware; naive → `ValueError`):
 
 `present`, `is_regular_file`, `size`, byte SHA-256 of the main file, SQLite
 `user_version`, and the sidecar-suffix set. The `user_version` is read from the
-**SQLite header bytes** (4-byte big-endian integer at offset 60) by reading the
-file's bytes — **not** by opening a connection. Opening a WAL-mode database, even
-read-only, can materialize a `-shm`/`-wal` sidecar; reading header bytes never
-does. A non-SQLite artifact (the JSON snapshot) has `user_version=0` and an empty
-sidecar set.
+**SQLite header bytes** (4-byte big-endian integer at offset 60) — captured from
+the first 100 bytes of the file — **not** by opening a connection. Opening a
+WAL-mode database, even read-only, can materialize a `-shm`/`-wal` sidecar;
+reading header bytes never does. A non-SQLite artifact (the JSON snapshot), an
+absent file, and a file too short or without the SQLite magic all yield
+`user_version = null` (Python `None`) and an empty sidecar set.
+
+**Memory-bounded hashing.** The SHA-256 is computed by streaming the file in
+fixed-size (1 MiB) chunks; the file is never loaded into memory in full, so peak
+memory is bounded regardless of how large the ledger/journal/active-store grows.
+`size` is the actual byte count read in that single sequential pass, so it cannot
+disagree with the bytes that were hashed.
 
 ### Precheck-specific reasons
 
@@ -80,6 +87,20 @@ sidecar set.
   `open_read_only` catches this for the DBs it opens (`sqlite_not_a_file`), but
   not for the JSON snapshot, so the fingerprint covers all four uniformly.
 
+### Single canonical reason per root cause (irregular artifact)
+
+When a present-but-irregular artifact triggers `precheck_artifact_not_regular_file:<name>`,
+that precheck reason **owns** the condition: the inspection layer's generic
+unreadable/invalid reason for the *same* artifact (`<db>_unreadable:sqlite_not_a_file`
+for a DB, `execution_inputs_invalid` for the snapshot) is **dropped from the
+aggregate `reasons`** so a single root cause surfaces as a single reason. The raw
+inspection reason is retained verbatim in `inspection.reasons` (the
+`RuntimePrecheckResult.inspection` sub-object) for diagnostics. This matches the
+missing / dangling-pointer / identity / plan-consistency single-reason precedents.
+A *missing* artifact is different: precheck adds no `precheck_artifact_*` reason
+for it, so no dedup applies and the inspection's `missing_database:<db>` /
+`missing_execution_inputs_snapshot` passes through unchanged.
+
 ### `precheck_artifact_missing` is deliberately NOT emitted — drift avoidance
 
 A missing artifact is reported **only** by the reused inspection layer
@@ -90,6 +111,38 @@ precedent: one canonical reason per condition, owned by one layer, so verdicts d
 not drift between two codes for the same fact. A precheck reason fires only for
 conditions the inspect layer does **not** already own (post-hoc mutation;
 present-but-irregular file).
+
+## Credential / environment isolation (zero env read through config loading)
+
+`credential_read=false` is a **constant** in the precheck summary, so the
+config-loading path must actually read no environment variable or secret — the
+constant must not be able to lie. The standard CLI loads settings with
+`load_settings(args.config)` (`environ=None`), which resolves `${ENV}`
+placeholders and runtime safety gates against `os.environ`; a config containing
+`${KIS_LIVE_APP_KEY}` would therefore read the live secret during precheck. To
+make the constant true, **precheck mode loads config with an explicitly empty
+environ**: `load_settings(args.config, environ={})`. The conditional
+`os.environ if environ is None else environ` short-circuits — with `environ={}`
+(not `None`) the `os.environ` operand is never evaluated, so the process
+environment is never touched.
+
+Consequences, all fail-closed and all sanitized:
+
+- A config with **any** `${...}` placeholder raises `ConfigEnvironmentError`
+  (empty environ → unresolved) → CLI `except (SettingsError, OSError)` →
+  `config error: ConfigEnvironmentError`. The placeholder name and any secret
+  value never appear in output.
+- A live-mode config that depends on env confirmation/credential gates fails the
+  runtime safety gate (`RuntimeGateError`, `{}.get(...)=None`) → same sanitized
+  `config error: <Type>`.
+- A fully literal (no-`${...}`) seeded config loads and prechecks normally with
+  **zero** environ access.
+
+This is proven by real env-access spy tests (`tests/test_run_paper_fast_loop.py`)
+that replace `config.settings.os` with a shim whose `.environ` raises on
+`__getitem__` / `__contains__` / `get` / iteration / `keys` / `copy`. The spy
+records **zero** access on a normal precheck and the two fail-closed configs
+above never touch it before raising.
 
 ## Quiescence semantic limit (why writer-stop stays manual)
 
@@ -116,6 +169,24 @@ machine `PASS`.
 - A simulated mutation during the inspection window is detected as
   `precheck_artifact_changed:<name>` and fails closed even when the inspection
   itself reports `OK`.
+
+### What net before/after equality does and does not prove
+
+Byte-identical before/after fingerprints prove that, **across the precheck
+window as a whole**, the four artifacts ended in the same observable state they
+started in — sufficient to show the precheck's own reused inspection did not
+leave a net mutation. It is a net, end-to-end check, not a continuous one, so it
+deliberately does **not** claim:
+
+- **Concurrent-writer absence.** Equality at two instants says nothing about
+  whether some *other* process is writing; that is exactly why writer-stop stays
+  a manual requirement (see quiescence limit above).
+- **Mutate-then-restore detection.** If something wrote a byte and then restored
+  the identical bytes (and any SQLite sidecars) entirely within the window, the
+  net fingerprints would still match. The check detects *net* drift, not every
+  transient intermediate state. This is acceptable because the precheck itself
+  performs no writes and the manual writer-stop gate, not the fingerprint,
+  carries the no-concurrent-writer guarantee.
 
 ## Hard scope-out (this lane does none of these)
 

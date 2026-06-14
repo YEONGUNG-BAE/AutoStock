@@ -497,3 +497,75 @@ def test_active_decision_malformed_validity_is_corrupt(
     verdict = inspect_active_decision(path, symbol="005930", market="KR")
     assert verdict.integrity_ok is False
     assert verdict.integrity_reason == "corrupt"
+
+
+# --- RTM-7c.4c safety closure: bounded streaming fingerprint ---
+
+import hashlib as _hashlib  # noqa: E402
+
+from composition.sqlite_inspector import fingerprint_artifact  # noqa: E402
+
+
+def test_fingerprint_streams_and_does_not_load_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Memory-bounded proof: fingerprint must NOT call Path.read_bytes (whole-file load).
+    # A multi-chunk file (> 1 MiB chunk size) still hashes correctly via streaming.
+    import composition.sqlite_inspector as _si
+
+    def _boom(self: Path) -> bytes:  # pragma: no cover - must never be called
+        raise AssertionError("fingerprint must not read the whole file via read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    blob = b"abcd" * (_si._FINGERPRINT_CHUNK_BYTES // 4 + 7)  # spans >1 chunk, non-aligned tail
+    target = tmp_path / "ledger.sqlite3"
+    target.write_bytes(blob)
+
+    fp = fingerprint_artifact(target, name="ledger", is_sqlite=True)
+    assert fp.present is True and fp.is_regular_file is True
+    assert fp.size == len(blob)
+    assert fp.sha256 == _hashlib.sha256(blob).hexdigest()
+    # Not a real SQLite header → user_version is None (no connection opened).
+    assert fp.user_version is None
+
+
+def test_fingerprint_user_version_from_streamed_header(tmp_path: Path) -> None:
+    # user_version parsed from the first 100 header bytes of a real SQLite DB, no connection.
+    db = tmp_path / "real.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 4242")
+    conn.execute("CREATE TABLE t (x)")
+    conn.commit()
+    conn.close()
+    # Drain any -wal/-shm sidecar so the fingerprint reads a quiescent main file.
+    for suffix in ("-wal", "-shm", "-journal"):
+        side = db.with_name(db.name + suffix)
+        if side.exists():
+            side.unlink()
+
+    fp = fingerprint_artifact(db, name="ledger", is_sqlite=True)
+    assert fp.user_version == 4242
+    assert fp.sha256 == _hashlib.sha256(db.read_bytes()).hexdigest()
+    assert fp.size == db.stat().st_size
+
+
+def test_fingerprint_absent_and_irregular(tmp_path: Path) -> None:
+    missing = fingerprint_artifact(tmp_path / "nope.sqlite3", name="ledger", is_sqlite=True)
+    assert missing.present is False and missing.is_regular_file is False
+    assert missing.size is None and missing.sha256 is None and missing.user_version is None
+
+    d = tmp_path / "as_dir.sqlite3"
+    d.mkdir()
+    irregular = fingerprint_artifact(d, name="ledger", is_sqlite=True)
+    assert irregular.present is True and irregular.is_regular_file is False
+    assert irregular.sha256 is None and irregular.user_version is None
+
+
+def test_fingerprint_json_snapshot_user_version_is_none(tmp_path: Path) -> None:
+    snap = tmp_path / "snapshot.json"
+    snap.write_text(_json.dumps({"k": "v"}), encoding="utf-8")
+    fp = fingerprint_artifact(snap, name="execution_inputs_snapshot", is_sqlite=False)
+    assert fp.is_regular_file is True
+    assert fp.user_version is None
+    assert fp.sha256 == _hashlib.sha256(snap.read_bytes()).hexdigest()

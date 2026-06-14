@@ -257,6 +257,35 @@ class ArtifactFingerprint:
     sidecar_suffixes: tuple[str, ...]
 
 
+_FINGERPRINT_CHUNK_BYTES = 1 << 20  # 1 MiB; bounds peak memory independent of artifact size.
+_SQLITE_HEADER_BYTES = 100  # full SQLite header; enough for magic + user_version at offset 60.
+
+
+def _stream_hash(resolved: Path) -> tuple[int, str, bytes]:
+    """Stream ``resolved`` in fixed-size chunks to compute (size, SHA-256 hex, header bytes).
+
+    Hashing the whole file is required for a faithful byte fingerprint, but the file is never
+    loaded into memory in full — peak memory is bounded by the chunk size regardless of how
+    large the ledger/journal/active-store grows. ``size`` is the actual number of bytes read
+    (a single sequential pass, so it cannot disagree with what was hashed). The first
+    ``_SQLITE_HEADER_BYTES`` bytes are retained separately so ``user_version`` can be parsed
+    without opening a SQLite connection (which would materialize a ``-shm``/``-wal`` sidecar)."""
+
+    hasher = hashlib.sha256()
+    size = 0
+    header = b""
+    with open(resolved, "rb") as handle:
+        while True:
+            chunk = handle.read(_FINGERPRINT_CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            size += len(chunk)
+            if len(header) < _SQLITE_HEADER_BYTES:
+                header += chunk[: _SQLITE_HEADER_BYTES - len(header)]
+    return size, hasher.hexdigest(), header
+
+
 def fingerprint_artifact(path: str | Path, *, name: str, is_sqlite: bool) -> ArtifactFingerprint:
     """Fingerprint ``path`` without opening a SQLite connection (no sidecar materialization).
 
@@ -278,14 +307,14 @@ def fingerprint_artifact(path: str | Path, *, name: str, is_sqlite: bool) -> Art
             name=name, present=True, is_regular_file=False, size=None, sha256=None,
             user_version=None, sidecar_suffixes=sidecars,
         )
-    data = resolved.read_bytes()
+    size, digest, header = _stream_hash(resolved)
     return ArtifactFingerprint(
         name=name,
         present=True,
         is_regular_file=True,
-        size=len(data),
-        sha256=hashlib.sha256(data).hexdigest(),
-        user_version=_user_version_from_header(data) if is_sqlite else None,
+        size=size,
+        sha256=digest,
+        user_version=_user_version_from_header(header) if is_sqlite else None,
         sidecar_suffixes=sidecars,
     )
 

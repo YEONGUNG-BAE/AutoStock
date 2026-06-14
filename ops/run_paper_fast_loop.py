@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Four mutually-exclusive modes:
+Five mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
 * ``--inspect-existing``: read-only inspection of the configured ledger / journal /
   active-decision-store (``mode=ro`` + ``PRAGMA query_only=ON``).
+* ``--precheck-runtime``: read-only attended runtime precheck — reuses inspect-existing and
+  fingerprints every artifact before/after to prove read-only. Config is loaded with an EMPTY
+  environ so no credential/env var is read (a ``${ENV}`` reference fails closed). Machine PASS
+  is NOT an activation authorization (``activation_authorized`` stays false).
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -23,6 +27,7 @@ import argparse
 import json
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -273,8 +278,13 @@ def main(argv: list[str] | None = None) -> int:
         _emit(_run_refused_summary(), as_json=as_json, out=out)
         return 2
 
+    # precheck-runtime은 credential/env read 0을 주장하므로 config 로딩에서도 os.environ을
+    # 절대 읽지 않는다: 빈 environ을 주입해 ${ENV} 치환과 live-confirmation/credential
+    # 게이트가 모두 sanitized ConfigEnvironmentError/RuntimeGateError로 fail-closed되게 한다.
+    # 다른 mode의 동작은 바꾸지 않는다.
+    settings_environ: Mapping[str, str] | None = {} if mode == "precheck-runtime" else None
     try:
-        settings: AppSettings = load_settings(args.config)
+        settings: AppSettings = load_settings(args.config, environ=settings_environ)
     except (SettingsError, OSError) as exc:
         return _fail(f"config error: {type(exc).__name__}", as_json=as_json, out=out)
 

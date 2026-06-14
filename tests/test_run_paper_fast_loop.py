@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import config.settings as _settings_mod
 from composition.paper_fast_loop import PaperFastLoopPaths
 from config.settings import RuntimePaperFastLoopSettings
 
@@ -317,3 +318,134 @@ def test_precheck_runtime_non_quiescent_is_fail_closed_and_sanitized(
     assert "Traceback" not in out
     assert "OperationalError" not in out
     assert "sqlite3.Error" not in out
+
+
+# --- RTM-7c.4c safety closure: precheck reads NO os.environ (real access spy) ---
+
+
+class _NoEnvironAccess:
+    """A mapping stand-in for ``os.environ`` that fails on *any* access.
+
+    Proves an empirical property, not a printed boolean: if `--precheck-runtime`
+    touches `os.environ` through config loading at all (substitution OR the live
+    confirmation/credential gates), one of these raises and the test fails."""
+
+    _MSG = "precheck must not read os.environ"
+
+    def __getitem__(self, key: object) -> str:
+        raise AssertionError(f"{self._MSG} (__getitem__ {key!r})")
+
+    def __contains__(self, key: object) -> bool:
+        raise AssertionError(f"{self._MSG} (__contains__ {key!r})")
+
+    def get(self, key: object, default: object = None) -> object:
+        raise AssertionError(f"{self._MSG} (get {key!r})")
+
+    def __iter__(self):
+        raise AssertionError(f"{self._MSG} (__iter__)")
+
+    def keys(self):
+        raise AssertionError(f"{self._MSG} (keys)")
+
+    def copy(self):
+        raise AssertionError(f"{self._MSG} (copy)")
+
+
+import os as _real_os  # noqa: E402
+
+
+class _OsShim:
+    """Proxies every attribute to the real ``os`` except ``environ``, which is the
+    fail-on-access spy. Patched onto ``config.settings.os`` so ONLY config loading
+    sees the spy — pytest's own ``os.environ`` use is unaffected."""
+
+    environ = _NoEnvironAccess()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(_real_os, name)
+
+
+def _patch_settings_environ_spy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_settings_mod, "os", _OsShim())
+
+
+def _write_live_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config_live.toml"
+    config_path.write_text(
+        """
+[trading]
+mode = "live"
+allow_live_trading = true
+
+[broker]
+adapter = "kis_live"
+
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "005930"
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_precheck_runtime_makes_zero_environ_access_on_normal_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Normal seeded config (no ${...}, paper mode) → precheck runs to a real machine verdict
+    # WITHOUT touching os.environ. The spy raises on any access, so reaching PASS proves
+    # credential/env read is 0 through the whole config-loading + precheck path.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    _patch_settings_environ_spy(monkeypatch)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    assert payload["credential_read"] is False
+
+
+def test_precheck_runtime_env_placeholder_fails_closed_without_environ_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A secret env reference in config must NOT be resolved: precheck fails closed with a
+    # sanitized config error and never reads os.environ (the spy would raise otherwise).
+    monkeypatch.chdir(tmp_path)
+    _patch_settings_environ_spy(monkeypatch)
+    config_path = tmp_path / "config_secret.toml"
+    config_path.write_text(
+        """
+[trading]
+mode = "paper"
+
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "${KIS_LIVE_APP_KEY}"
+""",
+        encoding="utf-8",
+    )
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reason_code"] == "config error: ConfigEnvironmentError"
+    # No env var name, no value, no raw config, no traceback in the sanitized output.
+    assert "KIS_LIVE_APP_KEY" not in json.dumps(payload)
+
+
+def test_precheck_runtime_live_config_fails_closed_without_environ_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A live-trading config (which at activation time would need confirmation/credential env)
+    # also fails closed under precheck without reading os.environ.
+    monkeypatch.chdir(tmp_path)
+    _patch_settings_environ_spy(monkeypatch)
+    config_path = _write_live_config(tmp_path)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reason_code"].startswith("config error:")

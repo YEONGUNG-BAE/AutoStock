@@ -765,7 +765,51 @@ def test_precheck_flags_artifact_not_regular_file(tmp_path: Path) -> None:
 
     assert result.machine_outcome is MachineCheckOutcome.NO_GO
     _assert_activation_never_authorized(result)
-    assert "precheck_artifact_not_regular_file:execution_inputs_snapshot" in result.reasons
+    # Single canonical reason: exactly the precheck reason in the aggregate, NOT also the
+    # inspection layer's generic `execution_inputs_invalid` (that stays in inspection.reasons
+    # for diagnostics).
+    assert result.reasons == ("precheck_artifact_not_regular_file:execution_inputs_snapshot",)
+    assert "execution_inputs_invalid" not in result.reasons
+    assert "execution_inputs_invalid" in result.inspection.reasons
+
+
+def test_precheck_irregular_db_artifact_single_canonical_reason(tmp_path: Path) -> None:
+    # Same single-reason rule for a SQLite artifact: an irregular ledger (directory) surfaces
+    # as exactly `precheck_artifact_not_regular_file:ledger`, not also the inspection layer's
+    # `ledger_unreadable:sqlite_not_a_file` (kept in inspection.reasons for diagnostics).
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = paths.ledger_path.with_name(paths.ledger_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+    paths.ledger_path.unlink()
+    paths.ledger_path.mkdir()
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(result)
+    assert result.reasons == ("precheck_artifact_not_regular_file:ledger",)
+    assert "ledger_unreadable:sqlite_not_a_file" not in result.reasons
+    assert "ledger_unreadable:sqlite_not_a_file" in result.inspection.reasons
+
+
+def test_precheck_missing_artifact_keeps_only_inspection_reason(tmp_path: Path) -> None:
+    # Drift-avoidance regression: a MISSING artifact is owned solely by the inspection layer
+    # (`missing_database:*` / `missing_execution_inputs_snapshot`); precheck adds no
+    # `precheck_artifact_*` reason for it, so no dedup applies and the inspection reasons pass
+    # through unchanged.
+    settings = _settings(tmp_path)
+    _write_snapshot(tmp_path, settings, _snapshot_payload())  # snapshot present, DBs absent.
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    assert not any(r.startswith("precheck_artifact_") for r in result.reasons)
+    assert "missing_database:ledger" in result.reasons
+    assert tuple(result.reasons) == tuple(result.inspection.reasons)
 
 
 def test_precheck_never_constructs_stores(
