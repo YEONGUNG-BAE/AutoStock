@@ -42,6 +42,24 @@ _CONFIRM_FLAGS = [
     "--live-orders-forbidden-confirmed",
 ]
 
+_ENVELOPE_KEYS = frozenset(
+    {
+        "outcome",
+        "mode",
+        "reasons",
+        "candidate_evidence_schema_version",
+        "candidate_evidence_sha256",
+        "approval_intent_schema_version",
+        "approval_intent_sha256",
+        "declared_at",
+        "activation_authorized",
+        "runtime_activation_outcome",
+        "approval_intent_authenticated",
+        "approval_intent_consumed",
+        "approval_intent_persisted",
+    }
+)
+
 
 def _stdin_bytes(data: bytes) -> object:
     class _Stdin:
@@ -98,6 +116,15 @@ def _assert_constant_posture(payload: dict[str, Any]) -> None:
     assert payload["approval_intent_persisted"] is False
 
 
+def _assert_stable_envelope(payload: dict[str, Any]) -> None:
+    assert payload["mode"] == "build-operator-approval-intent"
+    assert isinstance(payload["reasons"], list)
+    assert "reason_code" not in payload
+    for key in _ENVELOPE_KEYS:
+        assert key in payload
+    _assert_constant_posture(payload)
+
+
 def test_approval_cli_pass_with_all_required_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -120,7 +147,126 @@ def test_approval_cli_pass_with_all_required_flags(
     assert payload["operator_approval_declared"] is True
     assert payload["writers_stopped_manually_confirmed"] is True
     assert payload["live_orders_forbidden_confirmed"] is True
+    _assert_stable_envelope(payload)
     _assert_constant_posture(payload)
+
+
+def test_approval_cli_missing_json_fail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _write_config(tmp_path)
+    argv = [
+        "--config",
+        str(config_path),
+        "--build-operator-approval-intent",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code = cli.main(argv)
+    captured = capsys.readouterr()
+    assert "paper fast-loop:" not in captured.out
+    payload = json.loads(captured.out.strip())
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reasons"] == ["approval_intent_json_required"]
+    _assert_stable_envelope(payload)
+    _assert_null_intent_digest(payload)
+
+
+def test_approval_cli_missing_json_early_isolation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "load_settings", lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("config must not load when json missing")
+    ))
+    monkeypatch.setattr(
+        cli,
+        "datetime",
+        type("_D", (), {"now": staticmethod(lambda tz=None: (_ for _ in ()).throw(
+            AssertionError("clock must not read when json missing")
+        ))})(),
+    )
+
+    argv = [
+        "--config",
+        "any.toml",
+        "--build-operator-approval-intent",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code, payload = _run_approval_cli(argv, None, capsys)
+    assert code == 1
+    assert payload["reasons"] == ["approval_intent_json_required"]
+    assert stdin_reads == []
+
+
+def test_approval_cli_missing_config_fail(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "--build-operator-approval-intent",
+        "--json",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code, payload = _run_approval_cli(argv, None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reasons"] == ["approval_intent_config_required"]
+    _assert_stable_envelope(payload)
+    _assert_null_intent_digest(payload)
+
+
+def test_approval_cli_missing_json_and_config_precedence(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "--build-operator-approval-intent",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code, payload = _run_approval_cli(argv, None, capsys)
+    assert code == 1
+    assert payload["reasons"] == ["approval_intent_json_required"]
+
+
+def test_approval_cli_explicit_default_config_path_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", fr_helper._FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = fr_helper._settings(tmp_path)
+    receipt = fr_helper._pass_receipt(tmp_path, settings)
+    argv = [
+        "--config",
+        str(config_path),
+        "--build-operator-approval-intent",
+        "--json",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code, payload = _run_approval_cli(argv, receipt, capsys)
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+
+
+def test_other_modes_without_config_keep_default(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_approval_cli(["--json"], None, capsys)
+    assert code == 1
+    assert payload["mode"] == "validate-only"
+    assert payload["config"] == cli.DEFAULT_CONFIG_PATH
 
 
 @pytest.mark.parametrize(
@@ -143,6 +289,8 @@ def test_approval_cli_missing_confirmation_fail(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     argv = [
+        "--config",
+        "unused.toml",
         "--build-operator-approval-intent",
         "--max-age-microseconds",
         "100",
@@ -155,16 +303,24 @@ def test_approval_cli_missing_confirmation_fail(
     assert code == 1
     assert payload["outcome"] == "FAIL"
     assert payload["reasons"] == [expected_reason]
+    _assert_stable_envelope(payload)
     _assert_null_intent_digest(payload)
     _assert_constant_posture(payload)
 
 
 def test_approval_cli_missing_max_age_fail(capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["--build-operator-approval-intent", "--json", *_CONFIRM_FLAGS]
+    argv = [
+        "--config",
+        "unused.toml",
+        "--build-operator-approval-intent",
+        "--json",
+        *_CONFIRM_FLAGS,
+    ]
     code, payload = _run_approval_cli(argv, None, capsys)
     assert code == 1
     assert payload["outcome"] == "FAIL"
     assert payload["reasons"] == ["freshness_policy_input_missing"]
+    _assert_stable_envelope(payload)
     _assert_null_intent_digest(payload)
 
 
@@ -176,7 +332,8 @@ def test_approval_cli_confirmation_not_applicable_on_validate_only(
     )
     assert code == 1
     assert payload["outcome"] == "FAIL"
-    assert payload["reason_code"] == "approval_intent_argument_not_applicable"
+    assert payload["reasons"] == ["approval_intent_argument_not_applicable"]
+    assert "reason_code" not in payload
 
 
 def test_approval_cli_run_with_flags_still_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
@@ -241,6 +398,8 @@ def test_approval_cli_invalid_max_age_early_isolation(
     monkeypatch.setattr(cli, "datetime", _RaisingDatetime)
 
     argv = [
+        "--config",
+        "unused.toml",
         "--build-operator-approval-intent",
         "--max-age-microseconds",
         bad_token,
@@ -296,6 +455,8 @@ def test_approval_cli_missing_confirmation_early_isolation(
     )
 
     argv = [
+        "--config",
+        "unused.toml",
         "--build-operator-approval-intent",
         "--max-age-microseconds",
         "100",
@@ -324,6 +485,7 @@ def test_approval_cli_stale_receipt_no_go(
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["candidate_receipt_stale"]
+    _assert_stable_envelope(payload)
     _assert_null_intent_digest(payload)
     _assert_constant_posture(payload)
 
@@ -396,6 +558,7 @@ def test_approval_cli_intent_builder_invalid_no_go(
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["approval_intent_generation_invalid"]
+    _assert_stable_envelope(payload)
     _assert_null_intent_digest(payload)
     _assert_constant_posture(payload)
 
@@ -514,6 +677,7 @@ def test_approval_cli_single_execution_call_counts(
     code, payload = _run_approval_cli(_approval_argv(config_path), None, capsys)
     assert code == 0
     assert payload["outcome"] == "PASS"
+    _assert_stable_envelope(payload)
     assert len(stdin_reads) == 1
     assert load_calls == ["load"]
     assert clock_calls == ["now"]
@@ -589,6 +753,185 @@ def test_approval_cli_max_age_not_applicable_on_final_preflight(
     )
     assert code == 1
     assert payload["reason_code"] == "freshness_policy_argument_not_applicable"
+
+
+def _approval_base_argv(config_path: Path | str) -> list[str]:
+    return [
+        "--config",
+        str(config_path),
+        "--build-operator-approval-intent",
+        "--json",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stdin_data", "expected_reason"),
+    [
+        (None, "receipt_input_empty"),
+        (b"\xff\xfe", "receipt_input_not_utf8"),
+        (b"{not json", "receipt_input_not_json"),
+        (b'{"schema_version": 1, "schema_version": 2}', "receipt_input_duplicate_key"),
+        (b"[" * 5000 + b"0" + b"]" * 5000, "receipt_input_too_deep"),
+        (b"x" * (cli._VERIFY_RECEIPT_STDIN_LIMIT + 1), "receipt_input_too_large"),
+    ],
+    ids=["empty", "invalid_utf8", "invalid_json", "duplicate_key", "too_deep", "too_large"],
+)
+def test_approval_cli_stdin_errors_are_fail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    stdin_data: bytes | None,
+    expected_reason: str,
+) -> None:
+    config_path = _write_config(tmp_path)
+    if stdin_data is not None:
+        sys.stdin = _stdin_bytes(stdin_data)  # type: ignore[assignment]
+    code = cli.main(_approval_base_argv(config_path))
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip())
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reasons"] == [expected_reason]
+    _assert_stable_envelope(payload)
+    _assert_null_intent_digest(payload)
+
+
+def test_approval_cli_stdin_read_oserror_is_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _write_config(tmp_path)
+
+    def _read_raises(_size: int = -1) -> bytes:
+        raise OSError("simulated stdin read failure")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read_raises)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main(_approval_base_argv(config_path))
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    payload = json.loads(captured.out.strip())
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reasons"] == ["receipt_input_read_error"]
+    assert "OSError" not in combined
+    assert "simulated" not in combined
+    assert "Traceback" not in combined
+
+
+@pytest.mark.parametrize(
+    "config_factory",
+    [
+        "missing_file",
+        "malformed_toml",
+        "invalid_settings",
+        "env_placeholder",
+        "live_gate",
+    ],
+)
+def test_approval_cli_config_errors_are_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config_factory: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_settings_mod, "os", fr_helper._OsShim())
+    receipt = vrf_helper._valid_receipt()
+
+    if config_factory == "missing_file":
+        config_path = tmp_path / "does_not_exist.toml"
+    elif config_factory == "malformed_toml":
+        config_path = tmp_path / "bad.toml"
+        config_path.write_text("[runtime.paper_fast_loop\nenabled = true\n", encoding="utf-8")
+    elif config_factory == "invalid_settings":
+        config_path = tmp_path / "invalid.toml"
+        config_path.write_text(
+            """
+[runtime.paper_fast_loop]
+enabled = true
+market = "US"
+symbol = "005930"
+""",
+            encoding="utf-8",
+        )
+    elif config_factory == "env_placeholder":
+        config_path = tmp_path / "env.toml"
+        config_path.write_text(
+            """
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "005930"
+ledger_path = "${LEDGER_PATH}/ledger.sqlite3"
+""",
+            encoding="utf-8",
+        )
+    else:
+        config_path = tmp_path / "live.toml"
+        config_path.write_text(
+            """
+[trading]
+mode = "live"
+allow_live_trading = false
+
+[broker]
+adapter = "kis_live"
+
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "005930"
+""",
+            encoding="utf-8",
+        )
+
+    code, payload = _run_approval_cli(_approval_base_argv(config_path), receipt, capsys)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reasons"] == ["approval_intent_config_invalid"]
+    _assert_stable_envelope(payload)
+    _assert_null_intent_digest(payload)
+    assert str(config_path) not in combined
+    assert "SettingsError" not in combined
+    assert "RuntimeGateError" not in combined
+    assert "ConfigEnvironmentError" not in combined
+    assert "Traceback" not in combined
+
+
+def test_approval_cli_missing_config_early_isolation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "load_settings", lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("config must not load when config missing")
+    ))
+
+    argv = [
+        "--build-operator-approval-intent",
+        "--json",
+        "--max-age-microseconds",
+        "100",
+        *_CONFIRM_FLAGS,
+    ]
+    code, payload = _run_approval_cli(argv, None, capsys)
+    assert code == 1
+    assert payload["reasons"] == ["approval_intent_config_required"]
+    assert stdin_reads == []
 
 
 def test_approval_cli_module_import_guard() -> None:

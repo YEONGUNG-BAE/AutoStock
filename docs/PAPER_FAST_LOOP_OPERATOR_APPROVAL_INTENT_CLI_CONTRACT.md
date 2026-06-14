@@ -17,16 +17,20 @@ Code: `ops/run_paper_fast_loop.py` mode `--build-operator-approval-intent`
 --build-operator-approval-intent
 ```
 
-Requires:
+Requires **explicit** (no implicit default):
 
 ```text
---config
+--config          # no fallback to config/config.toml.example
+--json            # stdout JSON only; human-readable output forbidden
 --max-age-microseconds
---json
 --operator-approval-declared
 --writers-stopped-manually-confirmed
 --live-orders-forbidden-confirmed
 ```
+
+Other CLI modes keep the historical default: when `--config` is omitted, the tool uses
+`config/config.toml.example`. Approval mode **must** pass `--config` explicitly — even when the
+path is literally `config/config.toml.example`.
 
 All three confirmation flags must be **explicitly present** on the command line. Absence is
 **not** interpreted as approval — each flag must be present so argparse sets the value to exact
@@ -69,20 +73,27 @@ They do **not** mean:
 2. --run early refusal (exit 2)
 3. confirmation-flag applicability (wrong mode → FAIL)
 4. --max-age-microseconds applicability (wrong mode → FAIL)
-5. explicit max-age parse (invalid/missing → FAIL)
-6. three confirmation presence checks (missing → FAIL)
-7. stdin bounded receipt JSON read/parse
-8. load_settings(config, environ={})
-9. KST now read exactly once
-10. freshness_qualify_and_build_candidate_evidence exactly once
-11. build_operator_approval_intent exactly once (only on combined PASS)
-12. sanitized JSON output to stdout
+5. approval mode explicit --json check (missing → FAIL)
+6. approval mode explicit --config check (missing → FAIL)
+7. explicit max-age parse (invalid/missing → FAIL)
+8. three confirmation presence checks (missing → FAIL)
+9. stdin bounded receipt JSON read/parse (input failure → FAIL)
+10. load_settings(config, environ={}) (config failure → FAIL)
+11. KST now read exactly once
+12. freshness_qualify_and_build_candidate_evidence exactly once
+13. build_operator_approval_intent at most once (combined PASS only)
+14. sanitized JSON output to stdout
 ```
+
+Missing `--json` and missing `--config` both fail before any stdin/config/env/clock/DB access.
+When both are missing, **`approval_intent_json_required` wins** (json checked before config).
 
 ### Early-failure isolation
 
 The following fail **before** stdin/config/env/clock/DB/filesystem access:
 
+- missing explicit `--json` → `approval_intent_json_required`
+- missing explicit `--config` → `approval_intent_config_required`
 - confirmation flag on a non-build mode → `approval_intent_argument_not_applicable`
 - max-age on a non-freshness/non-build mode → `freshness_policy_argument_not_applicable`
 - max-age missing/invalid on build mode → `freshness_policy_input_missing` /
@@ -91,9 +102,11 @@ The following fail **before** stdin/config/env/clock/DB/filesystem access:
 
 `--run` is refused before all of the above (exit 2).
 
-### Missing confirmation reasons
+### Missing explicit-input reasons
 
 ```text
+approval_intent_json_required
+approval_intent_config_required
 approval_intent_operator_declaration_missing
 approval_intent_writer_stop_confirmation_missing
 approval_intent_live_order_prohibition_confirmation_missing
@@ -103,6 +116,25 @@ Wrong-mode confirmation:
 
 ```text
 approval_intent_argument_not_applicable
+```
+
+Config load/validation failure (missing file, malformed TOML, invalid settings, `${ENV}` with
+`environ={}`, live/runtime gate violation):
+
+```text
+approval_intent_config_invalid
+```
+
+Stdin read/encoding/JSON/schema-boundary failure reuses existing stable reasons:
+
+```text
+receipt_input_empty
+receipt_input_not_utf8
+receipt_input_not_json
+receipt_input_too_deep
+receipt_input_duplicate_key
+receipt_input_too_large
+receipt_input_read_error
 ```
 
 ## Declared-at binding
@@ -124,11 +156,37 @@ The API contract remains `declared_at >= evidence.evaluated_at`.
 
 ## Aggregate outcomes
 
-Top-level:
+Top-level stable envelope uses **`reasons` list only** — never `reason_code` on approval-mode
+paths:
 
 ```text
 outcome = PASS | NO_GO | FAIL
+mode    = "build-operator-approval-intent"
 reasons = [...]
+```
+
+### FAIL — invocation/input/config cannot start evaluation
+
+```text
+missing explicit --json
+missing explicit --config
+missing/invalid max-age
+missing confirmation
+wrong-mode approval argument
+stdin read/encoding/JSON/schema-boundary failure
+config load/validation failure  → approval_intent_config_invalid
+```
+
+### NO_GO — valid input/config; candidate pipeline ran; not approvable
+
+```text
+stale/future receipt
+config market/symbol mismatch (candidate revalidation)
+expired snapshot/decision
+non-quiescent artifact
+candidate_evidence_generation_invalid
+approval_intent_generation_invalid
+approval_intent_upstream_error
 ```
 
 | case | outcome | exit | intent digest |
@@ -136,7 +194,7 @@ reasons = [...]
 | combined PASS + intent CREATED | PASS | 0 | hex64 schema 1 |
 | upstream mechanical NO_GO | NO_GO | 1 | null |
 | combined PASS + intent not CREATED | NO_GO | 1 | null |
-| CLI input failure | FAIL | 1 | null |
+| CLI input/config failure | FAIL | 1 | null |
 
 Upstream NO_GO preserves exact upstream reasons verbatim. Do **not** append
 `approval_intent_not_eligible` to aggregate reasons.
@@ -151,9 +209,30 @@ Raw builder internals and exceptions are never printed.
 
 ## PASS JSON shape
 
+Every approval-mode result (PASS / FAIL / NO_GO) shares the stable envelope fields:
+
+```text
+outcome
+mode = "build-operator-approval-intent"
+reasons
+candidate_evidence_schema_version
+candidate_evidence_sha256
+approval_intent_schema_version
+approval_intent_sha256
+declared_at
+activation_authorized = false
+runtime_activation_outcome = "no_go"
+approval_intent_authenticated = false
+approval_intent_consumed = false
+approval_intent_persisted = false
+```
+
+PASS adds confirmation + digest fields:
+
 ```json
 {
   "outcome": "PASS",
+  "mode": "build-operator-approval-intent",
   "reasons": [],
   "candidate_evidence_schema_version": 2,
   "candidate_evidence_sha256": "<hex64>",

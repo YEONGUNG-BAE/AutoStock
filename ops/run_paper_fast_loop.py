@@ -106,7 +106,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Offline paper fast-loop composition operator tool (no orders, no money, no network).",
     )
     parser.add_argument(
-        "--config", default=DEFAULT_CONFIG_PATH, help=f"config path (default: {DEFAULT_CONFIG_PATH})"
+        "--config",
+        default=None,
+        help=(
+            "config path (default: config/config.toml.example for most modes; "
+            "--build-operator-approval-intent requires an explicit --config)"
+        ),
     )
     parser.add_argument(
         "--validate-only",
@@ -615,6 +620,9 @@ def _freshness_preflight_input_fail(reason_code: str, *, as_json: bool, out: Tex
     return 1
 
 
+_APPROVAL_INTENT_CLI_MODE = "build-operator-approval-intent"
+
+
 def _approval_intent_cli_posture_fields() -> dict[str, Any]:
     """Approval-intent CLI 출력에 공통으로 포함되는 constant NO-GO / unauthenticated posture."""
 
@@ -639,29 +647,39 @@ def _approval_intent_cli_null_digest_fields() -> dict[str, Any]:
     }
 
 
-def _approval_intent_cli_input_fail(reason: str, *, as_json: bool, out: TextIO) -> int:
-    """CLI 입력 위반 — stdout JSON만, outcome FAIL, intent digest null."""
+def _approval_intent_cli_envelope(*, outcome: str, reasons: list[str]) -> dict[str, Any]:
+    """Approval-intent CLI stable JSON envelope — ``reasons`` list only (no ``reason_code``)."""
 
-    summary = {
-        "outcome": "FAIL",
-        "reasons": [reason],
-        **_approval_intent_cli_null_digest_fields(),
-        **_approval_intent_cli_posture_fields(),
-    }
-    _emit(summary, as_json=as_json, out=out)
-    return 1
-
-
-def _approval_intent_cli_no_go(reasons: list[str], *, as_json: bool, out: TextIO) -> int:
-    """Upstream mechanical NO_GO 또는 intent 생성 실패 — digest null, constant NO-GO posture."""
-
-    summary = {
-        "outcome": "NO_GO",
+    return {
+        "outcome": outcome,
+        "mode": _APPROVAL_INTENT_CLI_MODE,
         "reasons": reasons,
         **_approval_intent_cli_null_digest_fields(),
         **_approval_intent_cli_posture_fields(),
     }
-    _emit(summary, as_json=as_json, out=out)
+
+
+def _approval_intent_cli_emit(summary: dict[str, Any], *, out: TextIO) -> None:
+    """Approval mode는 stdout JSON 전용 — human-readable intent 출력 금지."""
+
+    print(json.dumps(summary, ensure_ascii=False), file=out)
+
+
+def _approval_intent_cli_input_fail(reason: str, *, out: TextIO) -> int:
+    """CLI 입력/설정 위반 — JSON envelope, outcome FAIL."""
+
+    _approval_intent_cli_emit(
+        _approval_intent_cli_envelope(outcome="FAIL", reasons=[reason]), out=out
+    )
+    return 1
+
+
+def _approval_intent_cli_no_go(reasons: list[str], *, out: TextIO) -> int:
+    """Upstream mechanical NO_GO 또는 intent 생성 실패 — JSON envelope."""
+
+    _approval_intent_cli_emit(
+        _approval_intent_cli_envelope(outcome="NO_GO", reasons=reasons), out=out
+    )
     return 1
 
 
@@ -675,6 +693,7 @@ def _approval_intent_cli_pass_summary(
     assert evidence is not None
     return {
         "outcome": "PASS",
+        "mode": _APPROVAL_INTENT_CLI_MODE,
         "reasons": [],
         "candidate_evidence_schema_version": evidence.schema_version,
         "candidate_evidence_sha256": evidence.evidence_sha256,
@@ -799,9 +818,15 @@ def main(argv: list[str] | None = None) -> int:
             or args.writers_stopped_manually_confirmed
             or args.live_orders_forbidden_confirmed
         ):
-            return _fail(
-                "approval_intent_argument_not_applicable", as_json=as_json, out=out
+            _emit(
+                {
+                    "outcome": "FAIL",
+                    "reasons": ["approval_intent_argument_not_applicable"],
+                },
+                as_json=as_json,
+                out=out,
             )
+            return 1
 
     # --max-age-microseconds는 freshness-qualified / approval-intent mode에서만 허용한다.
     if args.max_age_microseconds is not None and mode not in (
@@ -809,6 +834,17 @@ def main(argv: list[str] | None = None) -> int:
         "build-operator-approval-intent",
     ):
         return _fail("freshness_policy_argument_not_applicable", as_json=as_json, out=out)
+
+    # approval mode: explicit --json / --config (default config fallback 금지).
+    if mode == "build-operator-approval-intent":
+        if not args.json:
+            return _approval_intent_cli_input_fail("approval_intent_json_required", out=out)
+        if args.config is None:
+            return _approval_intent_cli_input_fail("approval_intent_config_required", out=out)
+
+    config_path = (
+        args.config if args.config is not None else DEFAULT_CONFIG_PATH
+    )
 
     # verify-precheck-receipt: stdin-only — config/env/DB/fs write/network/clock read 없음.
     if mode == "verify-precheck-receipt":
@@ -831,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
         if input_error is not None:
             return _revalidate_input_fail(input_error, as_json=as_json, out=out)
         try:
-            settings: AppSettings = load_settings(args.config, environ={})
+            settings: AppSettings = load_settings(config_path, environ={})
         except (SettingsError, OSError) as exc:
             return _revalidate_input_fail(
                 f"config error: {type(exc).__name__}", as_json=as_json, out=out
@@ -846,7 +882,7 @@ def main(argv: list[str] | None = None) -> int:
             return _revalidate_input_fail(
                 f"revalidate error: {type(exc).__name__}", as_json=as_json, out=out
             )
-        summary = _revalidate_summary(result, config_path=args.config)
+        summary = _revalidate_summary(result, config_path=config_path)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 
@@ -857,7 +893,7 @@ def main(argv: list[str] | None = None) -> int:
         if input_error is not None:
             return _final_preflight_input_fail(input_error, as_json=as_json, out=out)
         try:
-            settings: AppSettings = load_settings(args.config, environ={})
+            settings: AppSettings = load_settings(config_path, environ={})
         except (SettingsError, OSError) as exc:
             return _final_preflight_input_fail(
                 f"config error: {type(exc).__name__}", as_json=as_json, out=out
@@ -889,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
         if input_error is not None:
             return _freshness_preflight_input_fail(input_error, as_json=as_json, out=out)
         try:
-            settings: AppSettings = load_settings(args.config, environ={})
+            settings: AppSettings = load_settings(config_path, environ={})
         except (SettingsError, OSError) as exc:
             return _freshness_preflight_input_fail(
                 f"config error: {type(exc).__name__}", as_json=as_json, out=out
@@ -913,38 +949,35 @@ def main(argv: list[str] | None = None) -> int:
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 
-    # build-operator-approval-intent: max-age parse → confirmation flags → stdin → config →
-    # KST now once → freshness-qualified evidence → approval-intent builder once.
+    # build-operator-approval-intent: explicit json/config → max-age parse → confirmation →
+    # stdin → config load → KST now once → evidence pipeline → intent builder at most once.
     if mode == "build-operator-approval-intent":
         parsed_max_age, max_age_error = parse_max_age_microseconds_cli_input(
             args.max_age_microseconds
         )
         if max_age_error is not None:
-            return _approval_intent_cli_input_fail(max_age_error, as_json=as_json, out=out)
+            return _approval_intent_cli_input_fail(max_age_error, out=out)
         assert parsed_max_age is not None
         if not args.operator_approval_declared:
             return _approval_intent_cli_input_fail(
-                "approval_intent_operator_declaration_missing", as_json=as_json, out=out
+                "approval_intent_operator_declaration_missing", out=out
             )
         if not args.writers_stopped_manually_confirmed:
             return _approval_intent_cli_input_fail(
-                "approval_intent_writer_stop_confirmation_missing", as_json=as_json, out=out
+                "approval_intent_writer_stop_confirmation_missing", out=out
             )
         if not args.live_orders_forbidden_confirmed:
             return _approval_intent_cli_input_fail(
                 "approval_intent_live_order_prohibition_confirmation_missing",
-                as_json=as_json,
                 out=out,
             )
         payload, input_error = _read_verify_stdin_payload()
         if input_error is not None:
-            return _approval_intent_cli_no_go([input_error], as_json=as_json, out=out)
+            return _approval_intent_cli_input_fail(input_error, out=out)
         try:
-            settings: AppSettings = load_settings(args.config, environ={})
-        except (SettingsError, OSError) as exc:
-            return _approval_intent_cli_no_go(
-                [f"config error: {type(exc).__name__}"], as_json=as_json, out=out
-            )
+            settings: AppSettings = load_settings(config_path, environ={})
+        except (SettingsError, OSError):
+            return _approval_intent_cli_input_fail("approval_intent_config_invalid", out=out)
         fast_loop = settings.runtime.paper_fast_loop
         policy = ReceiptFreshnessPolicy(max_age_microseconds=parsed_max_age)
         now = datetime.now(tz=_KST)
@@ -956,13 +989,9 @@ def main(argv: list[str] | None = None) -> int:
                 policy=policy,
             )
         except Exception:
-            return _approval_intent_cli_no_go(
-                ["approval_intent_upstream_error"], as_json=as_json, out=out
-            )
+            return _approval_intent_cli_no_go(["approval_intent_upstream_error"], out=out)
         if combined.outcome is not FreshnessQualifiedEvidenceOutcome.PASS:
-            return _approval_intent_cli_no_go(
-                list(combined.reasons), as_json=as_json, out=out
-            )
+            return _approval_intent_cli_no_go(list(combined.reasons), out=out)
         try:
             intent_result = build_operator_approval_intent(
                 combined_result=combined,
@@ -973,17 +1002,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception:
             return _approval_intent_cli_no_go(
-                ["approval_intent_generation_invalid"], as_json=as_json, out=out
+                ["approval_intent_generation_invalid"], out=out
             )
         if (
             intent_result.outcome is not OperatorApprovalIntentOutcome.CREATED
             or intent_result.intent is None
         ):
             return _approval_intent_cli_no_go(
-                ["approval_intent_generation_invalid"], as_json=as_json, out=out
+                ["approval_intent_generation_invalid"], out=out
             )
         summary = _approval_intent_cli_pass_summary(combined, intent_result.intent)
-        _emit(summary, as_json=as_json, out=out)
+        _approval_intent_cli_emit(summary, out=out)
         return 0
 
     # precheck-runtime은 credential/env read 0을 주장하므로 config 로딩에서도 os.environ을
@@ -992,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
     # 다른 mode의 동작은 바꾸지 않는다.
     settings_environ: Mapping[str, str] | None = {} if mode == "precheck-runtime" else None
     try:
-        settings: AppSettings = load_settings(args.config, environ=settings_environ)
+        settings: AppSettings = load_settings(config_path, environ=settings_environ)
     except (SettingsError, OSError) as exc:
         return _fail(f"config error: {type(exc).__name__}", as_json=as_json, out=out)
 
@@ -1000,7 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if mode == "validate-only":
         plan = build_paper_fast_loop_plan(settings=fast_loop, now=datetime.now(tz=_KST))
-        summary = _validate_summary(plan, config_path=args.config, enabled=fast_loop.enabled)
+        summary = _validate_summary(plan, config_path=config_path, enabled=fast_loop.enabled)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 
@@ -1009,7 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
             inspection = inspect_paper_fast_loop(settings=fast_loop, now=datetime.now(tz=_KST))
         except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
             return _fail(f"inspect error: {type(exc).__name__}", as_json=as_json, out=out)
-        summary = _inspect_summary(inspection, config_path=args.config, enabled=fast_loop.enabled)
+        summary = _inspect_summary(inspection, config_path=config_path, enabled=fast_loop.enabled)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 
@@ -1018,7 +1047,7 @@ def main(argv: list[str] | None = None) -> int:
             result = precheck_runtime(settings=fast_loop, now=datetime.now(tz=_KST))
         except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
             return _fail(f"precheck error: {type(exc).__name__}", as_json=as_json, out=out)
-        summary = _precheck_summary(result, config_path=args.config, enabled=fast_loop.enabled)
+        summary = _precheck_summary(result, config_path=config_path, enabled=fast_loop.enabled)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 
@@ -1035,7 +1064,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = replay_offline(settings=fast_loop, temp_dir=Path(tmp), fixture=fixture)
         except Exception as exc:  # replay 내부 오류도 traceback 없이 sanitized fail로.
             return _fail(f"replay error: {type(exc).__name__}", as_json=as_json, out=out)
-        _emit(_replay_summary(result, config_path=args.config), as_json=as_json, out=out)
+        _emit(_replay_summary(result, config_path=config_path), as_json=as_json, out=out)
         return 0
 
     return _fail("unsupported mode.", as_json=as_json, out=out)  # pragma: no cover

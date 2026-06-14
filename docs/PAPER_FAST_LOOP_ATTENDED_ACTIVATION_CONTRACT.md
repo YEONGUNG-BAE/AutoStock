@@ -151,8 +151,8 @@ require exact built-in `str` before equality — caller `__eq__`/`__ne__` hooks 
 Intent is **not** identity, signature,
 writer-stop machine proof, approval consumption, replay prevention, or activation authorization;
 it is never persisted. **RTM-7c.4p** wires CLI mode `--build-operator-approval-intent` — explicit
-manual confirmation flags + freshness-qualified composition → stdout JSON intent only (no
-persistence/consumption/identity/signing/activation). Approval consumption and activation
+`--json` + `--config` (no default fallback), manual confirmation flags, stable JSON envelope,
+FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption/identity/signing/activation). Approval consumption and activation
 caller remain **OPEN**.
 
 ## Orphan sidecar observation limit

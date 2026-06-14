@@ -251,8 +251,9 @@ Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
 
 ## Integration scope (this lane)
 
-**RTM-7c.4p** adds CLI mode `--build-operator-approval-intent` — explicit manual confirmation
-flags + freshness-qualified composition → stdout JSON intent only (no persistence/consumption).
+**RTM-7c.4p** adds CLI mode `--build-operator-approval-intent` — explicit `--json` and `--config`
+(no default config fallback), manual confirmation flags, stable JSON envelope (`mode` +
+`reasons` only), FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption).
 See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md`.
 
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
