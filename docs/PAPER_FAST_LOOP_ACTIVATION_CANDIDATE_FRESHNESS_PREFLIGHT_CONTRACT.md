@@ -54,26 +54,44 @@ freshness_qualify_activation_candidate(
 
 ## Processing order
 
-1. **Policy strict validation** (`receipt_freshness_policy_is_valid`, shared with 4k) —
+1. **Policy strict validation + snapshot** (`snapshot_receipt_freshness_policy`) —
    invalid → `NO_GO` / `candidate_freshness_policy_invalid`,
-   `freshness_policy_evaluated=false`; no snapshot, verifier, filesystem, or SQLite
-2. **Snapshot once** — `verify_and_snapshot_precheck_receipt`; INVALID →
+   `freshness_policy_evaluated=false`; no `now` guard, receipt snapshot, verifier,
+   filesystem, or SQLite. Valid policy is frozen once; caller policy is not re-read.
+2. **`now` strict validation** (`final_preflight_now_is_invalid`, shared with 4h) —
+   invalid → `NO_GO` / `candidate_invalid_now`, `freshness_policy_evaluated=false`;
+   no receipt snapshot, verifier, final core, revalidation, filesystem, SQLite, or evaluator
+3. **Receipt snapshot once** — `verify_and_snapshot_precheck_receipt`; INVALID →
    `candidate_receipt_invalid`
-3. **Verified final preflight core** — `final_preflight_verified_activation_candidate` on the
+4. **Verified final preflight core** — `final_preflight_verified_activation_candidate` on the
    frozen snapshot (verifier 0, raw payload 0); any `NO_GO` preserves existing final-preflight
    reasons verbatim; freshness evaluator **not** called; `freshness_policy_evaluated=false`
-4. **Explicit freshness evaluation** — only on final PASS:
-   `evaluate_receipt_freshness(time_assessment=final_result.receipt_time_assessment, policy)`
+5. **Explicit freshness evaluation** — only on final PASS:
+   `evaluate_receipt_freshness(time_assessment=final_result.receipt_time_assessment, policy_snapshot)`
    - FRESH → qualified PASS, `freshness_policy_evaluated=true`
    - STALE → `candidate_receipt_stale`, `freshness_policy_evaluated=true`
    - evaluator defensive NO_GO → `candidate_freshness_evaluation_invalid`,
      `freshness_policy_evaluated=false` (raw evaluator reason not duplicated)
+
+### Reason precedence (early short-circuits)
+
+| policy | now | receipt | result |
+|--------|-----|---------|--------|
+| invalid | any | any | `candidate_freshness_policy_invalid` |
+| valid | invalid | any | `candidate_invalid_now` |
+| valid | valid | invalid | `candidate_receipt_invalid` |
+| valid | valid | valid final NO_GO | existing final reason (verbatim) |
+| valid | valid | final PASS + stale | `candidate_receipt_stale` |
+| valid | valid | final PASS + fresh | PASS |
+
+Raw exception/type/repr never appear in reasons.
 
 ## Stable reason codes (this lane)
 
 | reason | meaning |
 |--------|---------|
 | `candidate_freshness_policy_invalid` | policy not exact `ReceiptFreshnessPolicy` or invalid max-age |
+| `candidate_invalid_now` | `now` non-datetime / naive / missing UTC offset / malformed tz |
 | `candidate_receipt_invalid` | snapshot build INVALID |
 | *(final-preflight reasons preserved)* | e.g. `candidate_receipt_time_in_future`, `candidate_current_precheck:*`, `candidate_post_revalidation_artifact_drift:*` |
 | `candidate_receipt_stale` | final PASS but age strictly greater than max |
@@ -84,11 +102,19 @@ freshness_qualify_activation_candidate(
 Per `freshness_qualify_activation_candidate` call:
 
 ```text
+policy snapshot builds = 1          (valid policy only; caller policy frozen once)
 receipt verifier calls = 1
-snapshot builds = 1
+receipt snapshot builds = 1
 verified final-preflight core verifier calls = 0
 freshness evaluator verifier calls = 0
 ```
+
+Policy snapshot is **not** a default, persistence layer, or config binding — it freezes the
+caller-supplied `max_age_microseconds` once at call start. Caller policy mutation after snapshot
+does not change the verdict or nested `freshness_evaluation.max_age_microseconds`.
+
+Invalid `now` short-circuits after policy snapshot with zero receipt observation (no receipt
+snapshot, verifier, filesystem, SQLite, final core, or evaluator).
 
 Raw receipt is not re-read after snapshot. `ReceiptTimeAssessment` object identity from final
 preflight equals evaluator input.

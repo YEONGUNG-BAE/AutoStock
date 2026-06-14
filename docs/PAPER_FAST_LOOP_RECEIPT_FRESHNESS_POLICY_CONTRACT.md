@@ -115,6 +115,12 @@ RTM-7c.4l (`freshness_qualify_activation_candidate`) is the **API-only** composi
 explicit `policy` argument required, no default threshold, no CLI integration. It reuses the
 4h verified core and passes the same `ReceiptTimeAssessment` object to this evaluator.
 
+**RTM-7c.4l closure — policy snapshot:** `snapshot_receipt_freshness_policy(policy)` validates
+exact `ReceiptFreshnessPolicy`, reads `max_age_microseconds` once, and returns a new frozen
+instance. The snapshot is not a default, persistence layer, or config binding. Qualified
+preflight passes the snapshot (not the caller object) to `evaluate_receipt_freshness`; caller
+policy mutation after snapshot does not change verdict or nested evaluation fields.
+
 ## Activation posture (every path)
 
 ```text

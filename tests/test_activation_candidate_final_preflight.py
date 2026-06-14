@@ -26,7 +26,9 @@ from composition import sqlite_inspector
 from composition.activation_candidate_final_preflight import (
     ActivationCandidateFinalPreflightOutcome,
     final_preflight_activation_candidate,
+    final_preflight_verified_activation_candidate,
 )
+from composition.verified_precheck_receipt import verify_and_snapshot_precheck_receipt
 from composition.paper_fast_loop import (
     MachineCheckOutcome,
     PaperFastLoopPaths,
@@ -446,6 +448,58 @@ def test_final_preflight_invalid_now_is_strict_fail_closed(
     assert result.revalidation_result is None
     assert result.current_precheck_result is None
     _assert_posture(result, fresh_precheck_executed=False)
+
+
+@pytest.mark.parametrize(
+    "bad_now",
+    [
+        None,
+        "2026-06-16T00:30:00+09:00",
+        1718498400,
+        datetime(2026, 6, 16, 0, 30),  # noqa: DTZ001
+        datetime(2026, 6, 16, 0, 30, tzinfo=_RaisingTzInfo()),
+        datetime(2026, 6, 16, 0, 30, tzinfo=_NoneOffsetTzInfo()),
+    ],
+    ids=["none", "str", "int", "naive", "raising_tz", "none_offset"],
+)
+def test_verified_core_invalid_now_is_strict_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_now: object,
+) -> None:
+    """Direct verified-core call must fail-closed on invalid now before revalidation."""
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    snapshot = verify_and_snapshot_precheck_receipt(receipt)
+    assert snapshot.receipt is not None
+
+    def _fail_reval(*_a: object, **_k: object) -> object:
+        raise AssertionError("revalidation must not run for invalid now on verified core")
+
+    def _fail_precheck(*_a: object, **_k: object) -> object:
+        raise AssertionError("precheck_runtime must not run for invalid now on verified core")
+
+    monkeypatch.setattr(final_mod, "revalidate_verified_activation_candidate", _fail_reval)
+    monkeypatch.setattr(final_mod, "precheck_runtime", _fail_precheck)
+
+    result = final_preflight_verified_activation_candidate(
+        settings=settings,
+        receipt=snapshot.receipt,
+        now=bad_now,  # type: ignore[arg-type]
+        base_dir=tmp_path,
+    )
+    assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
+    assert result.reasons == ("candidate_invalid_now",)
+    assert result.receipt_sha256 is None
+    assert result.market is None
+    assert result.symbol is None
+    assert result.revalidation_result is None
+    assert result.current_precheck_result is None
+    assert result.receipt_time_assessment is None
+    assert result.fresh_precheck_executed is False
+    assert result.receipt_age_evaluated is False
+    assert result.freshness_policy_evaluated is False
+    assert result.activation_authorized is False
 
 
 @pytest.mark.parametrize(

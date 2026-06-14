@@ -64,6 +64,7 @@ __all__ = [
     "ActivationCandidateFinalPreflightResult",
     "final_preflight_activation_candidate",
     "final_preflight_verified_activation_candidate",
+    "final_preflight_now_is_invalid",
 ]
 
 def _posture(*, fresh_precheck_executed: bool, receipt_age_evaluated: bool = False) -> dict[str, object]:
@@ -143,7 +144,7 @@ def final_preflight_activation_candidate(
     ``precheck_runtime`` is never reached; no raw exception/type/repr escapes).
     No clock read of its own; no operational DB write; no network/credential/broker."""
 
-    if _now_is_invalid(now):
+    if final_preflight_now_is_invalid(now):
         return _no_go(
             reasons=("candidate_invalid_now",),
             receipt_sha256=None,
@@ -191,6 +192,18 @@ def final_preflight_verified_activation_candidate(
 
     RTM-7c.4g revalidation, receipt-time observation, fresh precheck, post-revalidation
     drift를 동일 immutable snapshot 위에서 실행한다. freshness policy는 평가하지 않는다."""
+
+    if final_preflight_now_is_invalid(now):
+        return _no_go(
+            reasons=("candidate_invalid_now",),
+            receipt_sha256=None,
+            market=None,
+            symbol=None,
+            revalidation=None,
+            precheck=None,
+            fresh_precheck_executed=False,
+            receipt_time_assessment=None,
+        )
 
     # Step 2 — snapshot-based 4g byte-state revalidation. NO_GO면 즉시 종결, 기존 stable reason 보존.
     revalidation = revalidate_verified_activation_candidate(
@@ -286,8 +299,8 @@ def final_preflight_verified_activation_candidate(
     )
 
 
-def _now_is_invalid(now: object) -> bool:
-    """Strict fail-closed ``now`` guard.
+def final_preflight_now_is_invalid(now: object) -> bool:
+    """Strict fail-closed ``now`` guard shared by final-preflight and freshness-qualified APIs.
 
     Returns ``True`` (invalid) for any non-``datetime`` (``None``/``str``/``int``), a naive
     ``datetime``, a ``None`` UTC offset, or a ``tzinfo`` whose ``utcoffset`` raises. The

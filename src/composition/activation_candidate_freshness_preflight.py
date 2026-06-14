@@ -8,9 +8,9 @@ receipt authenticity, or activation authorization.
 Policy is a **required** argument: no default max-age, no config/env/CLI binding. The existing
 ``final_preflight_activation_candidate`` wrapper remains policy-neutral.
 
-Per call: one verifier (snapshot build), one snapshot build, zero verifier calls inside the
-verified final-preflight core and freshness evaluator. Raw receipt is not re-read after
-snapshot. ``ReceiptTimeAssessment`` object identity from final preflight is passed unchanged
+Per call: one policy snapshot build, one verifier (receipt snapshot build), one receipt
+snapshot build, zero verifier calls inside the verified final-preflight core and freshness
+evaluator. Raw receipt is not re-read after snapshot. ``ReceiptTimeAssessment`` object identity from final preflight is passed unchanged
 to the freshness evaluator.
 
 No clock read of its own; no operational DB write; no network/credential/broker access.
@@ -26,6 +26,7 @@ from pathlib import Path
 from composition.activation_candidate_final_preflight import (
     ActivationCandidateFinalPreflightOutcome,
     ActivationCandidateFinalPreflightResult,
+    final_preflight_now_is_invalid,
     final_preflight_verified_activation_candidate,
 )
 from composition.receipt_freshness_policy import (
@@ -33,7 +34,7 @@ from composition.receipt_freshness_policy import (
     ReceiptFreshnessOutcome,
     ReceiptFreshnessPolicy,
     evaluate_receipt_freshness,
-    receipt_freshness_policy_is_valid,
+    snapshot_receipt_freshness_policy,
 )
 from composition.verified_precheck_receipt import (
     VerifiedReceiptSnapshotOutcome,
@@ -85,11 +86,14 @@ def freshness_qualify_activation_candidate(
 ) -> ActivationCandidateFreshnessPreflightResult:
     """Run verified final preflight then explicit freshness evaluation.
 
-    ``policy`` is required — no optional/default/config fallback. Invalid policy short-circuits
-    before snapshot, verifier, filesystem, or SQLite access."""
+    ``policy`` is required — no optional/default/config fallback. Processing order: policy
+    snapshot → ``now`` guard → receipt snapshot → verified final core → freshness evaluation.
+    Invalid policy short-circuits before ``now`` validation, snapshot, verifier, filesystem,
+    or SQLite access."""
 
-    # Step 0 — explicit policy strict validation (shared helper with 4k evaluator).
-    if not receipt_freshness_policy_is_valid(policy):
+    # Step 1 — explicit policy strict validation + one-shot snapshot (caller policy frozen).
+    policy_snapshot = snapshot_receipt_freshness_policy(policy)
+    if policy_snapshot is None:
         return _freshness_no_go(
             reasons=("candidate_freshness_policy_invalid",),
             receipt_sha256=None,
@@ -100,7 +104,19 @@ def freshness_qualify_activation_candidate(
             freshness_policy_evaluated=False,
         )
 
-    # Step 1 — raw receipt를 strict detached snapshot으로 한 번만 변환.
+    # Step 2 — strict ``now`` guard (shared with final-preflight wrapper/core).
+    if final_preflight_now_is_invalid(now):
+        return _freshness_no_go(
+            reasons=("candidate_invalid_now",),
+            receipt_sha256=None,
+            market=None,
+            symbol=None,
+            final_preflight_result=None,
+            freshness_evaluation=None,
+            freshness_policy_evaluated=False,
+        )
+
+    # Step 3 — raw receipt를 strict detached snapshot으로 한 번만 변환.
     snapshot_result = verify_and_snapshot_precheck_receipt(receipt_payload)
     if snapshot_result.outcome is not VerifiedReceiptSnapshotOutcome.VALID:
         return _freshness_no_go(
@@ -114,7 +130,7 @@ def freshness_qualify_activation_candidate(
         )
     assert snapshot_result.receipt is not None
 
-    # Step 2 — verified final-preflight core (verifier 0, raw payload 0).
+    # Step 4 — verified final-preflight core (verifier 0, raw payload 0).
     final_result = final_preflight_verified_activation_candidate(
         settings=settings,
         receipt=snapshot_result.receipt,
@@ -132,10 +148,10 @@ def freshness_qualify_activation_candidate(
             freshness_policy_evaluated=False,
         )
 
-    # Step 3 — explicit freshness evaluation on the same receipt-time assessment object.
+    # Step 5 — explicit freshness evaluation on the same receipt-time assessment object.
     freshness_evaluation = evaluate_receipt_freshness(
         time_assessment=final_result.receipt_time_assessment,
-        policy=policy,
+        policy=policy_snapshot,
     )
     if freshness_evaluation.outcome is ReceiptFreshnessOutcome.FRESH:
         return ActivationCandidateFreshnessPreflightResult(

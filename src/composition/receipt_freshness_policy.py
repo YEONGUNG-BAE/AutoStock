@@ -25,6 +25,7 @@ __all__ = [
     "ReceiptFreshnessPolicy",
     "ReceiptFreshnessEvaluation",
     "receipt_freshness_policy_is_valid",
+    "snapshot_receipt_freshness_policy",
     "evaluate_receipt_freshness",
 ]
 
@@ -64,7 +65,20 @@ class ReceiptFreshnessEvaluation:
 def receipt_freshness_policy_is_valid(policy: object) -> bool:
     """Exact ``ReceiptFreshnessPolicy`` with a valid max-age — shared with freshness preflight."""
 
-    return _validated_policy_max_age(policy) is not None
+    return snapshot_receipt_freshness_policy(policy) is not None
+
+
+def snapshot_receipt_freshness_policy(policy: object) -> ReceiptFreshnessPolicy | None:
+    """Validate caller policy once and return an immutable snapshot instance.
+
+    Reads ``max_age_microseconds`` exactly once from an exact ``ReceiptFreshnessPolicy``.
+    The snapshot is not a default, persistence layer, or config binding — it freezes the
+    caller-supplied value for the remainder of one qualified-preflight call."""
+
+    max_age = _validated_policy_max_age(policy)
+    if max_age is None:
+        return None
+    return ReceiptFreshnessPolicy(max_age_microseconds=max_age)
 
 
 def _validated_policy_max_age(policy: object) -> int | None:

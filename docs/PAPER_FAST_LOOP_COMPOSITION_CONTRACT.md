@@ -298,6 +298,15 @@ Eight mutually-exclusive modes (default `--validate-only`):
 - **Forbidden, even at the root:** `socket`, `websocket`, `websockets`, `http`,
   `httpx`, `urllib`, `requests`, `data`, `llm` (network/transport/credential/
   live-data/LLM surfaces).
+
+### RTM-7c.4l — freshness-qualified preflight (API-only; not a CLI mode)
+
+`freshness_qualify_activation_candidate` is **not** wired into `ops/run_paper_fast_loop.py`.
+Closure processing order: policy snapshot → shared `now` guard → receipt snapshot → verified
+final core → freshness evaluation (snapshot policy). `--final-preflight-activation-candidate`
+and the policy-neutral wrapper are unchanged (`freshness_policy_evaluated=false`). See
+`PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`.
+
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,
   `decision`, `analysis`, `config`, `composition`. Any first-party package

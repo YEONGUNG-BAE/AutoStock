@@ -218,6 +218,21 @@ therefore called exactly once per preflight, and a cross-stage mutation of the r
 cannot mix observations (hash from one read, age from another). See
 `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
 
+## RTM-7c.4l — shared `now` guard on verified core
+
+`final_preflight_now_is_invalid(now)` is the shared strict fail-closed guard used by:
+
+- `final_preflight_activation_candidate` (before receipt snapshot)
+- `final_preflight_verified_activation_candidate` (before revalidation — direct public API)
+- `freshness_qualify_activation_candidate` (after policy snapshot, before receipt snapshot)
+
+Invalid `now` on the verified core returns `candidate_invalid_now` with identity fields
+`None` (`receipt_sha256`, `market`, `symbol`), `revalidation_result=None`,
+`current_precheck_result=None`, `receipt_time_assessment=None`,
+`fresh_precheck_executed=false`, `receipt_age_evaluated=false`,
+`freshness_policy_evaluated=false`, `activation_authorized=false` — no revalidation,
+receipt-time assessment, precheck, filesystem, or SQLite access.
+
 ## Related contracts
 
 - `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — single immutable snapshot all stages read

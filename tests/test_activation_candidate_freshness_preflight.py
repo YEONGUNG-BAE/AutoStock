@@ -86,6 +86,43 @@ def _assert_posture(result: Any, *, freshness_policy_evaluated: bool) -> None:
 # --- invalid policy early short-circuit ---
 
 
+class _RaisingTzInfo(__import__("datetime").tzinfo):
+    def utcoffset(self, dt: datetime | None) -> Any:
+        raise ValueError("boom")
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> Any:
+        return None
+
+
+class _NoneOffsetTzInfo(__import__("datetime").tzinfo):
+    def utcoffset(self, dt: datetime | None) -> Any:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> Any:
+        return None
+
+
+_INVALID_NOW_CASES = [
+    pytest.param(None, id="none"),
+    pytest.param("2026-06-16T00:30:00+09:00", id="str"),
+    pytest.param(1718498400, id="int"),
+    pytest.param(datetime(2026, 6, 16, 0, 30), id="naive"),  # noqa: DTZ001
+    pytest.param(
+        datetime(2026, 6, 16, 0, 30, tzinfo=_RaisingTzInfo()),
+        id="raising_tz",
+    ),
+    pytest.param(
+        datetime(2026, 6, 16, 0, 30, tzinfo=_NoneOffsetTzInfo()),
+        id="none_offset",
+    ),
+]
+
 @pytest.mark.parametrize(
     "bad_policy",
     [
@@ -151,6 +188,233 @@ def test_policy_subclass_short_circuits(tmp_path: Path, monkeypatch: pytest.Monk
         base_dir=tmp_path,
     )
     assert result.reasons == ("candidate_freshness_policy_invalid",)
+
+
+def test_invalid_policy_beats_invalid_now(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=None,  # type: ignore[arg-type]
+        policy=ReceiptFreshnessPolicy(max_age_microseconds=-1),
+        base_dir=tmp_path,
+    )
+    assert result.reasons == ("candidate_freshness_policy_invalid",)
+    _assert_posture(result, freshness_policy_evaluated=False)
+
+
+@pytest.mark.parametrize("bad_now", _INVALID_NOW_CASES)
+def test_invalid_now_short_circuits_before_receipt_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_now: object,
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    policy = _policy(100)
+
+    def _fail_receipt_snapshot(_: object) -> object:
+        raise AssertionError("receipt snapshot must not run for invalid now")
+
+    def _fail_final(*_a: object, **_k: object) -> object:
+        raise AssertionError("final preflight must not run for invalid now")
+
+    def _fail_eval(*_a: object, **_k: object) -> object:
+        raise AssertionError("freshness evaluator must not run for invalid now")
+
+    monkeypatch.setattr(freshness_mod, "verify_and_snapshot_precheck_receipt", _fail_receipt_snapshot)
+    monkeypatch.setattr(freshness_mod, "final_preflight_verified_activation_candidate", _fail_final)
+    monkeypatch.setattr(freshness_mod, "evaluate_receipt_freshness", _fail_eval)
+
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=bad_now,  # type: ignore[arg-type]
+        policy=policy,
+        base_dir=tmp_path,
+    )
+    assert result.outcome is ActivationCandidateFreshnessPreflightOutcome.NO_GO
+    assert result.reasons == ("candidate_invalid_now",)
+    assert result.receipt_sha256 is None
+    assert result.market is None
+    assert result.symbol is None
+    assert result.final_preflight_result is None
+    assert result.freshness_evaluation is None
+    _assert_posture(result, freshness_policy_evaluated=False)
+
+
+def test_invalid_now_matches_final_preflight_wrapper_reason(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    wrapper = fp_helper.final_preflight_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=None,  # type: ignore[arg-type]
+        base_dir=tmp_path,
+    )
+    qualified = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=None,  # type: ignore[arg-type]
+        policy=_policy(100),
+        base_dir=tmp_path,
+    )
+    assert wrapper.reasons == ("candidate_invalid_now",)
+    assert qualified.reasons == ("candidate_invalid_now",)
+
+
+def test_valid_policy_invalid_now_policy_snapshot_once_receipt_snapshot_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    policy_calls: list[int] = []
+    receipt_calls: list[int] = []
+    real_policy_snapshot = freshness_mod.snapshot_receipt_freshness_policy
+
+    def _spy_policy(policy: object) -> ReceiptFreshnessPolicy | None:
+        policy_calls.append(1)
+        return real_policy_snapshot(policy)
+
+    def _fail_receipt_snapshot(_: object) -> object:
+        receipt_calls.append(1)
+        raise AssertionError("receipt snapshot must not run for invalid now")
+
+    monkeypatch.setattr(freshness_mod, "snapshot_receipt_freshness_policy", _spy_policy)
+    monkeypatch.setattr(freshness_mod, "verify_and_snapshot_precheck_receipt", _fail_receipt_snapshot)
+
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=datetime(2026, 6, 16),  # naive  # noqa: DTZ001
+        policy=_policy(100),
+        base_dir=tmp_path,
+    )
+    assert result.reasons == ("candidate_invalid_now",)
+    assert len(policy_calls) == 1
+    assert receipt_calls == []
+
+
+# --- policy snapshot + mutation ---
+
+
+def test_policy_mutation_during_final_core_pass_uses_initial_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    policy = ReceiptFreshnessPolicy(max_age_microseconds=100)
+    now = _NOW + timedelta(microseconds=50)
+    real_reval = final_mod.revalidate_verified_activation_candidate
+
+    def _mutating_reval(*args: Any, **kwargs: Any) -> Any:
+        object.__setattr__(policy, "max_age_microseconds", 0)
+        return real_reval(*args, **kwargs)
+
+    monkeypatch.setattr(final_mod, "revalidate_verified_activation_candidate", _mutating_reval)
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=now,
+        policy=policy,
+        base_dir=tmp_path,
+    )
+    assert result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    assert result.freshness_evaluation is not None
+    assert result.freshness_evaluation.max_age_microseconds == 100
+
+
+def test_policy_mutation_during_final_core_stale_uses_initial_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    policy = ReceiptFreshnessPolicy(max_age_microseconds=0)
+    now = _NOW + timedelta(microseconds=50)
+    real_reval = final_mod.revalidate_verified_activation_candidate
+
+    def _mutating_reval(*args: Any, **kwargs: Any) -> Any:
+        object.__setattr__(policy, "max_age_microseconds", 100)
+        return real_reval(*args, **kwargs)
+
+    monkeypatch.setattr(final_mod, "revalidate_verified_activation_candidate", _mutating_reval)
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=now,
+        policy=policy,
+        base_dir=tmp_path,
+    )
+    assert result.reasons == ("candidate_receipt_stale",)
+    assert result.freshness_evaluation is not None
+    assert result.freshness_evaluation.max_age_microseconds == 0
+
+
+def test_policy_mutation_after_result_does_not_change_nested_evaluation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    policy = ReceiptFreshnessPolicy(max_age_microseconds=100)
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=_NOW,
+        policy=policy,
+        base_dir=tmp_path,
+    )
+    frozen_eval = result.freshness_evaluation
+    object.__setattr__(policy, "max_age_microseconds", 0)
+    assert result.freshness_evaluation is frozen_eval
+    assert result.freshness_evaluation.max_age_microseconds == 100
+
+
+def test_evaluator_receives_snapshot_not_caller_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    caller_policy = ReceiptFreshnessPolicy(max_age_microseconds=100)
+    seen: list[ReceiptFreshnessPolicy] = []
+
+    def _spy_eval(*, time_assessment: Any, policy: ReceiptFreshnessPolicy) -> Any:
+        seen.append(policy)
+        return evaluate_receipt_freshness(time_assessment=time_assessment, policy=policy)
+
+    monkeypatch.setattr(freshness_mod, "evaluate_receipt_freshness", _spy_eval)
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=_NOW,
+        policy=caller_policy,
+        base_dir=tmp_path,
+    )
+    assert result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    assert len(seen) == 1
+    assert type(seen[0]) is ReceiptFreshnessPolicy
+    assert seen[0] is not caller_policy
+    assert seen[0].max_age_microseconds == 100
+
+
+def test_policy_snapshot_builds_once_on_valid_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    calls: list[int] = []
+    real = freshness_mod.snapshot_receipt_freshness_policy
+
+    def _spy(policy: object) -> ReceiptFreshnessPolicy | None:
+        calls.append(1)
+        return real(policy)
+
+    monkeypatch.setattr(freshness_mod, "snapshot_receipt_freshness_policy", _spy)
+    result = _qualify(tmp_path, receipt=receipt, settings=settings)
+    assert result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    assert len(calls) == 1
 
 
 # --- fresh boundary ---
@@ -491,3 +755,33 @@ def test_evaluator_defensive_no_go_maps_to_candidate_reason(
     result = _qualify(tmp_path, receipt=receipt, settings=settings)
     assert result.reasons == ("candidate_freshness_evaluation_invalid",)
     _assert_posture(result, freshness_policy_evaluated=False)
+
+
+@pytest.mark.parametrize(
+    ("policy_ok", "now_ok", "receipt_ok", "expected_reason"),
+    [
+        (False, False, True, "candidate_freshness_policy_invalid"),
+        (True, False, True, "candidate_invalid_now"),
+        (True, True, False, "candidate_receipt_invalid"),
+    ],
+    ids=["invalid_policy", "invalid_now", "invalid_receipt"],
+)
+def test_reason_precedence_matrix_early_short_circuits(
+    tmp_path: Path,
+    policy_ok: bool,
+    now_ok: bool,
+    receipt_ok: bool,
+    expected_reason: str,
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings) if receipt_ok else {"schema_version": 1}
+    policy = _policy(100) if policy_ok else ReceiptFreshnessPolicy(max_age_microseconds=-1)
+    now = _NOW if now_ok else None
+    result = freshness_qualify_activation_candidate(
+        settings=settings,
+        receipt_payload=receipt,
+        now=now,  # type: ignore[arg-type]
+        policy=policy,
+        base_dir=tmp_path,
+    )
+    assert result.reasons == (expected_reason,)
