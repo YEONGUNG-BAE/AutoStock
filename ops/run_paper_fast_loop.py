@@ -139,8 +139,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "stdin receipt + config: 4g byte-state revalidation + fresh current-time machine "
             "precheck (snapshot/active-decision validity) bound back to the receipt's "
-            "post-inspection state; current_validity_evaluated, receipt_age NOT evaluated, no "
-            "freshness policy; mechanical PASS is NOT activation authorization"
+            "post-inspection state; fresh_precheck_executed reports whether that precheck ran, "
+            "receipt_age NOT evaluated, no freshness policy; mechanical PASS is NOT activation "
+            "authorization"
         ),
     )
     parser.add_argument(
@@ -383,7 +384,9 @@ def _final_preflight_summary(result: Any, *, config_path: str) -> dict[str, Any]
         "reasons": list(result.reasons),
         "current_precheck_outcome": precheck.machine_outcome.value if precheck is not None else None,
         "current_precheck_reasons": list(precheck.reasons) if precheck is not None else [],
-        "current_validity_evaluated": result.current_validity_evaluated,
+        # per-call 실행 사실: fresh precheck가 실제로 돌았는지. read-only DB inspection이
+        # 이 안에서 일어날 수 있으나, connection 개수를 주장하지 않는다.
+        "fresh_precheck_executed": result.fresh_precheck_executed,
         "receipt_age_evaluated": result.receipt_age_evaluated,
         "freshness_policy_evaluated": result.freshness_policy_evaluated,
         "activation_authorized": result.activation_authorized,
@@ -395,9 +398,6 @@ def _final_preflight_summary(result: Any, *, config_path: str) -> dict[str, Any]
         "credential_read": False,
         "network_called": False,
         "broker_called": False,
-        # 합성 precheck는 inspect를 통해 DB를 read-only로 연다(쓰기 없음). database_opened은
-        # 정직하게 precheck 실행 여부를 반영한다.
-        "read_only_databases_opened": precheck is not None,
         "operational_db_written": False,
         "filesystem_written": False,
         "runtime_file_created": False,
@@ -414,7 +414,7 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
         "reasons": [reason_code],
         "current_precheck_outcome": None,
         "current_precheck_reasons": [],
-        "current_validity_evaluated": True,
+        "fresh_precheck_executed": False,
         "receipt_age_evaluated": False,
         "freshness_policy_evaluated": False,
         "activation_authorized": False,
@@ -424,7 +424,6 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
         "credential_read": False,
         "network_called": False,
         "broker_called": False,
-        "read_only_databases_opened": False,
         "operational_db_written": False,
         "filesystem_written": False,
         "runtime_file_created": False,

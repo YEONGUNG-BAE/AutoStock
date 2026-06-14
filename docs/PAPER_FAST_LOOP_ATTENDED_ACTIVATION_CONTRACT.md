@@ -91,10 +91,11 @@ Unset policy items stay **OPEN**. RTM-7c.4g implements the machine-verifiable
 + config binding) without consuming approval or authorizing activation. RTM-7c.4h adds
 the **time-aware final preflight** step: 4g byte-state revalidation composed with a
 fresh caller-time precheck, so a byte-identical snapshot / active-decision whose
-validity window has since opened or closed is caught (`current_validity_evaluated`).
-It still does **not** evaluate receipt age (`receipt_age_evaluated=false`) or freshness
-(`freshness_policy_evaluated=false`). Receipt freshness, receipt-age/TTL, authenticity,
-and Operator approval binding remain **OPEN**.
+validity window has since opened or closed is caught. The per-call
+`fresh_precheck_executed` flag records whether that fresh precheck actually ran (false for
+short-circuit NO_GOs that return before it). It still does **not** evaluate receipt age
+(`receipt_age_evaluated=false`) or freshness (`freshness_policy_evaluated=false`). Receipt
+freshness, receipt-age/TTL, authenticity, and Operator approval binding remain **OPEN**.
 
 ## Orphan sidecar observation limit
 

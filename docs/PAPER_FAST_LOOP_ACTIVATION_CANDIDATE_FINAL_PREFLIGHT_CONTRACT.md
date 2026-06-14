@@ -74,21 +74,37 @@ active_decision_store
 Raw paths, SHA values, DB contents, exception types, and config secrets never appear
 in reasons.
 
-## Fixed activation posture (every path)
+## Activation posture (every path)
+
+Constant on every path:
 
 ```text
 activation_authorized = false
 runtime_activation_outcome = "no_go"
 explicit_operator_approval_required = true
 writers_stopped_manual_confirmation_required = true
-current_validity_evaluated = true
 receipt_age_evaluated = false
 freshness_policy_evaluated = false
 ```
 
-The three `*_evaluated` flags describe the **lane's evaluation policy** (it checks
-current-time validity; it never checks receipt age or freshness), not per-call
-completion. Mechanical `PASS` does **not** set `activation_authorized=true`.
+`receipt_age_evaluated` / `freshness_policy_evaluated` are constant `false` — this lane
+never evaluates receipt age or any freshness policy.
+
+The one **per-call** field is `fresh_precheck_executed`: it is `true` only when the
+composed `precheck_runtime` actually ran (current snapshot/active-decision validity was
+re-checked at the caller `now`), and `false` for every short-circuit that returns first.
+
+| path | `fresh_precheck_executed` |
+|------|:---:|
+| `now` naive / malformed (`candidate_invalid_now`) | false |
+| receipt invalid / not machine PASS | false |
+| config disabled / market / symbol / enabled mismatch | false |
+| 4g artifact unreadable / mismatch / current-window drift | false |
+| fresh precheck ran → PASS | true |
+| fresh precheck ran → machine NO_GO (expired / not-yet-valid / nonterminal / non-quiescent) | true |
+| post-revalidation drift (fresh precheck ran) | true |
+
+Mechanical `PASS` does **not** set `activation_authorized=true`.
 
 ## CLI contract
 
@@ -108,16 +124,35 @@ Mode: `--final-preflight-activation-candidate` (8th mutually-exclusive mode).
 | `NO_GO` | 1 |
 | config / stdin / internal sanitized failure | 1 |
 
-JSON fields include `current_precheck_outcome`, `current_precheck_reasons`, the seven
-posture flags, and the isolation flags `credential_read`, `network_called`,
-`broker_called`, `operational_db_written`, `filesystem_written`,
-`runtime_file_created` (all `false`), plus **`read_only_databases_opened`** — which
-honestly reflects whether the composed precheck ran (it opens the configured DBs
-**read-only**: `mode=ro` + `PRAGMA query_only`). There is **no** `database_opened=false`
-claim, because the composed precheck does open read-only connections.
+JSON fields include `current_precheck_outcome`, `current_precheck_reasons`,
+`fresh_precheck_executed`, the constant posture flags, and the isolation flags
+`credential_read`, `network_called`, `broker_called`, `operational_db_written`,
+`filesystem_written`, `runtime_file_created` (all `false`).
+
+The CLI does **not** emit `read_only_databases_opened`, `database_opened`, or any
+connection-count field. Production code does not collect connection-open telemetry, so no
+such claim is made. `fresh_precheck_executed=true` means the fresh `precheck_runtime` call
+ran — during which a **read-only** SQLite inspection may open the configured DBs
+(`mode=ro` + `PRAGMA query_only`) — but it does **not** assert a connection count.
+`operational_db_written=false` is the write-side guarantee.
 
 CLI loads config with `load_settings(config_path, environ={})` — no `os.environ`
 access; `${...}` substitution fails closed.
+
+## SQLite access
+
+```text
+read-only SQLite inspection: allowed (on fresh-precheck paths)
+write-capable SQLite connections: 0
+SQLite writes: 0
+schema changes: 0
+journal reconcile: 0
+store constructors: 0
+new sidecars: 0
+```
+
+A fresh-precheck path opens the configured DBs read-only (`mode=ro`); no write-capable
+connection is ever opened and the DB bytes / `user_version` / sidecar set are unchanged.
 
 ## Out of scope (this lane)
 

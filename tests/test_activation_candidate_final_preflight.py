@@ -68,14 +68,21 @@ def _pass_receipt_for_seeded_stack(tmp_path: Path, settings: RuntimePaperFastLoo
     return _receipt_dict_from_precheck(tmp_path, settings)
 
 
-def _assert_posture(result: Any) -> None:
+def _assert_posture(result: Any, *, fresh_precheck_executed: bool) -> None:
+    """Assert the constant activation posture plus the per-call execution flag.
+
+    ``fresh_precheck_executed`` must be ``True`` only when the composed precheck actually
+    ran (PASS, or a fresh-precheck machine NO_GO, or post-revalidation drift) and ``False``
+    for every short-circuit that returns before it (naive ``now``, any 4g NO_GO)."""
+
     assert result.activation_authorized is False
     assert result.runtime_activation_outcome == "no_go"
     assert result.explicit_operator_approval_required is True
     assert result.writers_stopped_manual_confirmation_required is True
-    assert result.current_validity_evaluated is True
+    assert result.fresh_precheck_executed is fresh_precheck_executed
     assert result.receipt_age_evaluated is False
     assert result.freshness_policy_evaluated is False
+    assert not hasattr(result, "current_validity_evaluated")
 
 
 # --- 15.2 happy path ---
@@ -97,7 +104,7 @@ def test_final_preflight_pass_on_valid_now(tmp_path: Path) -> None:
     assert result.current_precheck_result is not None
     assert result.current_precheck_result.machine_outcome is MachineCheckOutcome.PASS
     assert result.revalidation_result is not None
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=True)
 
 
 def test_final_preflight_pass_with_kst_aware_now(tmp_path: Path) -> None:
@@ -108,7 +115,7 @@ def test_final_preflight_pass_with_kst_aware_now(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW_KST, base_dir=tmp_path
     )
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=True)
 
 
 # --- 15.3 current time validity (byte-identical, time-window NO_GO) ---
@@ -129,7 +136,7 @@ def test_final_preflight_no_go_when_snapshot_and_decision_expired(tmp_path: Path
     assert "candidate_current_precheck:active_decision_expired" in result.reasons
     # every current-validity reason carries the stable prefix; no raw precheck reason leaks.
     assert all(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=True)
 
 
 def test_final_preflight_no_go_when_snapshot_and_decision_not_yet_valid(tmp_path: Path) -> None:
@@ -144,7 +151,7 @@ def test_final_preflight_no_go_when_snapshot_and_decision_not_yet_valid(tmp_path
     assert "candidate_current_precheck:execution_inputs_not_yet_valid" in result.reasons
     assert "candidate_current_precheck:active_decision_not_yet_valid" in result.reasons
     assert all(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=True)
 
 
 def test_final_preflight_current_precheck_result_carried_on_no_go(tmp_path: Path) -> None:
@@ -155,6 +162,7 @@ def test_final_preflight_current_precheck_result_carried_on_no_go(tmp_path: Path
     )
     assert result.current_precheck_result is not None
     assert result.current_precheck_result.machine_outcome is MachineCheckOutcome.NO_GO
+    assert result.fresh_precheck_executed is True
 
 
 # Byte-changing failures (corrupt / nonterminal / non-quiescent) cannot survive a PASS receipt
@@ -175,6 +183,7 @@ def test_final_preflight_no_go_on_non_quiescent_caught_at_revalidation(tmp_path:
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
     assert result.reasons == ("candidate_receipt_artifact_mismatch:ledger",)
     assert result.current_precheck_result is None  # never reached the fresh precheck
+    assert result.fresh_precheck_executed is False
 
 
 def test_final_preflight_no_go_on_corrupt_active_bundle_caught_at_revalidation(tmp_path: Path) -> None:
@@ -190,6 +199,7 @@ def test_final_preflight_no_go_on_corrupt_active_bundle_caught_at_revalidation(t
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
     assert result.reasons == ("candidate_receipt_artifact_mismatch:active_decision_store",)
     assert result.current_precheck_result is None
+    assert result.fresh_precheck_executed is False
 
 
 # --- 15.4 post-revalidation drift ---
@@ -239,7 +249,7 @@ def test_final_preflight_post_revalidation_drift(
     # drift is NOT double-counted as the fresh precheck's own within-window change.
     assert f"precheck_artifact_changed:{artifact_name}" not in result.reasons
     assert not any(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=True)
 
 
 # --- 15.5 receipt / config rejection (4g matrix preserved) ---
@@ -253,7 +263,7 @@ def test_final_preflight_rejects_invalid_receipt(tmp_path: Path) -> None:
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
     assert result.reasons == ("candidate_receipt_invalid",)
     assert result.current_precheck_result is None
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 def test_final_preflight_rejects_no_go_receipt(tmp_path: Path) -> None:
@@ -267,6 +277,8 @@ def test_final_preflight_rejects_no_go_receipt(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
     )
     assert result.reasons == ("candidate_receipt_not_pass",)
+    assert result.current_precheck_result is None
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 def test_final_preflight_rejects_market_mismatch(tmp_path: Path) -> None:
@@ -277,6 +289,8 @@ def test_final_preflight_rejects_market_mismatch(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
     )
     assert result.reasons == ("candidate_market_mismatch",)
+    assert result.current_precheck_result is None
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 def test_final_preflight_rejects_symbol_mismatch(tmp_path: Path) -> None:
@@ -286,6 +300,8 @@ def test_final_preflight_rejects_symbol_mismatch(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
     )
     assert result.reasons == ("candidate_symbol_mismatch",)
+    assert result.current_precheck_result is None
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 def test_final_preflight_rejects_config_disabled(tmp_path: Path) -> None:
@@ -295,6 +311,8 @@ def test_final_preflight_rejects_config_disabled(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
     )
     assert result.reasons == ("candidate_config_disabled",)
+    assert result.current_precheck_result is None
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 # --- 15.6 time contract ---
@@ -316,7 +334,7 @@ def test_final_preflight_naive_now_is_fail_closed(tmp_path: Path, naive_now: dat
     # never reached revalidation or precheck.
     assert result.revalidation_result is None
     assert result.current_precheck_result is None
-    _assert_posture(result)
+    _assert_posture(result, fresh_precheck_executed=False)
 
 
 def test_final_preflight_naive_now_does_not_call_precheck(
@@ -333,6 +351,7 @@ def test_final_preflight_naive_now_does_not_call_precheck(
         settings=settings, receipt_payload=receipt, now=datetime(2026, 6, 16), base_dir=tmp_path
     )
     assert result.reasons == ("candidate_invalid_now",)
+    assert result.fresh_precheck_executed is False
 
 
 def test_final_preflight_api_has_no_clock_read_in_source() -> None:
@@ -345,6 +364,80 @@ def test_final_preflight_api_has_no_clock_read_in_source() -> None:
     assert "datetime.now" not in source
     assert "time.time" not in source
     assert "time.monotonic" not in source
+
+
+# --- fresh-precheck execution truthfulness (P1 closure) ---
+
+
+def _count_precheck_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    calls: list[int] = []
+    real = final_mod.precheck_runtime
+
+    def _spy(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(final_mod, "precheck_runtime", _spy)
+    return calls
+
+
+def _no_go_receipt() -> dict[str, Any]:
+    return vrf_helper._valid_receipt(
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=pfl_helper.InspectionOutcome.NO_GO,
+        reasons=("missing_database:ledger",),
+    )
+
+
+def test_final_preflight_short_circuit_paths_do_not_run_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every pre-precheck short-circuit: precheck_runtime call count 0 and
+    fresh_precheck_executed False."""
+    settings = _settings(tmp_path)
+    valid = vrf_helper._valid_receipt()
+
+    cases: list[tuple[RuntimePaperFastLoopSettings, object, datetime]] = [
+        (settings, valid, datetime(2026, 6, 16)),  # naive now
+        (settings, {"schema_version": 1}, _NOW),  # invalid receipt
+        (settings, _no_go_receipt(), _NOW),  # machine NO_GO receipt
+        (_settings(tmp_path, enabled=False), vrf_helper._valid_receipt(enabled=False), _NOW),
+        (_market(settings, "US"), vrf_helper._valid_receipt(), _NOW),  # market mismatch
+        (settings, vrf_helper._valid_receipt(symbol="000660"), _NOW),  # symbol mismatch
+    ]
+    for case_settings, receipt, now in cases:
+        calls = _count_precheck_calls(monkeypatch)
+        result = final_preflight_activation_candidate(
+            settings=case_settings, receipt_payload=receipt, now=now, base_dir=tmp_path
+        )
+        assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
+        assert result.fresh_precheck_executed is False
+        assert result.current_precheck_result is None
+        assert len(calls) == 0
+        monkeypatch.undo()
+
+
+def _market(settings: RuntimePaperFastLoopSettings, value: str) -> RuntimePaperFastLoopSettings:
+    object.__setattr__(settings, "market", value)
+    return settings
+
+
+@pytest.mark.parametrize("now", [_NOW, _FUTURE, _PAST], ids=["pass", "expired", "not_yet_valid"])
+def test_final_preflight_executed_paths_run_precheck_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, now: datetime
+) -> None:
+    """PASS and fresh-precheck NO_GO both run precheck_runtime exactly once and report
+    fresh_precheck_executed True."""
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    calls = _count_precheck_calls(monkeypatch)
+
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=now, base_dir=tmp_path
+    )
+    assert len(calls) == 1
+    assert result.fresh_precheck_executed is True
+    assert result.current_precheck_result is not None
 
 
 # --- 15.7 isolation (read-only connections allowed; no write/network/broker/env/spawn) ---
@@ -386,9 +479,13 @@ def test_final_preflight_sqlite_connections_are_read_only(
         settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
     )
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
-    # the composed precheck opens DBs read-only — every connection is mode=ro, none read-write.
+    # the composed precheck DOES open DBs (read-only): at least one connection must occur,
+    # and every connection is mode=ro with zero write-capable (mode=rw / mode=rwc) opens.
+    assert len(uris) >= 1
     for uri in uris:
         assert "mode=ro" in uri
+        assert "mode=rwc" not in uri
+        assert "mode=rw&" not in uri and not uri.endswith("mode=rw")
 
 
 def test_final_preflight_zero_filesystem_write(
@@ -483,7 +580,7 @@ def test_final_preflight_cli_pass(
     assert payload["reasons"] == []
     assert payload["current_precheck_outcome"] == "pass"
     assert payload["current_precheck_reasons"] == []
-    assert payload["current_validity_evaluated"] is True
+    assert payload["fresh_precheck_executed"] is True
     assert payload["receipt_age_evaluated"] is False
     assert payload["freshness_policy_evaluated"] is False
     assert payload["activation_authorized"] is False
@@ -494,8 +591,11 @@ def test_final_preflight_cli_pass(
     assert payload["network_called"] is False
     assert payload["broker_called"] is False
     assert payload["operational_db_written"] is False
-    assert payload["read_only_databases_opened"] is True
     assert payload["filesystem_written"] is False
+    # misleading DB-open telemetry must not be emitted.
+    assert "read_only_databases_opened" not in payload
+    assert "database_opened" not in payload
+    assert "current_validity_evaluated" not in payload
 
 
 def test_final_preflight_cli_no_go_expired(
@@ -518,6 +618,7 @@ def test_final_preflight_cli_no_go_expired(
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["current_precheck_outcome"] == "no_go"
+    assert payload["fresh_precheck_executed"] is True
     assert any(r.startswith("candidate_current_precheck:") for r in payload["reasons"])
     assert "candidate_current_precheck:execution_inputs_expired" in payload["reasons"]
 
@@ -541,7 +642,10 @@ def test_final_preflight_cli_stdin_empty(capsys: pytest.CaptureFixture[str]) -> 
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["receipt_input_empty"]
-    assert payload["read_only_databases_opened"] is False
+    assert payload["fresh_precheck_executed"] is False
+    assert "read_only_databases_opened" not in payload
+    assert "database_opened" not in payload
+    assert "current_validity_evaluated" not in payload
 
 
 def test_final_preflight_cli_config_disabled(
@@ -560,6 +664,10 @@ def test_final_preflight_cli_config_disabled(
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["candidate_config_disabled"]
+    # revalidation short-circuit: fresh precheck never ran, no current-precheck outcome.
+    assert payload["fresh_precheck_executed"] is False
+    assert payload["current_precheck_outcome"] is None
+    assert "read_only_databases_opened" not in payload
 
 
 class _NoEnvironAccess:

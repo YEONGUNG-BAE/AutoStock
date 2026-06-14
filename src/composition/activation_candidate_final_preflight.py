@@ -5,7 +5,9 @@ precheck so that — even when every artifact byte is identical to the candidate
 post-inspection state — an execution-inputs snapshot or active decision whose validity window
 has since opened/closed (or any other current-time precheck NO_GO) is caught.
 
-This lane evaluates **current state time-validity** only. It deliberately does NOT evaluate
+When it runs the fresh precheck this lane evaluates **current state time-validity** only.
+The per-call ``fresh_precheck_executed`` flag records whether that precheck actually ran
+(it does not for short-circuit NO_GOs that return first). It deliberately does NOT evaluate
 receipt age / max-age (``receipt_age_evaluated = False``), nor any freshness policy
 (``freshness_policy_evaluated = False``). It does not authenticate the receipt, consume an
 Operator approval, assert writer-stop, or activate anything — the activation posture is a
@@ -43,16 +45,24 @@ __all__ = [
     "final_preflight_activation_candidate",
 ]
 
-# 고정 posture — 모든 경로에서 동일. activation/approval/receipt-age/freshness 모두 미평가/미승인.
-_FINAL_PREFLIGHT_POSTURE: dict[str, object] = {
-    "activation_authorized": False,
-    "runtime_activation_outcome": "no_go",
-    "explicit_operator_approval_required": True,
-    "writers_stopped_manual_confirmation_required": True,
-    "current_validity_evaluated": True,
-    "receipt_age_evaluated": False,
-    "freshness_policy_evaluated": False,
-}
+def _posture(*, fresh_precheck_executed: bool) -> dict[str, object]:
+    """Activation posture for one return path.
+
+    activation/approval/receipt-age/freshness are never evaluated or granted (constant).
+    ``fresh_precheck_executed`` is the only per-call value: it is ``True`` only when the
+    composed ``precheck_runtime`` actually ran (current snapshot/active-decision validity
+    was re-checked at the caller ``now``), and ``False`` for every short-circuit that
+    returns before the fresh precheck (naive ``now``, any 4g revalidation NO_GO)."""
+
+    return {
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+        "fresh_precheck_executed": fresh_precheck_executed,
+        "receipt_age_evaluated": False,
+        "freshness_policy_evaluated": False,
+    }
 
 
 class ActivationCandidateFinalPreflightOutcome(StrEnum):
@@ -64,10 +74,12 @@ class ActivationCandidateFinalPreflightOutcome(StrEnum):
 class ActivationCandidateFinalPreflightResult:
     """Time-aware final preflight verdict — receipt 원문/fingerprint payload 미보관.
 
-    ``current_validity_evaluated`` / ``receipt_age_evaluated`` / ``freshness_policy_evaluated``
-    describe this lane's *evaluation policy* (it checks current-time validity; it never checks
-    receipt age or any freshness policy), not per-call completion. A mechanical PASS is NOT an
-    activation authorization."""
+    ``fresh_precheck_executed`` is a *per-call* fact: ``True`` iff the composed
+    ``precheck_runtime`` actually ran and re-checked current snapshot/active-decision
+    time-validity at the caller ``now``; ``False`` for every short-circuit that returns
+    before it (naive ``now``, any 4g revalidation NO_GO). ``receipt_age_evaluated`` /
+    ``freshness_policy_evaluated`` are constant ``False`` — this lane never evaluates receipt
+    age or any freshness policy. A mechanical PASS is NOT an activation authorization."""
 
     outcome: ActivationCandidateFinalPreflightOutcome
     receipt_sha256: str | None
@@ -76,7 +88,7 @@ class ActivationCandidateFinalPreflightResult:
     reasons: tuple[str, ...]
     revalidation_result: ActivationCandidateRevalidationResult | None
     current_precheck_result: RuntimePrecheckResult | None
-    current_validity_evaluated: bool
+    fresh_precheck_executed: bool
     receipt_age_evaluated: bool
     freshness_policy_evaluated: bool
     activation_authorized: bool
@@ -107,6 +119,7 @@ def final_preflight_activation_candidate(
             symbol=None,
             revalidation=None,
             precheck=None,
+            fresh_precheck_executed=False,
         )
 
     # Step 1 — 4g byte-state revalidation. NO_GO면 즉시 종결, 기존 stable reason 보존.
@@ -121,6 +134,7 @@ def final_preflight_activation_candidate(
             symbol=revalidation.symbol,
             revalidation=revalidation,
             precheck=None,
+            fresh_precheck_executed=False,
         )
 
     # Step 2 — 현재 시각 기준 fresh machine precheck (snapshot/active-decision validity 포함).
@@ -136,6 +150,7 @@ def final_preflight_activation_candidate(
             symbol=revalidation.symbol,
             revalidation=revalidation,
             precheck=precheck,
+            fresh_precheck_executed=True,
         )
 
     # Step 4 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
@@ -152,6 +167,7 @@ def final_preflight_activation_candidate(
             symbol=revalidation.symbol,
             revalidation=revalidation,
             precheck=precheck,
+            fresh_precheck_executed=True,
         )
 
     # Step 5 — mechanical PASS. activation은 여전히 false.
@@ -163,7 +179,7 @@ def final_preflight_activation_candidate(
         reasons=(),
         revalidation_result=revalidation,
         current_precheck_result=precheck,
-        **_FINAL_PREFLIGHT_POSTURE,  # type: ignore[arg-type]
+        **_posture(fresh_precheck_executed=True),  # type: ignore[arg-type]
     )
 
 
@@ -195,6 +211,7 @@ def _no_go(
     symbol: str | None,
     revalidation: ActivationCandidateRevalidationResult | None,
     precheck: RuntimePrecheckResult | None,
+    fresh_precheck_executed: bool,
 ) -> ActivationCandidateFinalPreflightResult:
     return ActivationCandidateFinalPreflightResult(
         outcome=ActivationCandidateFinalPreflightOutcome.NO_GO,
@@ -204,5 +221,5 @@ def _no_go(
         reasons=reasons,
         revalidation_result=revalidation,
         current_precheck_result=precheck,
-        **_FINAL_PREFLIGHT_POSTURE,  # type: ignore[arg-type]
+        **_posture(fresh_precheck_executed=fresh_precheck_executed),  # type: ignore[arg-type]
     )
