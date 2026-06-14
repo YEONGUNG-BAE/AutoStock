@@ -75,6 +75,36 @@ declared_at                       >= evidence.evaluated_at (strict parse)
 all three manual confirmations    = exact True
 ```
 
+**RTM-7c.4o declared-time snapshot closure:** `snapshot_declared_at` freezes caller
+`declared_at` via a detached single observation — `isoformat()` exactly once, then
+`fromisoformat()` into a parsed built-in datetime. Comparison and hash payload use the
+snapshot ISO/parsed values only; the builder never re-reads the caller datetime or caller
+tzinfo. Custom/stateful tzinfo that raises on a second `utcoffset()` call cannot escape
+after snapshot; a first-call raise → `INVALID`. A tzinfo that changes offset after snapshot
+does not affect verdict/hash within a single build.
+
+**RTM-7c.4o combined-PASS qualified consistency closure:** A combined `PASS` also requires
+`type(qualified_result) is ActivationCandidateFreshnessPreflightResult` with:
+
+```text
+qualified.outcome                              = PASS
+qualified.reasons                              = ()
+qualified.receipt_sha256                       = validated evidence.receipt_sha256
+qualified.market                               = validated evidence.market
+qualified.symbol                               = validated evidence.symbol
+qualified.freshness_policy_evaluated           = exact True
+qualified.activation_authorized                = exact False
+qualified.runtime_activation_outcome           = "no_go"
+qualified.explicit_operator_approval_required  = exact True
+qualified.writers_stopped_manual_confirmation_required = exact True
+```
+
+Evidence full semantic contract remains owned by the shared
+`validate_activation_candidate_evidence_scalars` helper — the builder does not re-validate
+nested final/freshness machine proof. Combined PASS with contradictory qualified result
+(e.g. qualified `NO_GO`, identity mismatch, wrong object/subclass, posture mismatch) →
+`INVALID`.
+
 Combined `NO_GO` → `NOT_ELIGIBLE` (`approval_intent_not_eligible`). A contradictory combined
 `PASS` (non-empty reasons, missing/`None`/wrong-type evidence result, evidence not `CREATED`,
 semantically invalid evidence even with matching hash, hash mismatch, invalid declarations, or
@@ -155,6 +185,16 @@ The builder reads each caller-owned object once into locals and reuses those loc
 validation and the hash payload. Malformed or deleted fields fail closed via `AttributeError`
 catch → `INVALID`.
 
+**Declared-at snapshot:** `snapshot_declared_at(declared_at)` calls caller `isoformat()`
+exactly once, re-parses to a timezone-aware built-in datetime, and freezes `(canonical_iso,
+parsed_datetime)`. Time comparison uses `parsed_datetime` only; intent model and hash use
+`canonical_iso` only. No post-snapshot access to caller datetime or caller tzinfo.
+
+**Combined qualified snapshot:** `combined_outcome`, `combined_reasons`, `qualified_result`,
+and `evidence_result` are read once from the combined result; qualified identity/posture
+scalars are read once from `qualified_result`. No post-validation re-read of caller
+combined/qualified objects.
+
 Production validation does **not** use `dataclasses.asdict` or `copy.deepcopy` on
 caller-owned evidence. Caller-defined `__deepcopy__` hooks are never invoked. After the
 single-read snapshot, strict semantic validation runs via the shared
@@ -177,6 +217,15 @@ evidence schema v2 semantic contract:
   substitutes for expected exact strings
 
 Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
+
+## RTM-7c.4o declared-time and qualified-consistency closure
+
+- Caller `declared_at` is frozen by detached single observation (`snapshot_declared_at`).
+- Custom/stateful tzinfo state changes after snapshot do not affect verdict/hash within a build.
+- Combined `PASS` requires consistent qualified `PASS` identity/posture (receipt hash, market,
+  symbol, freshness-policy flag, constant NO-GO posture, approval/writer flags).
+- Evidence semantic validation remains owned by the shared evidence validator.
+- Intent remains unauthenticated, unconsumed, unpersisted; activation remains NO-GO.
 
 ## Integration scope (this lane)
 

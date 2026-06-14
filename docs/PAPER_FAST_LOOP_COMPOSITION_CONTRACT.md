@@ -374,11 +374,15 @@ caller `declared_at` (`declared_at >= evidence.evaluated_at`) into one immutable
 over 12 non-digest fields; fixed `approval_scope="attended_paper_fast_loop_candidate"`).
 Production validation does not use `asdict`/`deepcopy` on caller evidence. Combined `NO_GO` →
 `NOT_ELIGIBLE`; a contradictory combined `PASS`, semantically invalid evidence, hash mismatch,
-non-exact declarations, or invalid `declared_at` → `INVALID`. Pure function: no clock read, no
-verifier/precheck/evaluator/evidence-builder re-invocation, no persistence. Intent is **not**
-identity, signature, writer-stop machine proof, approval consumption, replay prevention, or
-activation authorization. The existing CLI `--freshness-preflight-activation-candidate` is
-unchanged (evidence fields only). See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
+non-exact declarations, invalid `declared_at`, or qualified identity/posture mismatch →
+`INVALID`. **Declared-time snapshot:** `snapshot_declared_at` freezes caller `declared_at` via
+one `isoformat()` call; stateful tzinfo cannot escape after snapshot. **Qualified consistency:**
+combined `PASS` requires qualified `PASS` identity/posture matching validated evidence. Pure
+function: no clock read, no verifier/precheck/evaluator/evidence-builder re-invocation, no
+persistence. Intent is **not** identity, signature, writer-stop machine proof, approval
+consumption, replay prevention, or activation authorization. The existing CLI
+`--freshness-preflight-activation-candidate` is unchanged (evidence fields only). See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,

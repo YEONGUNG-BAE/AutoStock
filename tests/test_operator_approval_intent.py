@@ -10,7 +10,7 @@ import importlib.util
 import json
 import sys
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -36,12 +36,14 @@ from composition.activation_candidate_evidence import (
 )
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
+    ActivationCandidateFreshnessPreflightResult,
 )
 from composition.operator_approval_intent import (
     APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE,
     OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
     OperatorApprovalIntentOutcome,
     build_operator_approval_intent,
+    snapshot_declared_at,
 )
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
 from decision.canonical_json import payload_sha256
@@ -533,6 +535,233 @@ def test_malformed_evidence_evaluated_at_is_invalid() -> None:
     assert result.outcome is OperatorApprovalIntentOutcome.INVALID
 
 
+# --- RTM-7c.4o declared-time snapshot closure ---
+
+
+class _StatefulTz(tzinfo):
+    """호출 횟수에 따라 utcoffset 동작을 바꾸는 stateful tzinfo."""
+
+    def __init__(self, *, fail_at: int = 2, offsets: list[timedelta] | None = None) -> None:
+        self.calls = 0
+        self.fail_at = fail_at
+        self.offsets = offsets
+
+    def utcoffset(self, dt: datetime) -> timedelta | None:
+        self.calls += 1
+        if self.calls >= self.fail_at:
+            raise RuntimeError("POISON_DECLARED_AT")
+        if self.offsets is not None:
+            return self.offsets[self.calls - 1]
+        return timedelta(hours=9)
+
+    def dst(self, dt: datetime) -> timedelta:
+        return timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "fail_at,expected",
+    [
+        pytest.param(1, OperatorApprovalIntentOutcome.INVALID, id="first_call_raises"),
+        pytest.param(2, OperatorApprovalIntentOutcome.CREATED, id="second_call_raises_no_escape"),
+        pytest.param(3, OperatorApprovalIntentOutcome.CREATED, id="third_call_raises_no_escape"),
+    ],
+)
+def test_stateful_tzinfo_raises_is_invalid_without_escape(
+    fail_at: int,
+    expected: OperatorApprovalIntentOutcome,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    declared_at = datetime(2026, 6, 14, 12, 0, 0, tzinfo=_StatefulTz(fail_at=fail_at))
+    result = _build_intent(declared_at=declared_at)
+    captured = capsys.readouterr()
+    assert result.outcome is expected
+    if expected is OperatorApprovalIntentOutcome.INVALID:
+        assert result.reasons == ("approval_intent_invalid_input",)
+        assert result.intent is None
+    combined = captured.out + captured.err
+    for forbidden in ("POISON_DECLARED_AT", "RuntimeError", "Traceback"):
+        assert forbidden not in combined
+
+
+def test_stateful_tzinfo_changing_offset_after_snapshot_does_not_change_verdict() -> None:
+    """단일 빌드에서 isoformat 1회만 호출되므로 snapshot 이후 tz 변동은 verdict에 영향 없음."""
+    tz = _StatefulTz(offsets=[timedelta(hours=9), timedelta(hours=10)], fail_at=99)
+    declared_at = datetime(2026, 6, 14, 12, 0, 0, tzinfo=tz)
+    result = _build_intent(declared_at=declared_at)
+    assert result.outcome is OperatorApprovalIntentOutcome.CREATED
+    assert result.intent is not None
+    assert result.intent.declared_at == "2026-06-14T12:00:00+09:00"
+
+
+def test_stateful_tzinfo_none_offset_is_invalid() -> None:
+    class _NoneOffsetTz(tzinfo):
+        def utcoffset(self, dt: datetime) -> None:
+            return None
+
+        def dst(self, dt: datetime) -> timedelta:
+            return timedelta(0)
+
+    declared_at = datetime(2026, 6, 14, 12, 0, 0, tzinfo=_NoneOffsetTz())
+    result = _build_intent(declared_at=declared_at)
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+def test_declared_at_spy_isoformat_called_at_most_once() -> None:
+    """snapshot_declared_at가 caller isoformat을 1회만 호출함을 tzinfo call count로 검증."""
+    tz = _StatefulTz(fail_at=2)
+    declared_at = datetime(2026, 6, 14, 12, 0, 0, tzinfo=tz)
+    result = _build_intent(declared_at=declared_at)
+    assert result.outcome is OperatorApprovalIntentOutcome.CREATED
+    # isoformat 1회 + parsed utcoffset 1회 — 두 번째 utcoffset 호출 없음 (fail_at=2 미도달).
+    assert tz.calls == 1
+
+
+def test_snapshot_declared_at_normal_timezone() -> None:
+    snap = snapshot_declared_at(_EVAL_AT)
+    assert snap is not None
+    iso, parsed = snap
+    assert iso == _EVAL_AT.isoformat()
+    assert parsed.utcoffset() is not None
+
+
+def test_snapshot_declared_at_rejects_naive_subclass_and_raises() -> None:
+    assert snapshot_declared_at(datetime(2026, 6, 14, 12, 0, 0)) is None  # noqa: DTZ001
+
+    class _DTSub(datetime):
+        pass
+
+    assert snapshot_declared_at(_DTSub(2026, 6, 14, 12, 0, 0, tzinfo=_KST)) is None
+    assert snapshot_declared_at(datetime(2026, 6, 14, 12, 0, 0, tzinfo=_StatefulTz(fail_at=1))) is None
+
+
+def test_declared_at_invalid_does_not_leak_raw_sentinel(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    declared_at = datetime(2026, 6, 14, 12, 0, 0, tzinfo=_StatefulTz(fail_at=1))
+    result = _build_intent(declared_at=declared_at)
+    captured = capsys.readouterr()
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    combined = captured.out + captured.err
+    for forbidden in (
+        "POISON_DECLARED_AT",
+        "RuntimeError",
+        "Traceback",
+        "/home/",
+        "KIS_",
+        "APP_KEY",
+        "APP_SECRET",
+    ):
+        assert forbidden not in combined
+
+
+# --- RTM-7c.4o combined-PASS qualified consistency closure ---
+
+
+def test_combined_pass_with_qualified_no_go_is_invalid() -> None:
+    qualified = ev_helper._qualified_pass(
+        outcome=ActivationCandidateFreshnessPreflightOutcome.NO_GO,
+        reasons=("candidate_receipt_stale",),
+    )
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    assert result.reasons == ("approval_intent_invalid_input",)
+    assert result.intent is None
+
+
+def test_combined_pass_with_qualified_nonempty_reasons_is_invalid() -> None:
+    qualified = ev_helper._qualified_pass(reasons=("candidate_receipt_stale",))
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        pytest.param("receipt_sha256", "b" * 64, id="receipt_hash_mismatch"),
+        pytest.param("market", "US", id="market_mismatch"),
+        pytest.param("symbol", "ABC", id="symbol_mismatch"),
+    ],
+)
+def test_combined_pass_qualified_identity_mismatch_is_invalid(field: str, value: str) -> None:
+    qualified = ev_helper._qualified_pass(**{field: value})
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"freshness_policy_evaluated": False}, id="freshness_policy_false"),
+        pytest.param({"activation_authorized": True}, id="activation_true"),
+        pytest.param({"runtime_activation_outcome": "go"}, id="runtime_go"),
+        pytest.param({"explicit_operator_approval_required": False}, id="approval_flag_false"),
+        pytest.param(
+            {"writers_stopped_manual_confirmation_required": False},
+            id="writers_stopped_flag_false",
+        ),
+    ],
+)
+def test_combined_pass_qualified_posture_mismatch_is_invalid(overrides: dict[str, Any]) -> None:
+    qualified = ev_helper._qualified_pass(**overrides)
+    result = _build_intent(_combined_pass(qualified_result=qualified))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+@pytest.mark.parametrize(
+    "bad_qualified",
+    [
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="arbitrary_object"),
+    ],
+)
+def test_combined_pass_wrong_qualified_object_is_invalid(bad_qualified: object) -> None:
+    result = _build_intent(_combined_pass(qualified_result=bad_qualified))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+def test_combined_pass_qualified_subclass_is_invalid() -> None:
+    class _Sub(ActivationCandidateFreshnessPreflightResult):
+        pass
+
+    sub = _Sub(**asdict(ev_helper._qualified_pass()))
+    result = _build_intent(_combined_pass(qualified_result=sub))
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+def test_combined_pass_missing_qualified_result_attr_is_invalid() -> None:
+    class _BrokenCombined:
+        outcome = FreshnessQualifiedEvidenceOutcome.PASS
+        reasons = ()
+        evidence_result = _combined_pass().evidence_result
+
+    result = build_operator_approval_intent(
+        combined_result=_BrokenCombined(),  # type: ignore[arg-type]
+        declared_at=_DECL_AT,
+        operator_approval_declared=True,
+        writers_stopped_manually_confirmed=True,
+        live_orders_forbidden_confirmed=True,
+    )
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+
+
+def test_qualified_single_read_locals_snippets_in_source() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "operator_approval_intent.py"
+    ).read_text(encoding="utf-8")
+    for snippet in (
+        "qualified_result = combined_result.qualified_result",
+        "qr_outcome = qualified_result.outcome",
+        "qr_reasons = qualified_result.reasons",
+        "qr_receipt_sha256 = qualified_result.receipt_sha256",
+        "qr_market = qualified_result.market",
+        "qr_symbol = qualified_result.symbol",
+    ):
+        assert snippet in source
+
+
 # --- canonical hash determinism ---
 
 
@@ -554,7 +783,7 @@ def test_evidence_hash_change_changes_intent_hash() -> None:
     assert base is not None
     qual, evaluated_at = ev_helper._consistent(sha="b" * 64)
     er = build_activation_candidate_evidence(qualified_result=qual, evaluated_at=evaluated_at)
-    other = _build_intent(_combined_pass(evidence_result=er)).intent
+    other = _build_intent(_combined_pass(qualified_result=qual, evidence_result=er)).intent
     assert other is not None
     assert other.approval_intent_sha256 != base.approval_intent_sha256
 
@@ -585,15 +814,20 @@ def test_builder_uses_single_read_locals_for_combined_and_evidence() -> None:
     for snippet in (
         "combined_outcome = combined_result.outcome",
         "combined_reasons = combined_result.reasons",
+        "qualified_result = combined_result.qualified_result",
         "evidence_result = combined_result.evidence_result",
         "er_outcome = evidence_result.outcome",
         "er_reasons = evidence_result.reasons",
         "evidence = evidence_result.evidence",
         "ev_schema_version = evidence.schema_version",
         "ev_evaluated_at = evidence.evaluated_at",
+        "qr_outcome = qualified_result.outcome",
+        "snapshot_declared_at(declared_at)",
     ):
         assert snippet in source
     assert "asdict(evidence)" not in source
+    assert "declared_at.isoformat()" not in source
+    assert "final_preflight_now_is_invalid" not in source
 
 
 # --- isolation ---

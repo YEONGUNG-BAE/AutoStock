@@ -33,7 +33,10 @@ from composition.activation_candidate_evidence import (
     FreshnessQualifiedEvidenceResult,
     validate_activation_candidate_evidence_scalars,
 )
-from composition.activation_candidate_final_preflight import final_preflight_now_is_invalid
+from composition.activation_candidate_freshness_preflight import (
+    ActivationCandidateFreshnessPreflightOutcome,
+    ActivationCandidateFreshnessPreflightResult,
+)
 from decision.canonical_json import payload_sha256
 
 __all__ = [
@@ -109,6 +112,7 @@ def build_operator_approval_intent(
     try:
         combined_outcome = combined_result.outcome
         combined_reasons = combined_result.reasons
+        qualified_result = combined_result.qualified_result
         evidence_result = combined_result.evidence_result
     except AttributeError:
         return _invalid()
@@ -185,6 +189,44 @@ def build_operator_approval_intent(
     if validated is None:
         return _invalid()
 
+    # Combined PASS requires a consistent qualified PASS identity/posture contract.
+    if type(qualified_result) is not ActivationCandidateFreshnessPreflightResult:
+        return _invalid()
+    try:
+        qr_outcome = qualified_result.outcome
+        qr_reasons = qualified_result.reasons
+        qr_receipt_sha256 = qualified_result.receipt_sha256
+        qr_market = qualified_result.market
+        qr_symbol = qualified_result.symbol
+        qr_freshness_policy_evaluated = qualified_result.freshness_policy_evaluated
+        qr_activation = qualified_result.activation_authorized
+        qr_runtime = qualified_result.runtime_activation_outcome
+        qr_explicit_approval = qualified_result.explicit_operator_approval_required
+        qr_writers_stopped = qualified_result.writers_stopped_manual_confirmation_required
+    except AttributeError:
+        return _invalid()
+
+    if qr_outcome is not ActivationCandidateFreshnessPreflightOutcome.PASS:
+        return _invalid()
+    if qr_reasons != ():
+        return _invalid()
+    if qr_receipt_sha256 != validated.receipt_sha256:
+        return _invalid()
+    if qr_market != validated.market:
+        return _invalid()
+    if qr_symbol != validated.symbol:
+        return _invalid()
+    if not _exact_true_bool(qr_freshness_policy_evaluated):
+        return _invalid()
+    if not _exact_false_bool(qr_activation):
+        return _invalid()
+    if qr_runtime != "no_go":
+        return _invalid()
+    if not _exact_true_bool(qr_explicit_approval):
+        return _invalid()
+    if not _exact_true_bool(qr_writers_stopped):
+        return _invalid()
+
     if not _exact_true_bool(operator_approval_declared):
         return _invalid()
     if not _exact_true_bool(writers_stopped_manually_confirmed):
@@ -192,17 +234,18 @@ def build_operator_approval_intent(
     if not _exact_true_bool(live_orders_forbidden_confirmed):
         return _invalid()
 
-    # ``declared_at`` must be an *exact* built-in ``datetime`` (not a subclass).
-    if type(declared_at) is not datetime or final_preflight_now_is_invalid(declared_at):
+    # ``declared_at``는 caller datetime을 한 번만 관찰해 동결한다.
+    declared_snapshot = snapshot_declared_at(declared_at)
+    if declared_snapshot is None:
         return _invalid()
+
+    declared_at_iso, declared_at_parsed = declared_snapshot
 
     evidence_evaluated = _parse_aware(validated.evaluated_at)
     if evidence_evaluated is None:
         return _invalid()
-    if declared_at < evidence_evaluated:
+    if declared_at_parsed < evidence_evaluated:
         return _invalid()
-
-    declared_at_iso = declared_at.isoformat()
     hash_payload = _intent_hash_payload(
         declared_at=declared_at_iso,
         evidence_schema_version=validated.schema_version,
@@ -260,10 +303,48 @@ def _intent_hash_payload(
     }
 
 
+def snapshot_declared_at(value: object) -> tuple[str, datetime] | None:
+    """Caller ``declared_at``를 detached single observation으로 동결한다.
+
+    정확한 built-in ``datetime``만 허용한다. ``isoformat()``을 정확히 한 번 호출하고,
+    그 문자열을 ``fromisoformat()``으로 재파싱한 뒤 timezone-aware 여부를 확인한다.
+    이후 caller datetime 또는 caller tzinfo에는 재접근하지 않는다."""
+
+    if type(value) is not datetime:
+        return None
+    try:
+        canonical_iso = value.isoformat()
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+    try:
+        parsed = datetime.fromisoformat(canonical_iso)
+    except (ValueError, TypeError):
+        return None
+    if type(parsed) is not datetime:
+        return None
+    try:
+        offset = parsed.utcoffset()
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+    if offset is None:
+        return None
+    return (canonical_iso, parsed)
+
+
 def _exact_true_bool(value: object) -> bool:
     """Exact built-in ``True`` only — rejects ``False``/``0``/``1``/``None``/``\"true\"``/subclass."""
 
     return type(value) is bool and value is True
+
+
+def _exact_false_bool(value: object) -> bool:
+    """Exact built-in ``False`` only — rejects ``True``/``0``/``1``/``None``/subclass."""
+
+    return type(value) is bool and value is False
 
 
 def _parse_aware(value: object) -> datetime | None:

@@ -140,9 +140,15 @@ full schema-v2 semantic contract (matching hash alone is insufficient; both rece
 lowercase hex64; PASS/FRESH outcomes; all observation flags exact `True`; receipt age
 `<= max_age`) plus three manual Operator declarations and a caller `declared_at` freeze into
 one immutable `approval_intent_sha256`. Production validation does not use `asdict`/`deepcopy`
-on caller evidence. Intent is **not** identity, signature, writer-stop machine proof, approval
-consumption, replay prevention, or activation authorization; it is never persisted and is not
-wired into CLI in this lane. Approval consumption and activation caller remain **OPEN**.
+on caller evidence. **Declared-time snapshot closure:** `snapshot_declared_at` observes caller
+`declared_at` once (`isoformat()` → `fromisoformat()`); custom/stateful tzinfo cannot escape
+after snapshot. **Combined-PASS qualified consistency closure:** combined `PASS` also requires
+a consistent qualified `PASS` identity/posture matching validated evidence (receipt hash,
+market, symbol, freshness-policy flag, constant NO-GO posture, approval/writer flags); evidence
+semantic validation remains owned by the shared validator. Intent is **not** identity, signature,
+writer-stop machine proof, approval consumption, replay prevention, or activation authorization;
+it is never persisted and is not wired into CLI in this lane. Approval consumption and activation
+caller remain **OPEN**.
 
 ## Orphan sidecar observation limit
 
