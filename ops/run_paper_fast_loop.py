@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Six mutually-exclusive modes:
+Seven mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -13,6 +13,10 @@ Six mutually-exclusive modes:
   is NOT an activation authorization (``activation_authorized`` stays false).
 * ``--verify-precheck-receipt``: stdin-only strict receipt schema + hash verification; no
   config, no env, no DB, no filesystem write, no network (RTM-7c.4e).
+* ``--revalidate-activation-candidate``: stdin receipt + config; read-only revalidation of
+  current artifact state against a verified machine PASS receipt (RTM-7c.4g). Config loads
+  with empty ``environ``; no clock read, no DB connection, no filesystem write, no network.
+  Mechanical PASS is NOT activation authorization.
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -47,6 +51,10 @@ from composition.paper_fast_loop import (
     replay_offline,
 )
 from composition.precheck_receipt_stdin_json import ReceiptStdinJsonError, parse_receipt_stdin_json
+from composition.activation_candidate_revalidation import (
+    ActivationCandidateRevalidationOutcome,
+    revalidate_activation_candidate,
+)
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
     RuntimePrecheckReceiptVerification,
@@ -107,6 +115,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--revalidate-activation-candidate",
+        action="store_true",
+        help=(
+            "stdin receipt + config: read-only approval-time state revalidation against a "
+            "verified machine PASS receipt; config loads with empty environ; mechanical PASS "
+            "is NOT activation authorization"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -129,6 +146,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("inspect-existing", args.inspect_existing),
             ("precheck-runtime", args.precheck_runtime),
             ("verify-precheck-receipt", args.verify_precheck_receipt),
+            ("revalidate-activation-candidate", args.revalidate_activation_candidate),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -137,7 +155,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
     if len(selected) > 1:
         raise CliInputError(
             "modes --validate-only / --inspect-existing / --precheck-runtime / "
-            "--verify-precheck-receipt / --replay / --run are mutually exclusive."
+            "--verify-precheck-receipt / --revalidate-activation-candidate / --replay / "
+            "--run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -283,6 +302,52 @@ def _precheck_summary(result: Any, *, config_path: str, enabled: bool) -> dict[s
     }
 
 
+def _revalidate_summary(result: Any, *, config_path: str) -> dict[str, Any]:
+    passed = result.outcome is ActivationCandidateRevalidationOutcome.PASS
+    return {
+        "outcome": "PASS" if passed else "NO_GO",
+        "mode": "revalidate-activation-candidate",
+        "config": config_path,
+        "receipt_sha256": result.receipt_sha256,
+        "market": result.market,
+        "symbol": result.symbol,
+        "reasons": list(result.reasons),
+        "activation_authorized": result.activation_authorized,
+        "runtime_activation_outcome": result.runtime_activation_outcome,
+        "explicit_operator_approval_required": result.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            result.writers_stopped_manual_confirmation_required
+        ),
+        "freshness_evaluated": result.freshness_evaluated,
+        "credential_read": False,
+        "network_called": False,
+        "database_opened": False,
+        "filesystem_written": False,
+    }
+
+
+def _revalidate_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> int:
+    summary = {
+        "outcome": "NO_GO",
+        "mode": "revalidate-activation-candidate",
+        "receipt_sha256": None,
+        "market": None,
+        "symbol": None,
+        "reasons": [reason_code],
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+        "freshness_evaluated": False,
+        "credential_read": False,
+        "network_called": False,
+        "database_opened": False,
+        "filesystem_written": False,
+    }
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
 def _verify_receipt_summary(result: Any) -> dict[str, Any]:
     valid = result.outcome is ReceiptVerificationOutcome.VALID
     return {
@@ -400,6 +465,31 @@ def main(argv: list[str] | None = None) -> int:
         summary = _verify_receipt_summary(result)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "VALID" else 1
+
+    # revalidate-activation-candidate: stdin receipt + config(environ={}) — clock/DB/fs write 없음.
+    if mode == "revalidate-activation-candidate":
+        payload, input_error = _read_verify_stdin_payload()
+        if input_error is not None:
+            return _revalidate_input_fail(input_error, as_json=as_json, out=out)
+        try:
+            settings: AppSettings = load_settings(args.config, environ={})
+        except (SettingsError, OSError) as exc:
+            return _revalidate_input_fail(
+                f"config error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        fast_loop = settings.runtime.paper_fast_loop
+        try:
+            result = revalidate_activation_candidate(
+                settings=fast_loop,
+                receipt_payload=payload,
+            )
+        except Exception as exc:
+            return _revalidate_input_fail(
+                f"revalidate error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        summary = _revalidate_summary(result, config_path=args.config)
+        _emit(summary, as_json=as_json, out=out)
+        return 0 if summary["outcome"] == "PASS" else 1
 
     # precheck-runtime은 credential/env read 0을 주장하므로 config 로딩에서도 os.environ을
     # 절대 읽지 않는다: 빈 environ을 주입해 ${ENV} 치환과 live-confirmation/credential

@@ -14,6 +14,8 @@ Four offline operator capabilities — no live runtime, no KIS, no daemon, no or
   (never the configured ``runtime/`` paths). No KIS frames, no network.
 
 Receipt verification lives in ``composition.precheck_receipt_verifier`` (RTM-7c.4e).
+Activation candidate revalidation lives in ``composition.activation_candidate_revalidation``
+(RTM-7c.4g).
 
 This module is the *only* place allowed to wire broker / ledger / coordinator
 together; ``src/orchestration`` purity is preserved. It reads no credentials and

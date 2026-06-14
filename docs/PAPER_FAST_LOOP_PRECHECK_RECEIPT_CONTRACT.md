@@ -163,6 +163,11 @@ Verification (RTM-7c.4e): ``composition.precheck_receipt_verifier`` or CLI
 ``--verify-precheck-receipt`` (stdin-only receipt object). See
 ``docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md``.
 
+Approval-time revalidation (RTM-7c.4g): ``composition.activation_candidate_revalidation``
+or CLI ``--revalidate-activation-candidate`` (stdin receipt + config). Compares
+current artifact state to ``fingerprints_after``; mechanical PASS is not activation.
+See ``docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md``.
+
 ## CLI (`--precheck-runtime --json`)
 
 Top-level fields from RTM-7c.4c remain for compatibility. Added nested object:
