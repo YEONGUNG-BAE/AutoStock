@@ -45,6 +45,11 @@ from composition.precheck_receipt_schema import (
     PRECHECK_RECEIPT_SCHEMA_VERSION,
     build_receipt_hash_payload,
     compute_receipt_sha256,
+    validate_runtime_precheck_receipt_object,
+)
+from composition.precheck_receipt_verifier import (
+    ReceiptVerificationOutcome,
+    verify_runtime_precheck_receipt_payload,
 )
 from composition.sqlite_inspector import ArtifactFingerprint
 from composition.activation_candidate_freshness_preflight import (
@@ -80,18 +85,20 @@ def _fingerprints(variant: int = 0) -> tuple[ArtifactFingerprint, ...]:
     ``variant`` perturbs only the artifact body (sha256), producing a distinct — but still
     internally consistent — fresh precheck receipt hash."""
 
-    return tuple(
-        ArtifactFingerprint(
-            name=name,
-            present=True,
-            is_regular_file=True,
-            size=100 + i,
-            sha256=f"{variant:02d}{i:02d}" + "f" * 60,
-            user_version=i,
-            sidecar_suffixes=(),
+    fps: list[ArtifactFingerprint] = []
+    for i, name in enumerate(PAPER_FAST_LOOP_ARTIFACT_NAMES):
+        fps.append(
+            ArtifactFingerprint(
+                name=name,
+                present=True,
+                is_regular_file=True,
+                size=100 + i,
+                sha256=f"{variant:02d}{i:02d}" + "f" * 60,
+                user_version=None if name == "execution_inputs_snapshot" else i,
+                sidecar_suffixes=(),
+            )
         )
-        for i, name in enumerate(PAPER_FAST_LOOP_ARTIFACT_NAMES)
-    )
+    return tuple(fps)
 
 
 def _revalidation(
@@ -1040,6 +1047,367 @@ def test_fresh_receipt_malformed_fingerprints_is_invalid() -> None:
     )
 
 
+# --- RTM-7c.4n fresh receipt verifier-parity closure ---
+
+
+def _receipt_to_dict(receipt: RuntimePrecheckReceipt) -> dict[str, Any]:
+    return {
+        "schema_version": receipt.schema_version,
+        "checked_at": receipt.checked_at,
+        "market": receipt.market,
+        "symbol": receipt.symbol,
+        "enabled": receipt.enabled,
+        "machine_outcome": receipt.machine_outcome,
+        "inspection_outcome": receipt.inspection_outcome,
+        "reasons": list(receipt.reasons),
+        "fingerprints_before": [
+            {
+                "name": fp.name,
+                "present": fp.present,
+                "is_regular_file": fp.is_regular_file,
+                "size": fp.size,
+                "sha256": fp.sha256,
+                "user_version": fp.user_version,
+                "sidecar_suffixes": list(fp.sidecar_suffixes),
+            }
+            for fp in receipt.fingerprints_before
+        ],
+        "fingerprints_after": [
+            {
+                "name": fp.name,
+                "present": fp.present,
+                "is_regular_file": fp.is_regular_file,
+                "size": fp.size,
+                "sha256": fp.sha256,
+                "user_version": fp.user_version,
+                "sidecar_suffixes": list(fp.sidecar_suffixes),
+            }
+            for fp in receipt.fingerprints_after
+        ],
+        "activation_authorized": receipt.activation_authorized,
+        "runtime_activation_outcome": receipt.runtime_activation_outcome,
+        "explicit_operator_approval_required": receipt.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            receipt.writers_stopped_manual_confirmation_required
+        ),
+        "receipt_sha256": receipt.receipt_sha256,
+    }
+
+
+def _qualified_with_fresh_receipt(
+    *,
+    fps: tuple[ArtifactFingerprint, ...] | None = None,
+    market: str = "KR",
+    symbol: str = "005930",
+    **receipt_overrides: Any,
+) -> ActivationCandidateFreshnessPreflightResult:
+    """Fully nested-consistent qualified PASS whose fresh receipt can be tampered."""
+    checked_at = _ISO()
+    if fps is None:
+        fps = _fingerprints()
+    receipt = _fresh_receipt(
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        fps=fps,
+        **receipt_overrides,
+    )
+    pc = _precheck(
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        fps=fps,
+        receipt=receipt,
+    )
+    final = _final_pass(
+        market=market,
+        symbol=symbol,
+        revalidation_result=_revalidation(market=market, symbol=symbol, fps=fps),
+        current_precheck_result=pc,
+    )
+    return _qualified_pass(market=market, symbol=symbol, final=final)
+
+
+def _fp(name: str, **kwargs: Any) -> ArtifactFingerprint:
+    defaults: dict[str, Any] = {
+        "present": True,
+        "is_regular_file": True,
+        "size": 100,
+        "sha256": "ab" * 32,
+        "user_version": None if name == "execution_inputs_snapshot" else 1,
+        "sidecar_suffixes": (),
+    }
+    defaults.update(kwargs)
+    return ArtifactFingerprint(name=name, **defaults)
+
+
+def _fps_with_override(**overrides: ArtifactFingerprint) -> tuple[ArtifactFingerprint, ...]:
+    return tuple(
+        overrides.get(name, _fp(name))
+        for name in PAPER_FAST_LOOP_ARTIFACT_NAMES
+    )
+
+
+def test_shared_receipt_object_validator_accepts_valid_receipt() -> None:
+    receipt = _fresh_receipt(checked_at=_ISO())
+    sha = validate_runtime_precheck_receipt_object(
+        schema_version=receipt.schema_version,
+        checked_at=receipt.checked_at,
+        market=receipt.market,
+        symbol=receipt.symbol,
+        enabled=receipt.enabled,
+        machine_outcome=receipt.machine_outcome,
+        inspection_outcome=receipt.inspection_outcome,
+        reasons=receipt.reasons,
+        fingerprints_before=receipt.fingerprints_before,
+        fingerprints_after=receipt.fingerprints_after,
+        activation_authorized=receipt.activation_authorized,
+        runtime_activation_outcome=receipt.runtime_activation_outcome,
+        explicit_operator_approval_required=receipt.explicit_operator_approval_required,
+        writers_stopped_manual_confirmation_required=(
+            receipt.writers_stopped_manual_confirmation_required
+        ),
+        receipt_sha256=receipt.receipt_sha256,
+    )
+    assert sha == receipt.receipt_sha256
+    ver = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert ver.outcome is ReceiptVerificationOutcome.VALID
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    [
+        pytest.param(PRECHECK_RECEIPT_SCHEMA_VERSION + 1, id="unsupported_int"),
+        pytest.param(True, id="bool"),
+        pytest.param(1.0, id="float"),
+        pytest.param("1", id="string"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_unsupported_fresh_receipt_schema_is_invalid(schema_version: object) -> None:
+    checked_at = _ISO()
+    fps = _fingerprints()
+    if type(schema_version) is int and not isinstance(schema_version, bool):
+        sha = compute_receipt_sha256(
+            build_receipt_hash_payload(
+                schema_version=schema_version,
+                checked_at=checked_at,
+                market="KR",
+                symbol="005930",
+                enabled=True,
+                machine_outcome="pass",
+                inspection_outcome="ok",
+                reasons=(),
+                fingerprints_before=fps,
+                fingerprints_after=fps,
+            )
+        )
+        qual = _qualified_with_fresh_receipt(
+            fps=fps,
+            schema_version=schema_version,
+            receipt_sha256=sha,
+            recompute_sha=False,
+        )
+        receipt = qual.final_preflight_result.current_precheck_result.receipt
+        ver = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+        assert ver.outcome is ReceiptVerificationOutcome.INVALID
+        assert ver.reason_codes == ("receipt_unsupported_schema",)
+    else:
+        qual = _qualified_with_fresh_receipt(
+            fps=fps, schema_version=schema_version, receipt_sha256="d" * 64, recompute_sha=False
+        )
+    result = _build(qual)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.reasons == ("candidate_evidence_invalid_input",)
+    assert result.evidence is None
+
+
+def test_unsupported_schema_stale_hash_is_invalid() -> None:
+    bad_schema = PRECHECK_RECEIPT_SCHEMA_VERSION + 1
+    qual = _qualified_with_fresh_receipt(
+        schema_version=bad_schema, receipt_sha256="e" * 64, recompute_sha=False
+    )
+    result = _build(qual)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+
+
+@pytest.mark.parametrize(
+    ("market", "symbol"),
+    [
+        pytest.param("KR", "005930", id="kr_ascii_6digit"),
+        pytest.param("US", "005930", id="us_market"),
+        pytest.param("", "005930", id="empty_market"),
+        pytest.param("KR", "ABC", id="alphabetic_symbol"),
+        pytest.param("KR", "00593", id="short_symbol"),
+        pytest.param("KR", "0059300", id="long_symbol"),
+        pytest.param("KR", "１２３４５６", id="fullwidth_symbol"),
+        pytest.param("KR", "١٢٣٤٥٦", id="arabic_indic_symbol"),
+        pytest.param("KR", "00593０", id="mixed_symbol"),
+        pytest.param("KR", "", id="empty_symbol"),
+    ],
+)
+def test_fresh_receipt_identity_parity(market: str, symbol: str) -> None:
+    qual = _qualified_with_fresh_receipt(market=market, symbol=symbol)
+    result = _build(qual)
+    if market == "KR" and symbol == "005930":
+        assert result.outcome is ActivationCandidateEvidenceOutcome.CREATED
+    else:
+        assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+        assert result.evidence is None
+
+
+_FINGERPRINT_SEMANTIC_CASES: list[tuple[str, dict[str, Any]]] = [
+    ("size_negative", {"present": True, "is_regular_file": True, "size": -1}),
+    ("absent_with_size", {"present": False, "is_regular_file": False, "size": 1}),
+    ("absent_with_sha", {"present": False, "is_regular_file": False, "sha256": "ab" * 32}),
+    ("absent_with_sidecar", {"present": False, "is_regular_file": False, "sidecar_suffixes": ("-wal",)}),
+    ("irregular_with_size", {"present": True, "is_regular_file": False, "size": 10}),
+    ("irregular_with_sha", {"present": True, "is_regular_file": False, "sha256": "ab" * 32}),
+    ("irregular_with_user_version", {"present": True, "is_regular_file": False, "user_version": 1}),
+    ("sha_uppercase", {"present": True, "is_regular_file": True, "sha256": "AB" * 32}),
+    ("sha_invalid", {"present": True, "is_regular_file": True, "sha256": "zz" * 32}),
+    ("json_snapshot_user_version", {"name": "execution_inputs_snapshot", "user_version": 1}),
+    ("sqlite_user_version_negative", {"name": "ledger", "user_version": -1}),
+    ("sidecar_unknown", {"name": "ledger", "sidecar_suffixes": ("-bad",)}),
+    ("sidecar_duplicate", {"name": "ledger", "sidecar_suffixes": ("-wal", "-wal")}),
+    ("sidecar_noncanonical_order", {"name": "ledger", "sidecar_suffixes": ("-journal", "-wal")}),
+    ("bool_size", {"size": True}),
+    ("bool_user_version", {"user_version": True}),
+]
+
+
+@pytest.mark.parametrize(("case_id", "fp_kwargs"), _FINGERPRINT_SEMANTIC_CASES, ids=[c[0] for c in _FINGERPRINT_SEMANTIC_CASES])
+def test_semantically_invalid_fingerprint_is_invalid(case_id: str, fp_kwargs: dict[str, Any]) -> None:
+    name = fp_kwargs.get("name", "ledger")
+    bad = _fp(name, **{k: v for k, v in fp_kwargs.items() if k != "name"})
+    fps = _fps_with_override(**{name: bad})
+    checked_at = _ISO()
+    sha = compute_receipt_sha256(
+        build_receipt_hash_payload(
+            schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+            checked_at=checked_at,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome="pass",
+            inspection_outcome="ok",
+            reasons=(),
+            fingerprints_before=fps,
+            fingerprints_after=fps,
+        )
+    )
+    qual = _qualified_with_fresh_receipt(
+        fps=fps, receipt_sha256=sha, recompute_sha=False
+    )
+    receipt = qual.final_preflight_result.current_precheck_result.receipt
+    ver = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert ver.outcome is ReceiptVerificationOutcome.INVALID
+    result = _build(qual)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.reasons == ("candidate_evidence_invalid_input",)
+    assert result.evidence is None
+
+
+def test_verifier_parity_valid_object_both_paths_agree() -> None:
+    qual = _qualified_with_fresh_receipt()
+    result = _build(qual)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.CREATED
+    receipt = qual.final_preflight_result.current_precheck_result.receipt
+    ver = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert ver.outcome is ReceiptVerificationOutcome.VALID
+    assert result.evidence is not None
+    assert result.evidence.fresh_precheck_receipt_sha256 == receipt.receipt_sha256
+
+
+@pytest.mark.parametrize(("case_id", "fp_kwargs"), _FINGERPRINT_SEMANTIC_CASES[:5], ids=[c[0] for c in _FINGERPRINT_SEMANTIC_CASES[:5]])
+def test_verifier_parity_invalid_matrix_both_paths_agree(
+    case_id: str, fp_kwargs: dict[str, Any]
+) -> None:
+    name = fp_kwargs.get("name", "ledger")
+    bad = _fp(name, **{k: v for k, v in fp_kwargs.items() if k != "name"})
+    fps = _fps_with_override(**{name: bad})
+    checked_at = _ISO()
+    sha = compute_receipt_sha256(
+        build_receipt_hash_payload(
+            schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+            checked_at=checked_at,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome="pass",
+            inspection_outcome="ok",
+            reasons=(),
+            fingerprints_before=fps,
+            fingerprints_after=fps,
+        )
+    )
+    qual = _qualified_with_fresh_receipt(fps=fps, receipt_sha256=sha, recompute_sha=False)
+    receipt = qual.final_preflight_result.current_precheck_result.receipt
+    ver = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert ver.outcome is ReceiptVerificationOutcome.INVALID
+    result = _build(qual)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+
+
+def test_combined_no_go_on_semantic_invalid_fresh_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = fr_helper._settings(tmp_path)
+    receipt = fr_helper._pass_receipt(tmp_path, settings)
+    real_qualify = evidence_mod.freshness_qualify_activation_candidate
+
+    def _qualify_then_tamper(**kwargs: Any) -> Any:
+        qualified = real_qualify(**kwargs)
+        if qualified.outcome is not ActivationCandidateFreshnessPreflightOutcome.PASS:
+            return qualified
+        checked_at = fr_helper._NOW.isoformat()
+        fps = _fps_with_override(
+            ledger=_fp("ledger", present=True, is_regular_file=True, size=-1, sha256="ab" * 32)
+        )
+        sha = compute_receipt_sha256(
+            build_receipt_hash_payload(
+                schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+                checked_at=checked_at,
+                market="KR",
+                symbol="005930",
+                enabled=True,
+                machine_outcome="pass",
+                inspection_outcome="ok",
+                reasons=(),
+                fingerprints_before=fps,
+                fingerprints_after=fps,
+            )
+        )
+        tampered_final = replace(
+            qualified.final_preflight_result,
+            revalidation_result=_revalidation(fps=fps),
+            current_precheck_result=_precheck(
+                checked_at=checked_at,
+                fps=fps,
+                receipt=_fresh_receipt(
+                    checked_at=checked_at, fps=fps, receipt_sha256=sha, recompute_sha=False
+                ),
+            ),
+        )
+        return replace(qualified, final_preflight_result=tampered_final)
+
+    monkeypatch.setattr(
+        evidence_mod, "freshness_qualify_activation_candidate", _qualify_then_tamper
+    )
+    combined = freshness_qualify_and_build_candidate_evidence(
+        settings=settings,
+        receipt_payload=receipt,
+        now=fr_helper._NOW,
+        policy=ReceiptFreshnessPolicy(max_age_microseconds=1_000_000_000),
+        base_dir=tmp_path,
+    )
+    assert combined.qualified_result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    assert combined.outcome is FreshnessQualifiedEvidenceOutcome.NO_GO
+    assert combined.reasons == ("candidate_evidence_generation_invalid",)
+    assert combined.evidence_result is not None
+    assert combined.evidence_result.evidence is None
+
+
 # --- schema v2 + fresh_precheck_receipt_sha256 binding ---
 
 
@@ -1254,7 +1622,6 @@ def test_each_hash_field_changes_digest() -> None:
     assert _digest(age=2000) != base
     assert _digest(max_age=500_000_000) != base
     assert _digest(sha="b" * 64) != base
-    assert _digest(market="US") != base
     assert _digest(symbol="000660") != base
 
 

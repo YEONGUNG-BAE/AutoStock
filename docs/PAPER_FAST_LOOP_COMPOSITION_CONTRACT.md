@@ -340,12 +340,15 @@ posture on every nested stage, an `evaluated_at` of exact `type datetime` whose 
 microseconds from the verified `checked_at` equal the observed age, **and** the bound *actual*
 machine-proof result objects — a real `revalidation_result` PASS and a real
 `current_precheck_result` PASS (exact types, OK inspection, fresh receipt with
-`checked_at == evaluated_at.isoformat()` and a `receipt_sha256` recomputed via the canonical
-receipt-schema helper), sharing one canonical 4-artifact observation held identical from
-revalidation through the fresh precheck. Any mismatch — including a final PASS that still carries
-failure reasons, a time assessment that claims to have evaluated a freshness policy, or a
-boolean-only `fresh_precheck_executed=True` with `None` machine-proof objects — fails closed to
-`INVALID` (RTM-7c.4n consistency + nested PASS semantic + fresh machine-proof binding closure).
+`checked_at == evaluated_at.isoformat()` and full shared
+`validate_runtime_precheck_receipt_object` schema/semantic/hash validation), sharing one
+canonical 4-artifact observation held identical from revalidation through the fresh precheck.
+Hash equality alone is insufficient. Any mismatch — including a final PASS that still carries
+failure reasons, a time assessment that claims to have evaluated a freshness policy, a
+boolean-only `fresh_precheck_executed=True` with `None` machine-proof objects, unsupported
+fresh-receipt schema, invalid market/symbol, or semantically malformed fingerprints with a
+matching hash — fails closed to `INVALID` (RTM-7c.4n consistency + nested PASS semantic + fresh
+machine-proof binding + fresh receipt verifier-parity closure).
 The wrapper returns a combined `FreshnessQualifiedEvidenceOutcome`: a
 qualified PASS is combined `PASS` only when evidence is `CREATED`; a qualified PASS whose
 evidence is not created is combined `NO_GO` with `candidate_evidence_generation_invalid` (no

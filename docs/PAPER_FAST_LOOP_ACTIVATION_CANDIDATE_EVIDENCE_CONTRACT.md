@@ -8,12 +8,18 @@ a *future* Operator-approval stage can reference.
 signature/HMAC, Operator approval, writer-stop proof, an activation token, or activation
 authorization. The activation posture is a constant NO-GO on every path.
 
+**Hash equality alone is insufficient.** The fresh precheck receipt must satisfy the same
+schema/semantic contract as the standalone precheck receipt verifier. An unsupported schema with
+a recomputed matching hash, or semantically malformed fingerprints with a matching hash, still
+fails closed. Evidence is **not** approval, signature, or authenticity.
+
 Code: `composition.activation_candidate_evidence.build_activation_candidate_evidence`
 
 ## What the evidence means
 
-> A specific verified receipt, a specific explicit max-age policy, a specific caller time, and
-> a specific final-preflight/freshness result were combined into one canonical payload.
+> A specific verified original candidate receipt, a specific fresh precheck receipt, a specific
+> explicit max-age policy, a specific caller time, and a specific final-preflight/freshness result
+> were combined into one canonical payload.
 
 ## What the evidence does **not** mean
 
@@ -116,15 +122,18 @@ The builder requires:
   `fingerprints_before == fingerprints_after`.
 - `type(precheck.receipt) is RuntimePrecheckReceipt`, `machine_outcome == "pass"`,
   `inspection_outcome == "ok"`, `reasons == ()`, matching `market`/`symbol`, `enabled is True`,
-  constant NO-GO posture, `checked_at == evaluated_at.isoformat()`, canonical fingerprint tuples.
+  constant NO-GO posture, `checked_at == evaluated_at.isoformat()`, canonical fingerprint tuples,
+  and **full schema/semantic/hash validation** via the shared
+  `precheck_receipt_schema.validate_runtime_precheck_receipt_object(...)` helper (the same
+  single-source contract as the standalone JSON verifier — hash match alone is insufficient).
 - **Exact state relationship:** `reval before == reval after`, `precheck before == precheck
   after`, `reval after == precheck after`, `receipt before/after == precheck before/after` — one
   canonical observation held identical from candidate revalidation through the fresh precheck
   (frozen-observation comparison only; the final-preflight drift check is not re-implemented).
-- The receipt `receipt_sha256` is **independently recomputed** by reusing the canonical
-  `precheck_receipt_schema.build_receipt_hash_payload(...)` + `compute_receipt_sha256(...)` (no
-  hash reimplementation, no filesystem/network re-verify); a non-hex64 or mismatching stored sha
-  → `INVALID`. The recomputed value is stored as `fresh_precheck_receipt_sha256`.
+- The shared object validator returns the independently-recomputed fresh receipt sha256 on success;
+  unsupported schema, invalid `market`/`symbol` (only `KR` + ASCII `[0-9]{6}`), semantically
+  malformed fingerprints (even with a matching hash), or a non-hex64/mismatching stored sha →
+  `INVALID`. The recomputed value is stored as `fresh_precheck_receipt_sha256`.
 
 Raw fingerprint bodies, paths, datetimes, and exception text never appear in a reason.
 
@@ -228,8 +237,9 @@ freshness evaluator 1, evidence builder ≤1 (0 on qualified NO_GO), clock read 
    - **One agreed age** — `final.receipt_age_microseconds ==
      freshness.receipt_age_microseconds == time_assessment.receipt_age_microseconds`
      (each an exact non-negative `int`); `receipt_age <= max_age`
-   - `receipt_sha256` exact lowercase hex64; `market`/`symbol` exact non-empty `str`;
-     `max_age_microseconds` exact non-negative `int`
+   - `receipt_sha256` exact lowercase hex64; `market == "KR"`; `symbol` matches ASCII `[0-9]{6}`
+     (same contract as the precheck receipt verifier — `US`, empty, alphabetic, full-width,
+     Arabic-Indic, or mixed symbols fail closed); `max_age_microseconds` exact non-negative `int`
 7. **`evaluated_at` ↔ observed-age exact binding** (any failure → `INVALID`):
    `time_assessment.receipt_checked_at` is parsed as a strict timezone-aware datetime
    (malformed / naive / `None`-offset → `INVALID`), and the **exact integer** microseconds
@@ -243,8 +253,10 @@ freshness evaluator 1, evidence builder ≤1 (0 on qualified NO_GO), clock read 
    `RuntimePrecheckResult` PASS with an exact-type OK `PaperFastLoopInspection` and an exact
    `RuntimePrecheckReceipt`) must satisfy their strict field contracts, share one canonical
    4-artifact observation held identical from revalidation through the fresh precheck, have a
-   receipt `checked_at == evaluated_at.isoformat()`, and a receipt `receipt_sha256` that
-   recomputes via the reused canonical receipt-schema helper. A boolean
+   receipt `checked_at == evaluated_at.isoformat()`, and pass the shared
+   `validate_runtime_precheck_receipt_object(...)` schema/semantic/hash contract (the same rules
+   as the standalone JSON verifier — unsupported schema or semantically invalid fingerprints with
+   a matching hash still fail closed). A boolean
    `fresh_precheck_executed=True` with `revalidation_result`/`current_precheck_result` `None`
    (or a wrong/subclass object) fails closed. The recomputed receipt hash becomes
    `fresh_precheck_receipt_sha256`.
@@ -256,6 +268,46 @@ A malformed exact-type result (e.g. a deleted field) fails closed via `Attribute
 age, a nested GO posture, or an `evaluated_at` that does not match the observed age) is
 `INVALID`, never `CREATED`. Raw `checked_at`, datetime, type, or exception never appear in
 reasons.
+
+## Fresh receipt verifier-parity (RTM-7c.4n closure)
+
+The evidence builder reuses `precheck_receipt_schema.validate_runtime_precheck_receipt_object`
+as the single validation operation for the bound fresh precheck receipt object. The helper
+reuses the same single-source primitives as the standalone JSON verifier:
+
+```text
+PRECHECK_RECEIPT_SCHEMA_VERSION
+validate_checked_at / checked_at_valid
+validate_market / validate_symbol
+validate_receipt_fingerprints / validate_artifact_fingerprint
+validate_observation_semantics
+build_receipt_hash_payload / compute_receipt_sha256
+PrecheckReceiptError
+```
+
+Contract enforced on the fresh receipt object path:
+
+```text
+schema_version exact built-in int == PRECHECK_RECEIPT_SCHEMA_VERSION
+checked_at timezone-aware ISO
+market == KR
+symbol == ASCII [0-9]{6}
+enabled exact bool True
+machine_outcome == pass
+inspection_outcome == ok
+reasons == ()
+fingerprints_before/after strict canonical sequence + semantic validation
+PASS observation ⇒ before == after
+activation posture false/no_go/approval-required/writer-confirmation-required
+stored receipt_sha256 lowercase hex64 == canonical recomputation
+```
+
+Hash equality alone is insufficient. A valid object must pass **both** the evidence fresh-receipt
+validator and the standalone JSON verifier; an invalid object must fail **both** paths with no
+parity divergence. Raw values, fingerprints, paths, and exceptions never appear in evidence
+reasons. Only expected validation failures (`AttributeError`, `TypeError`, `ValueError`,
+`PrecheckReceiptError`) are normalized to `INVALID`; `MemoryError`/`KeyboardInterrupt`/`SystemExit`
+are never swallowed.
 
 ## Single-observation principle
 

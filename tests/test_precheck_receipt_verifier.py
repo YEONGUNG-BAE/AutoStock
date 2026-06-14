@@ -18,6 +18,7 @@ from composition.paper_fast_loop import (
     PrecheckReceiptError,
     build_runtime_precheck_receipt,
 )
+from composition.precheck_receipt_schema import validate_runtime_precheck_receipt_object
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
     verify_runtime_precheck_receipt_payload,
@@ -419,6 +420,26 @@ def test_builder_success_implies_verifier_valid() -> None:
     )
     result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
     assert result.outcome is ReceiptVerificationOutcome.VALID
+    sha = validate_runtime_precheck_receipt_object(
+        schema_version=receipt.schema_version,
+        checked_at=receipt.checked_at,
+        market=receipt.market,
+        symbol=receipt.symbol,
+        enabled=receipt.enabled,
+        machine_outcome=receipt.machine_outcome,
+        inspection_outcome=receipt.inspection_outcome,
+        reasons=receipt.reasons,
+        fingerprints_before=receipt.fingerprints_before,
+        fingerprints_after=receipt.fingerprints_after,
+        activation_authorized=receipt.activation_authorized,
+        runtime_activation_outcome=receipt.runtime_activation_outcome,
+        explicit_operator_approval_required=receipt.explicit_operator_approval_required,
+        writers_stopped_manual_confirmation_required=(
+            receipt.writers_stopped_manual_confirmation_required
+        ),
+        receipt_sha256=receipt.receipt_sha256,
+    )
+    assert sha == receipt.receipt_sha256
 
 
 @pytest.mark.parametrize(

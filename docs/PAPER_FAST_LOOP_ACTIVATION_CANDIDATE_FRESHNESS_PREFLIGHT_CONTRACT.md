@@ -228,10 +228,13 @@ evaluated a freshness policy, fails closed to `INVALID` → combined `NO_GO`.
 
 Evidence (schema v2) additionally requires the **actual** fresh machine-proof result objects —
 a real `revalidation_result` PASS and a real `current_precheck_result` PASS (with an OK
-inspection and a fresh precheck receipt whose `checked_at == evaluated_at.isoformat()` and whose
-`receipt_sha256` recomputes via the canonical receipt-schema helper). A boolean
+inspection and a fresh precheck receipt whose `checked_at == evaluated_at.isoformat()` and which
+passes the shared `validate_runtime_precheck_receipt_object(...)` schema/semantic/hash contract —
+the same rules as the standalone JSON verifier; hash equality alone is insufficient). A boolean
 `fresh_precheck_executed=True` with `revalidation_result`/`current_precheck_result` `None` is
-insufficient and fails closed to `INVALID` → combined `NO_GO`. The digest binds **both** the
+insufficient and fails closed to `INVALID` → combined `NO_GO`. Unsupported fresh-receipt schema,
+invalid `market`/`symbol` (only `KR` + ASCII `[0-9]{6}`), or semantically malformed fingerprints
+with a matching hash also fail closed. The digest binds **both** the
 original candidate `receipt_sha256` and the fresh-precheck `fresh_precheck_receipt_sha256`.
 
 ## Out of scope (unchanged)

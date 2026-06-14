@@ -121,12 +121,14 @@ overlap, a constant NO-GO posture on every nested stage, and an `evaluated_at` o
 datetime` whose exact integer microseconds from the verified `checked_at` equal the observed
 age) **and** which carry the *actual* fresh machine-proof result objects — a real
 `revalidation_result` PASS and a real `current_precheck_result` PASS (exact types, OK
-inspection, fresh receipt with `checked_at == evaluated_at.isoformat()` and a `receipt_sha256`
-recomputed via the canonical receipt-schema helper) sharing one canonical 4-artifact observation
-held identical from revalidation through the fresh precheck; the digest binds **both** receipt
-hashes (`receipt_sha256` + `fresh_precheck_receipt_sha256`). Any mismatch — including a final
-PASS with failure reasons, a time assessment claiming a policy verdict, or a boolean-only
-`fresh_precheck_executed=True` with `None` machine-proof objects — fails closed.
+inspection, fresh receipt with `checked_at == evaluated_at.isoformat()` and full shared
+schema/semantic/hash validation via `validate_runtime_precheck_receipt_object`) sharing one
+canonical 4-artifact observation held identical from revalidation through the fresh precheck; the
+digest binds **both** receipt hashes (`receipt_sha256` + `fresh_precheck_receipt_sha256`). Hash
+equality alone is insufficient — unsupported schema or semantically invalid fingerprints with a
+matching hash fail closed. Any mismatch — including a final PASS with failure reasons, a time
+assessment claiming a policy verdict, or a boolean-only `fresh_precheck_executed=True` with `None`
+machine-proof objects — fails closed.
 The combined wrapper reports `PASS` only when evidence is `CREATED` — a qualified PASS whose
 evidence is not created is combined `NO_GO` (`candidate_evidence_generation_invalid`), so a
 qualified PASS can never advance to approval/activation without a digest. `NO_GO`/`STALE` → no

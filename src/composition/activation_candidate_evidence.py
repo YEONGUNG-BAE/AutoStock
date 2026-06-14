@@ -1,9 +1,14 @@
 """Canonical freshness-qualified candidate evidence (RTM-7c.4n).
 
 Freezes a freshness-qualified mechanical PASS into a single immutable canonical evidence
-payload that a *future* Operator-approval stage can reference. The digest binds one verified
-receipt, one explicit max-age policy, one caller time, and one final-preflight/freshness
-result together.
+payload that a *future* Operator-approval stage can reference. The digest binds one original
+verified candidate receipt and one fresh precheck receipt, one explicit max-age policy, one
+caller time, and one final-preflight/freshness result together.
+
+Hash equality alone is insufficient: the fresh precheck receipt must satisfy the same
+schema/semantic contract as the standalone precheck receipt verifier — an unsupported schema
+with a recomputed matching hash, or semantically malformed fingerprints with a matching hash,
+still fails closed. Evidence is not approval, signature, or authenticity.
 
 Evidence does **not** mean: receipt authenticity, signing/HMAC, Operator approval,
 writer-stop proof, an activation token, or runtime activation authorization. The activation
@@ -50,8 +55,11 @@ from composition.paper_fast_loop import (
 )
 from composition.paper_fast_loop_artifacts import PAPER_FAST_LOOP_ARTIFACT_NAMES
 from composition.precheck_receipt_schema import (
-    build_receipt_hash_payload,
-    compute_receipt_sha256,
+    PrecheckReceiptError,
+    market_valid,
+    symbol_valid,
+    validate_receipt_fingerprints,
+    validate_runtime_precheck_receipt_object,
 )
 from composition.sqlite_inspector import ArtifactFingerprint
 from composition.receipt_freshness_policy import (
@@ -297,7 +305,7 @@ def build_activation_candidate_evidence(
 
     if not _is_lower_hex64(receipt_sha256):
         return _invalid()
-    if not _is_nonempty_str(market) or not _is_nonempty_str(symbol):
+    if not market_valid(market) or not symbol_valid(symbol):
         return _invalid()
     if (
         not _is_nonnegative_int(receipt_age)
@@ -481,18 +489,27 @@ def _evidence_hash_payload(
     }
 
 
-def _valid_fingerprints(fps: object) -> bool:
-    """Exact canonical 4-artifact fingerprint tuple (right order, exact ``ArtifactFingerprint``).
+def _valid_fingerprint_pair(before: object, after: object) -> bool:
+    """Canonical 4-artifact fingerprint pair — exact type, order, semantics (verifier parity).
 
-    A non-tuple, wrong length, a non-``ArtifactFingerprint`` element (wrong object / subclass),
-    or a name out of the canonical order fails closed. The fingerprint body itself is never
-    surfaced in any reason."""
+    A non-tuple, wrong length, a non-``ArtifactFingerprint`` element (subclass / wrong object),
+    a name out of canonical order, or a semantic field violation fails closed."""
 
-    if type(fps) is not tuple or len(fps) != len(PAPER_FAST_LOOP_ARTIFACT_NAMES):
+    if type(before) is not tuple or type(after) is not tuple:
         return False
-    for fp, name in zip(fps, PAPER_FAST_LOOP_ARTIFACT_NAMES):
-        if type(fp) is not ArtifactFingerprint or fp.name != name:
+    if len(before) != len(PAPER_FAST_LOOP_ARTIFACT_NAMES) or len(after) != len(
+        PAPER_FAST_LOOP_ARTIFACT_NAMES
+    ):
+        return False
+    for fp_b, fp_a, name in zip(before, after, PAPER_FAST_LOOP_ARTIFACT_NAMES):
+        if type(fp_b) is not ArtifactFingerprint or type(fp_a) is not ArtifactFingerprint:
             return False
+        if fp_b.name != name or fp_a.name != name:
+            return False
+    try:
+        validate_receipt_fingerprints(before, after)
+    except (AttributeError, TypeError, ValueError, PrecheckReceiptError):
+        return False
     return True
 
 
@@ -615,24 +632,18 @@ def _machine_proof_receipt_sha256(
     except AttributeError:
         return None
 
-    if rc_machine != "pass" or rc_inspection != "ok" or rc_reasons != ():
+    if rc_checked_at != evaluated_at_iso:
         return None
     if rc_market != market or rc_symbol != symbol:
-        return None
-    if rc_enabled is not True:
-        return None
-    if not _posture_ok(rc_activation, rc_runtime):
-        return None
-    if rc_approval is not True or rc_writers is not True:
-        return None
-    if rc_checked_at != evaluated_at_iso:
         return None
 
     # Exact state relationship: one canonical artifact observation held identical from the
     # candidate revalidation through the fresh precheck (frozen observations only).
-    if not _valid_fingerprints(rc_before) or not _valid_fingerprints(rc_after):
+    if not _valid_fingerprint_pair(reval_before, reval_after):
         return None
     if reval_before != reval_after:
+        return None
+    if not _valid_fingerprint_pair(pc_before, pc_after):
         return None
     if pc_before != pc_after:
         return None
@@ -641,30 +652,28 @@ def _machine_proof_receipt_sha256(
     if rc_before != pc_before or rc_after != pc_after:
         return None
 
-    # Independent recomputation of the fresh precheck receipt hash via the reused canonical
-    # receipt schema helper (the hash is not reimplemented here).
-    if not _is_lower_hex64(rc_sha):
-        return None
+    # Full fresh-receipt schema/semantic/hash validation — same contract as the standalone
+    # verifier (hash match alone is insufficient).
     try:
-        recomputed = compute_receipt_sha256(
-            build_receipt_hash_payload(
-                schema_version=rc_schema,
-                checked_at=rc_checked_at,
-                market=rc_market,
-                symbol=rc_symbol,
-                enabled=rc_enabled,
-                machine_outcome=rc_machine,
-                inspection_outcome=rc_inspection,
-                reasons=rc_reasons,
-                fingerprints_before=rc_before,
-                fingerprints_after=rc_after,
-            )
+        return validate_runtime_precheck_receipt_object(
+            schema_version=rc_schema,
+            checked_at=rc_checked_at,
+            market=rc_market,
+            symbol=rc_symbol,
+            enabled=rc_enabled,
+            machine_outcome=rc_machine,
+            inspection_outcome=rc_inspection,
+            reasons=rc_reasons,
+            fingerprints_before=rc_before,
+            fingerprints_after=rc_after,
+            activation_authorized=rc_activation,
+            runtime_activation_outcome=rc_runtime,
+            explicit_operator_approval_required=rc_approval,
+            writers_stopped_manual_confirmation_required=rc_writers,
+            receipt_sha256=rc_sha,
         )
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError, PrecheckReceiptError):
         return None
-    if recomputed != rc_sha:
-        return None
-    return rc_sha
 
 
 def _posture_ok(activation_authorized: object, runtime_activation_outcome: object) -> bool:
@@ -696,10 +705,6 @@ def _parse_aware(value: object) -> datetime | None:
 
 def _is_lower_hex64(value: object) -> bool:
     return type(value) is str and _HEX64.fullmatch(value) is not None
-
-
-def _is_nonempty_str(value: object) -> bool:
-    return type(value) is str and value != ""
 
 
 def _is_nonnegative_int(value: object) -> bool:

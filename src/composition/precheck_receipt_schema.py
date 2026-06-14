@@ -497,6 +497,112 @@ def activation_posture_valid(payload: dict[str, object]) -> bool:
     )
 
 
+def _validate_object_activation_posture(
+    *,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    explicit_operator_approval_required: object,
+    writers_stopped_manual_confirmation_required: object,
+) -> None:
+    """Builder object 경로 — verifier ``activation_posture_valid``와 동일 posture 계약."""
+    if strict_bool(activation_authorized) is not False:
+        raise PrecheckReceiptError("receipt_invalid_activation_posture")
+    if type(runtime_activation_outcome) is not str or runtime_activation_outcome != "no_go":
+        raise PrecheckReceiptError("receipt_invalid_activation_posture")
+    if strict_bool(explicit_operator_approval_required) is not True:
+        raise PrecheckReceiptError("receipt_invalid_activation_posture")
+    if strict_bool(writers_stopped_manual_confirmation_required) is not True:
+        raise PrecheckReceiptError("receipt_invalid_activation_posture")
+
+
+def validate_runtime_precheck_receipt_object(
+    *,
+    schema_version: object,
+    checked_at: object,
+    market: object,
+    symbol: object,
+    enabled: object,
+    machine_outcome: object,
+    inspection_outcome: object,
+    reasons: object,
+    fingerprints_before: object,
+    fingerprints_after: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    explicit_operator_approval_required: object,
+    writers_stopped_manual_confirmation_required: object,
+    receipt_sha256: object,
+) -> str:
+    """``RuntimePrecheckReceipt`` object — standalone verifier와 동일 schema/semantic/hash 계약.
+
+    성공 시 검증·재계산된 ``receipt_sha256``(lowercase hex64)을 반환한다. 실패는
+    ``PrecheckReceiptError`` 또는 strict type guard ``TypeError``/``ValueError``/``AttributeError``
+    로만 표면화되며 raw 값·fingerprint·path는 reason에 포함하지 않는다."""
+
+    if type(schema_version) is not int or isinstance(schema_version, bool):
+        raise PrecheckReceiptError("receipt_invalid_field")
+    if schema_version != PRECHECK_RECEIPT_SCHEMA_VERSION:
+        raise PrecheckReceiptError("receipt_unsupported_schema")
+
+    if type(checked_at) is not str:
+        raise PrecheckReceiptError("receipt_invalid_checked_at")
+    validate_checked_at(checked_at)
+
+    if type(market) is not str:
+        raise PrecheckReceiptError("receipt_invalid_market")
+    validate_market(market)
+
+    if type(symbol) is not str:
+        raise PrecheckReceiptError("receipt_invalid_symbol")
+    validate_symbol(symbol)
+
+    enabled_bool = strict_bool(enabled)
+    if enabled_bool is None or enabled_bool is not True:
+        raise PrecheckReceiptError("receipt_invalid_field")
+
+    if type(machine_outcome) is not str or type(inspection_outcome) is not str:
+        raise PrecheckReceiptError("receipt_invalid_outcome")
+
+    if type(reasons) is not tuple:
+        raise PrecheckReceiptError("receipt_invalid_field")
+
+    validate_receipt_fingerprints(fingerprints_before, fingerprints_after)
+    validate_observation_semantics(
+        machine_outcome=machine_outcome,
+        inspection_outcome=inspection_outcome,
+        reasons=reasons,
+        fingerprints_before=fingerprints_before,
+        fingerprints_after=fingerprints_after,
+    )
+
+    _validate_object_activation_posture(
+        activation_authorized=activation_authorized,
+        runtime_activation_outcome=runtime_activation_outcome,
+        explicit_operator_approval_required=explicit_operator_approval_required,
+        writers_stopped_manual_confirmation_required=writers_stopped_manual_confirmation_required,
+    )
+
+    if not is_hex64(receipt_sha256):
+        raise PrecheckReceiptError("receipt_invalid_field")
+
+    hash_payload = build_receipt_hash_payload(
+        schema_version=schema_version,
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        enabled=enabled_bool,
+        machine_outcome=machine_outcome,
+        inspection_outcome=inspection_outcome,
+        reasons=reasons,
+        fingerprints_before=fingerprints_before,
+        fingerprints_after=fingerprints_after,
+    )
+    recomputed = compute_receipt_sha256(hash_payload)
+    if recomputed != receipt_sha256:
+        raise PrecheckReceiptError("receipt_hash_mismatch")
+    return recomputed
+
+
 def parse_sidecar_suffixes(value: object) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         return None
