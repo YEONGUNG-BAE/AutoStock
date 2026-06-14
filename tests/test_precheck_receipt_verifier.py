@@ -276,6 +276,8 @@ def test_verifier_rejects_tampered_hash(mutator: Callable[[dict[str, Any]], None
         "receipt_semantic_mismatch",
         "receipt_invalid_activation_posture",
         "receipt_invalid_field",
+        "receipt_invalid_market",
+        "receipt_invalid_symbol",
     )
 
 
@@ -333,7 +335,7 @@ def test_verifier_rejects_invalid_symbol() -> None:
     payload = _valid_receipt()
     payload["symbol"] = "00593"
     result = verify_runtime_precheck_receipt_payload(payload)
-    assert result.reason_codes == ("receipt_invalid_field",)
+    assert result.reason_codes == ("receipt_invalid_symbol",)
 
 
 def test_verifier_rejects_invalid_machine_outcome() -> None:
@@ -397,3 +399,101 @@ def test_verifier_sanitized_invalid_payload_output() -> None:
     assert "APP_KEY" not in serialized
     assert "Traceback" not in serialized
     assert "OperationalError" not in serialized
+
+
+# --- builder ↔ verifier parity (RTM-7c.4e closure) ---
+
+
+def test_builder_success_implies_verifier_valid() -> None:
+    fps = _four_fps()
+    receipt = build_runtime_precheck_receipt(
+        checked_at=_CHECKED_AT,
+        market="KR",
+        symbol="005930",
+        enabled=True,
+        machine_outcome=MachineCheckOutcome.PASS,
+        inspection_outcome=InspectionOutcome.OK,
+        reasons=(),
+        fingerprints_before=fps,
+        fingerprints_after=fps,
+    )
+    result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert result.outcome is ReceiptVerificationOutcome.VALID
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"market": "US"}, "receipt_invalid_market"),
+        ({"symbol": "00593"}, "receipt_invalid_symbol"),
+        (
+            {
+                "machine_outcome": MachineCheckOutcome.PASS,
+                "reasons": ("missing_database:ledger",),
+            },
+            "receipt_semantic_mismatch",
+        ),
+        (
+            {
+                "machine_outcome": MachineCheckOutcome.PASS,
+                "inspection_outcome": InspectionOutcome.NO_GO,
+            },
+            "receipt_semantic_mismatch",
+        ),
+        (
+            {
+                "machine_outcome": MachineCheckOutcome.NO_GO,
+                "inspection_outcome": InspectionOutcome.NO_GO,
+                "reasons": (),
+            },
+            "receipt_semantic_mismatch",
+        ),
+    ],
+)
+def test_builder_rejects_verifier_invalid_inputs(kwargs: dict[str, Any], code: str) -> None:
+    fps = _four_fps()
+    base = {
+        "checked_at": _CHECKED_AT,
+        "market": "KR",
+        "symbol": "005930",
+        "enabled": True,
+        "machine_outcome": MachineCheckOutcome.PASS,
+        "inspection_outcome": InspectionOutcome.OK,
+        "reasons": (),
+        "fingerprints_before": fps,
+        "fingerprints_after": fps,
+    }
+    base.update(kwargs)
+    with pytest.raises(PrecheckReceiptError) as exc:
+        build_runtime_precheck_receipt(**base)
+    assert exc.value.reason_code == code
+
+
+@pytest.mark.parametrize(
+    ("fp_kwargs",),
+    [
+        ({"present": False, "is_regular_file": True, "size": 1},),
+        ({"present": False, "is_regular_file": False, "sha256": "ab" * 32},),
+        ({"present": True, "is_regular_file": False, "size": 10},),
+        ({"present": True, "is_regular_file": True, "sha256": None},),
+        ({"name": "execution_inputs_snapshot", "user_version": 1},),
+        ({"sidecar_suffixes": ("-bad",)},),
+        ({"sidecar_suffixes": ("-wal", "-wal")},),
+    ],
+)
+def test_builder_rejects_invalid_fingerprint_semantics(fp_kwargs: dict[str, Any]) -> None:
+    name = fp_kwargs.pop("name", "ledger")
+    bad = _fp(name, **fp_kwargs)
+    fps = _four_fps(**{name: bad})
+    with pytest.raises(PrecheckReceiptError, match="receipt_invalid_fingerprint"):
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.PASS,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=(),
+            fingerprints_before=fps,
+            fingerprints_after=fps,
+        )

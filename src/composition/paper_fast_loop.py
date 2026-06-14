@@ -94,6 +94,21 @@ from orchestration.fast_loop_execution import (
 
 from decision.canonical_json import payload_sha256
 
+from composition.precheck_receipt_schema import (
+    PRECHECK_RECEIPT_ARTIFACT_NAMES,
+    PRECHECK_RECEIPT_SCHEMA_VERSION,
+    PrecheckReceiptError,
+    build_receipt_hash_payload,
+    compute_receipt_sha256,
+    precheck_activation_posture,
+    validate_checked_at,
+    validate_market,
+    validate_outcome_semantics,
+    validate_reasons,
+    validate_receipt_fingerprints,
+    validate_symbol,
+)
+
 __all__ = [
     "PaperFastLoopPaths",
     "PaperFastLoopOutcome",
@@ -494,122 +509,6 @@ _IRREGULAR_ARTIFACT_OWNED_INSPECTION_REASONS: dict[str, tuple[str, ...]] = {
     "active_decision_store": ("active_store_unreadable:sqlite_not_a_file",),
 }
 
-PRECHECK_RECEIPT_SCHEMA_VERSION = 1
-
-PRECHECK_RECEIPT_ARTIFACT_NAMES: tuple[str, ...] = tuple(
-    name for name, _, _ in _PRECHECK_ARTIFACTS
-)
-
-
-class PrecheckReceiptError(ValueError):
-    """Receipt builder 입력 검증 실패 — ``reason_code``만 carry; raw 값/path 미포함."""
-
-    def __init__(self, reason_code: str) -> None:
-        self.reason_code = reason_code
-        super().__init__(reason_code)
-
-
-def _validate_receipt_checked_at(checked_at: str) -> None:
-    if type(checked_at) is not str or not checked_at.strip():
-        raise PrecheckReceiptError("receipt_invalid_checked_at")
-    try:
-        parsed = datetime.fromisoformat(checked_at)
-    except ValueError as exc:
-        raise PrecheckReceiptError("receipt_invalid_checked_at") from exc
-    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
-        raise PrecheckReceiptError("receipt_invalid_checked_at")
-
-
-def _validate_builder_fingerprint_sequence(
-    fingerprints: tuple[sqlite_inspector.ArtifactFingerprint, ...],
-) -> None:
-    if len(fingerprints) != len(PRECHECK_RECEIPT_ARTIFACT_NAMES):
-        raise PrecheckReceiptError("receipt_invalid_fingerprint_count")
-    names = [fp.name for fp in fingerprints]
-    if len(set(names)) != len(names):
-        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
-    if any(name not in PRECHECK_RECEIPT_ARTIFACT_NAMES for name in names):
-        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
-    if tuple(names) != PRECHECK_RECEIPT_ARTIFACT_NAMES:
-        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
-
-
-def _validate_builder_receipt_fingerprints(
-    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...],
-    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...],
-) -> None:
-    _validate_builder_fingerprint_sequence(fingerprints_before)
-    _validate_builder_fingerprint_sequence(fingerprints_after)
-    before_names = tuple(fp.name for fp in fingerprints_before)
-    after_names = tuple(fp.name for fp in fingerprints_after)
-    if before_names != after_names:
-        raise PrecheckReceiptError("receipt_fingerprint_identity_mismatch")
-
-
-def _validate_builder_receipt_reasons(reasons: tuple[str, ...]) -> None:
-    for reason in reasons:
-        if type(reason) is not str or not reason.strip():
-            raise PrecheckReceiptError("receipt_invalid_reason")
-
-
-def _precheck_activation_posture() -> dict[str, bool | str]:
-    """단일 출처: precheck/receipt/CLI activation 필드 — drift 방지."""
-    return {
-        "activation_authorized": False,
-        "runtime_activation_outcome": "no_go",
-        "explicit_operator_approval_required": True,
-        "writers_stopped_manual_confirmation_required": True,
-    }
-
-
-def _fingerprint_to_receipt_payload(fp: sqlite_inspector.ArtifactFingerprint) -> dict[str, object]:
-    """Receipt canonical hash용 fingerprint dict — 경로/DB 내용/secret 제외."""
-    return {
-        "name": fp.name,
-        "present": fp.present,
-        "is_regular_file": fp.is_regular_file,
-        "size": fp.size,
-        "sha256": fp.sha256,
-        "user_version": fp.user_version,
-        "sidecar_suffixes": list(fp.sidecar_suffixes),
-    }
-
-
-def _build_receipt_hash_payload(
-    *,
-    schema_version: int,
-    checked_at: str,
-    market: str,
-    symbol: str,
-    enabled: bool,
-    machine_outcome: str,
-    inspection_outcome: str,
-    reasons: tuple[str, ...],
-    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...],
-    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...],
-    activation_authorized: bool,
-    runtime_activation_outcome: str,
-    explicit_operator_approval_required: bool,
-    writers_stopped_manual_confirmation_required: bool,
-) -> dict[str, object]:
-    """``receipt_sha256`` 입력 payload — ``receipt_sha256`` 자체는 포함하지 않는다."""
-    return {
-        "schema_version": schema_version,
-        "checked_at": checked_at,
-        "market": market,
-        "symbol": symbol,
-        "enabled": enabled,
-        "machine_outcome": machine_outcome,
-        "inspection_outcome": inspection_outcome,
-        "reasons": list(reasons),
-        "fingerprints_before": [_fingerprint_to_receipt_payload(fp) for fp in fingerprints_before],
-        "fingerprints_after": [_fingerprint_to_receipt_payload(fp) for fp in fingerprints_after],
-        "activation_authorized": activation_authorized,
-        "runtime_activation_outcome": runtime_activation_outcome,
-        "explicit_operator_approval_required": explicit_operator_approval_required,
-        "writers_stopped_manual_confirmation_required": writers_stopped_manual_confirmation_required,
-    }
-
 
 def build_runtime_precheck_receipt(
     *,
@@ -628,11 +527,20 @@ def build_runtime_precheck_receipt(
     ``checked_at``은 ``precheck_runtime``에 전달된 timezone-aware ``now``의 ISO 문자열이어야
     한다(별도 clock read 없음). ``receipt_sha256``은 canonical observation identifier이며
     전자서명·승인·runtime authorization이 아니다."""
-    _validate_receipt_checked_at(checked_at)
-    _validate_builder_receipt_fingerprints(fingerprints_before, fingerprints_after)
-    _validate_builder_receipt_reasons(reasons)
-    posture = _precheck_activation_posture()
-    hash_payload = _build_receipt_hash_payload(
+    validate_checked_at(checked_at)
+    validate_market(market)
+    validate_symbol(symbol)
+    if type(enabled) is not bool:
+        raise PrecheckReceiptError("receipt_invalid_field")
+    validate_reasons(reasons)
+    validate_outcome_semantics(
+        machine_outcome=machine_outcome.value,
+        inspection_outcome=inspection_outcome.value,
+        reasons=reasons,
+    )
+    validate_receipt_fingerprints(fingerprints_before, fingerprints_after)
+    posture = precheck_activation_posture()
+    hash_payload = build_receipt_hash_payload(
         schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
         checked_at=checked_at,
         market=market,
@@ -643,7 +551,6 @@ def build_runtime_precheck_receipt(
         reasons=reasons,
         fingerprints_before=fingerprints_before,
         fingerprints_after=fingerprints_after,
-        **posture,  # type: ignore[arg-type]
     )
     return RuntimePrecheckReceipt(
         schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
@@ -656,7 +563,7 @@ def build_runtime_precheck_receipt(
         reasons=reasons,
         fingerprints_before=fingerprints_before,
         fingerprints_after=fingerprints_after,
-        receipt_sha256=payload_sha256(hash_payload),
+        receipt_sha256=compute_receipt_sha256(hash_payload),
         **posture,  # type: ignore[arg-type]
     )
 
@@ -724,7 +631,7 @@ def precheck_runtime(
     reasons = aggregate_inspection_reasons + tuple(precheck_reasons)
     machine_no_go = inspection.outcome is InspectionOutcome.NO_GO or bool(precheck_reasons)
     machine_outcome = MachineCheckOutcome.NO_GO if machine_no_go else MachineCheckOutcome.PASS
-    posture = _precheck_activation_posture()
+    posture = precheck_activation_posture()
     receipt = build_runtime_precheck_receipt(
         checked_at=now.isoformat(),
         market=settings.market,

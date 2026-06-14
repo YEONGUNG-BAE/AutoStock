@@ -1034,20 +1034,25 @@ def test_receipt_is_deterministic_for_fixed_observation() -> None:
         ("size", {"ledger": _receipt_fingerprint("ledger", size=8192)}),
         ("sidecar", {"ledger": _receipt_fingerprint("ledger", sidecar_suffixes=("-wal",))}),
         ("user_version", {"ledger": _receipt_fingerprint("ledger", user_version=2)}),
-        ("market", {}),  # handled via kwargs below
     ],
-    ids=["sha256", "size", "sidecar", "user_version", "market"],
+    ids=["sha256", "size", "sidecar", "user_version"],
 )
 def test_receipt_hash_changes_on_state_mutation(field: str, override: dict[str, ArtifactFingerprint]) -> None:
     baseline = _build_pure_receipt()
-    if field == "market":
-        mutated = _build_pure_receipt(market="US")
-    elif field == "symbol":
+    if field == "symbol":
         mutated = _build_pure_receipt(symbol="000660")
     elif field == "machine_outcome":
-        mutated = _build_pure_receipt(machine_outcome=MachineCheckOutcome.NO_GO)
+        mutated = _build_pure_receipt(
+            machine_outcome=MachineCheckOutcome.NO_GO,
+            inspection_outcome=InspectionOutcome.NO_GO,
+            reasons=("missing_database:ledger",),
+        )
     elif field == "reason":
-        mutated = _build_pure_receipt(reasons=("missing_database:ledger",))
+        mutated = _build_pure_receipt(
+            machine_outcome=MachineCheckOutcome.NO_GO,
+            inspection_outcome=InspectionOutcome.NO_GO,
+            reasons=("missing_database:ledger",),
+        )
     elif field == "checked_at":
         mutated = _build_pure_receipt(checked_at="2026-06-16T01:00:00+00:00")
     else:
@@ -1059,14 +1064,12 @@ def test_receipt_hash_changes_on_state_mutation(field: str, override: dict[str, 
 def test_receipt_hash_changes_on_symbol_machine_reason_and_checked_at() -> None:
     baseline = _build_pure_receipt()
     assert _build_pure_receipt(symbol="000660").receipt_sha256 != baseline.receipt_sha256
-    assert (
-        _build_pure_receipt(machine_outcome=MachineCheckOutcome.NO_GO).receipt_sha256
-        != baseline.receipt_sha256
+    no_go = dict(
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=InspectionOutcome.NO_GO,
+        reasons=("missing_database:ledger",),
     )
-    assert (
-        _build_pure_receipt(reasons=("missing_database:ledger",)).receipt_sha256
-        != baseline.receipt_sha256
-    )
+    assert _build_pure_receipt(**no_go).receipt_sha256 != baseline.receipt_sha256
     assert (
         _build_pure_receipt(checked_at="2026-06-16T01:00:00+00:00").receipt_sha256
         != baseline.receipt_sha256
@@ -1074,8 +1077,16 @@ def test_receipt_hash_changes_on_symbol_machine_reason_and_checked_at() -> None:
 
 
 def test_receipt_hash_recomputes_independently() -> None:
-    receipt = _build_pure_receipt(reasons=("missing_database:ledger",))
-    independent = _independent_receipt_hash_payload(reasons=("missing_database:ledger",))
+    receipt = _build_pure_receipt(
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=InspectionOutcome.NO_GO,
+        reasons=("missing_database:ledger",),
+    )
+    independent = _independent_receipt_hash_payload(
+        machine_outcome="no_go",
+        inspection_outcome="no_go",
+        reasons=("missing_database:ledger",),
+    )
     assert payload_sha256(independent) == receipt.receipt_sha256
 
 

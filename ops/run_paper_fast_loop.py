@@ -46,6 +46,7 @@ from composition.paper_fast_loop import (
     precheck_runtime,
     replay_offline,
 )
+from composition.precheck_receipt_stdin_json import ReceiptStdinJsonError, parse_receipt_stdin_json
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
     RuntimePrecheckReceiptVerification,
@@ -322,9 +323,9 @@ def _read_verify_stdin_payload() -> tuple[object | None, str | None]:
     except UnicodeDecodeError:
         return None, "receipt_input_not_utf8"
     try:
-        return json.loads(text), None
-    except json.JSONDecodeError:
-        return None, "receipt_input_not_json"
+        return parse_receipt_stdin_json(text), None
+    except ReceiptStdinJsonError as exc:
+        return None, exc.reason_code
 
 
 def _journal_to_dict(journal: Any) -> dict[str, Any] | None:

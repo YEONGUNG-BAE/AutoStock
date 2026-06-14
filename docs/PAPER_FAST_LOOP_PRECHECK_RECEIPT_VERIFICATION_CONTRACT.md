@@ -20,6 +20,14 @@ Input: untrusted JSON-decoded object (typically from stdin). Output carries
 `outcome` (`valid` / `invalid`), optional `schema_version` / `receipt_sha256`, and
 stable `reason_codes` — never the original receipt body.
 
+**Duplicate object keys** are rejected at the CLI stdin JSON layer
+(`composition.precheck_receipt_stdin_json`) — not by the verifier API, which receives
+already-decoded objects. Default `json.loads` last-key-wins is **not** used for stdin.
+
+Shared schema lives in `composition.precheck_receipt_schema` (builder + verifier
+single source). Invariant: every receipt returned successfully by
+`build_runtime_precheck_receipt()` must verify `VALID` after JSON dict conversion.
+
 ## Strict top-level schema (schema_version = 1)
 
 Required fields (exact set — unknown or missing fields rejected):
@@ -109,26 +117,41 @@ receipt_missing_field
 receipt_unsupported_schema
 receipt_invalid_field
 receipt_invalid_checked_at
+receipt_invalid_market
+receipt_invalid_symbol
 receipt_invalid_outcome
 receipt_invalid_activation_posture
 receipt_invalid_fingerprint_count
 receipt_invalid_fingerprint_order
 receipt_invalid_fingerprint
-receipt_fingerprint_identity_mismatch
 receipt_semantic_mismatch
 receipt_hash_mismatch
 ```
 
-Input-layer CLI codes (stdin bound):
+Input-layer CLI codes (stdin JSON parse + bound):
 
 ```text
 receipt_input_empty
 receipt_input_not_utf8
 receipt_input_not_json
 receipt_input_too_large
+receipt_input_too_deep
+receipt_input_duplicate_key
 ```
 
-Errors never echo raw input values, paths, or hash payloads.
+### Stdin JSON fail-closed (RTM-7c.4e safety closure)
+
+Pathological stdin never escapes as an uncaught exception:
+
+- oversized integer `ValueError` → `receipt_input_not_json`
+- `RecursionError` (deep nesting) → `receipt_input_too_deep`
+- duplicate object member (any nesting depth) → `receipt_input_duplicate_key`
+- non-standard constants (`NaN`, `Infinity`, `-Infinity`) via `parse_constant` →
+  `receipt_input_not_json`
+
+Output never includes raw JSON, offending numbers, duplicate key names, nesting
+content, tracebacks, or exception reprs. All invalid parse cases: exit `1`,
+`outcome=INVALID`, activation fields false/no_go.
 
 ## CLI (`--verify-precheck-receipt`)
 
@@ -136,18 +159,24 @@ Errors never echo raw input values, paths, or hash payloads.
 - Processed **before** `load_settings()` (no config path read).
 - Stdin only — **receipt object root**, not the full precheck summary envelope.
   Operator must pass the nested `precheck_receipt` object from RTM-7c.4d JSON.
-- Max stdin size: **1 MiB** (`limit + 1` byte probe; oversize →
-  `receipt_input_too_large`).
+- Max stdin size: **1 MiB** — reader requests exactly `limit + 1` bytes; at exactly
+  `limit` bytes (valid receipt JSON + trailing whitespace padding) parses and may
+  verify `VALID`; at `limit + 1` → `receipt_input_too_large` without reading further.
 - Exit `0` iff `VALID`, else `1`.
 - JSON includes `activation_authorized=false`, `runtime_activation_outcome="no_go"`,
   and no-side-effect attestations (`credential_read`, `network_called`,
   `database_opened`, `filesystem_written` all false).
 
-## Builder validation (RTM-7c.4e carry-over)
+## Builder validation (shared schema)
 
-`build_runtime_precheck_receipt` fail-closed on malformed `checked_at`, wrong
-fingerprint count/order/names, or before/after name-sequence mismatch
-(`PrecheckReceiptError` with stable `reason_code` only).
+`composition.precheck_receipt_schema` + `build_runtime_precheck_receipt` fail-closed
+on malformed `checked_at`, invalid market/symbol, outcome semantic mismatch,
+fingerprint count/order/names, and fingerprint field semantics
+(`PrecheckReceiptError` with stable `reason_code` only — no raw values).
+
+Canonical artifact order violations use `receipt_invalid_fingerprint_order` only
+(`receipt_fingerprint_identity_mismatch` removed — unreachable once both lists must
+match canonical order).
 
 ## Out of scope
 

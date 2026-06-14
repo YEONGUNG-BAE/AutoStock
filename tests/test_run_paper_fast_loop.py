@@ -596,16 +596,45 @@ def test_verify_cli_rejects_oversized_stdin(capsys: pytest.CaptureFixture[str]) 
     assert payload["reason_codes"] == ["receipt_input_too_large"]
 
 
-def test_verify_cli_accepts_stdin_at_exact_limit(capsys: pytest.CaptureFixture[str]) -> None:
+def _receipt_json_padded_to_exact_limit() -> bytes:
     import test_precheck_receipt_verifier as vrf_helper
 
-    receipt = vrf_helper._valid_receipt()
-    data = json.dumps(receipt).encode("utf-8")
     limit = cli._VERIFY_RECEIPT_STDIN_LIMIT
-    assert len(data) <= limit
+    text = json.dumps(vrf_helper._valid_receipt())
+    if len(text.encode("utf-8")) > limit:
+        raise AssertionError("valid receipt baseline exceeds stdin limit")
+    pad = limit - len(text.encode("utf-8"))
+    data = (text + (" " * pad)).encode("utf-8")
+    assert len(data) == limit
+    return data
+
+
+def test_verify_cli_accepts_stdin_at_exact_limit(capsys: pytest.CaptureFixture[str]) -> None:
+    data = _receipt_json_padded_to_exact_limit()
     code, payload = _run_verify(data, capsys)
     assert code == 0
     assert payload["outcome"] == "VALID"
+
+
+def test_verify_stdin_reader_requests_limit_plus_one_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requested: list[int] = []
+
+    def _read(size: int = -1) -> bytes:
+        requested.append(size)
+        return b"x" * (cli._VERIFY_RECEIPT_STDIN_LIMIT + 1)
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main(["--verify-precheck-receipt", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["reason_codes"] == ["receipt_input_too_large"]
+    assert requested == [cli._VERIFY_RECEIPT_STDIN_LIMIT + 1]
 
 
 def test_verify_cli_mutually_exclusive_with_precheck(capsys: pytest.CaptureFixture[str]) -> None:
@@ -668,3 +697,69 @@ def test_verify_cli_sanitizes_poison_input(capsys: pytest.CaptureFixture[str]) -
     assert "/home/" not in combined
     assert "APP_SECRET" not in combined
     assert "Traceback" not in combined
+
+
+def _assert_verify_invalid_sanitized(
+    data: bytes, capsys: pytest.CaptureFixture[str], *, reason: str
+) -> None:
+    code, payload = _run_verify(data, capsys)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == [reason]
+    assert payload["activation_authorized"] is False
+    assert "Traceback" not in combined
+    assert "ValueError" not in combined
+    assert "RecursionError" not in combined
+
+
+def test_verify_cli_rejects_large_integer_json(capsys: pytest.CaptureFixture[str]) -> None:
+    data = (b'{"schema_version": ' + b"9" * 5000 + b"}")
+    assert len(data) < cli._VERIFY_RECEIPT_STDIN_LIMIT
+    _assert_verify_invalid_sanitized(data, capsys, reason="receipt_input_not_json")
+
+
+def test_verify_cli_rejects_deeply_nested_json(capsys: pytest.CaptureFixture[str]) -> None:
+    depth = 5000
+    data = b"[" * depth + b"0" + b"]" * depth
+    assert len(data) < cli._VERIFY_RECEIPT_STDIN_LIMIT
+    _assert_verify_invalid_sanitized(data, capsys, reason="receipt_input_too_deep")
+
+
+def test_verify_cli_rejects_duplicate_top_level_key(capsys: pytest.CaptureFixture[str]) -> None:
+    data = b'{"schema_version": 1, "schema_version": 2}'
+    _assert_verify_invalid_sanitized(data, capsys, reason="receipt_input_duplicate_key")
+
+
+def test_verify_cli_rejects_duplicate_nested_fingerprint_key(capsys: pytest.CaptureFixture[str]) -> None:
+    data = b'{"name": "ledger", "name": "ledger", "present": true}'
+    _assert_verify_invalid_sanitized(data, capsys, reason="receipt_input_duplicate_key")
+
+
+def test_verify_cli_rejects_nan_constant(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_verify_invalid_sanitized(b"[NaN]", capsys, reason="receipt_input_not_json")
+
+
+def test_verify_cli_rejects_infinity_constant(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_verify_invalid_sanitized(b"[Infinity]", capsys, reason="receipt_input_not_json")
+
+
+def test_verify_cli_subprocess_no_traceback_on_pathological_json() -> None:
+    import os
+    import subprocess
+
+    data = b'{"schema_version": ' + b"9" * 5000 + b"}"
+    result = subprocess.run(
+        [sys.executable, str(_CLI_PATH), "--verify-precheck-receipt", "--json"],
+        input=data,
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert result.returncode == 1
+    assert b"Traceback" not in result.stderr
+    assert b"ValueError" not in result.stderr
+    assert b"Traceback" not in result.stdout
+    payload = json.loads(result.stdout.decode("utf-8").strip().splitlines()[-1])
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["receipt_input_not_json"]
