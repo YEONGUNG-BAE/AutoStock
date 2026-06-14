@@ -11,7 +11,7 @@ Code: `ops/run_paper_fast_loop.py` mode `--build-operator-approval-intent`
 
 ## Mode
 
-10th mutually-exclusive CLI mode (alongside the existing nine):
+11th mutually-exclusive CLI mode (alongside the existing ten):
 
 ```text
 --build-operator-approval-intent
@@ -315,6 +315,7 @@ Upstream NO_GO must skip the approval-intent builder (`0`).
 ## Related contracts
 
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — API-only intent builder
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` — stdin-only intent verification (RTM-7c.4q)
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` — upstream qualified preflight
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` — evidence schema v2
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — CLI wiring root

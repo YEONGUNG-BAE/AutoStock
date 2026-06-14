@@ -152,8 +152,11 @@ Intent is **not** identity, signature,
 writer-stop machine proof, approval consumption, replay prevention, or activation authorization;
 it is never persisted. **RTM-7c.4p** wires CLI mode `--build-operator-approval-intent` — explicit
 `--json` + `--config` (no default fallback), manual confirmation flags, stable JSON envelope,
-FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption/identity/signing/activation). Approval consumption and activation
-caller remain **OPEN**.
+FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption/identity/signing/activation).
+**RTM-7c.4q** adds standalone stdin-only intent verification
+(`verify_operator_approval_intent_payload` + `--verify-operator-approval-intent`) — VALID means
+schema/semantic/hash consistency only (not authentication/consumption/freshness/activation).
+Approval consumption and activation caller remain **OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -264,4 +267,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` (RTM-7c.4n — canonical evidence digest; not approval/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4o — approval-intent digest; not consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` (RTM-7c.4p — CLI stdout intent generation; not persistence/consumption/activation)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` (RTM-7c.4q — stdin-only intent verification; VALID ≠ authentication/activation)
 - `docs/TECH_DEBT.md` (OPEN items)

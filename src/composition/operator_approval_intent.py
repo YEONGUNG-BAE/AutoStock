@@ -26,6 +26,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from composition.activation_candidate_evidence import (
+    ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
     ActivationCandidateEvidence,
     ActivationCandidateEvidenceOutcome,
     ActivationCandidateEvidenceResult,
@@ -33,6 +34,7 @@ from composition.activation_candidate_evidence import (
     FreshnessQualifiedEvidenceResult,
     validate_activation_candidate_evidence_scalars,
 )
+from composition.precheck_receipt_schema import is_hex64, market_valid, symbol_valid
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
     ActivationCandidateFreshnessPreflightResult,
@@ -41,12 +43,37 @@ from decision.canonical_json import payload_sha256
 
 __all__ = [
     "APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE",
+    "OPERATOR_APPROVAL_INTENT_FIELD_NAMES",
     "OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION",
     "OperatorApprovalIntent",
     "OperatorApprovalIntentOutcome",
     "OperatorApprovalIntentResult",
+    "ValidatedOperatorApprovalIntentScalars",
     "build_operator_approval_intent",
+    "operator_approval_intent_hash_payload",
+    "validate_operator_approval_intent_object",
+    "validate_operator_approval_intent_scalars",
 ]
+
+_OPERATOR_APPROVAL_INTENT_FIELD_NAMES = frozenset(
+    {
+        "schema_version",
+        "declared_at",
+        "evidence_schema_version",
+        "evidence_sha256",
+        "market",
+        "symbol",
+        "approval_scope",
+        "operator_approval_declared",
+        "writers_stopped_manually_confirmed",
+        "live_orders_forbidden_confirmed",
+        "activation_authorized",
+        "runtime_activation_outcome",
+        "approval_intent_sha256",
+    }
+)
+
+OPERATOR_APPROVAL_INTENT_FIELD_NAMES = _OPERATOR_APPROVAL_INTENT_FIELD_NAMES
 
 OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION = 1
 
@@ -88,6 +115,25 @@ class OperatorApprovalIntentResult:
     outcome: OperatorApprovalIntentOutcome
     reasons: tuple[str, ...]
     intent: OperatorApprovalIntent | None
+
+
+@dataclass(frozen=True)
+class ValidatedOperatorApprovalIntentScalars:
+    """검증된 approval-intent scalar snapshot — builder/verifier 공유."""
+
+    schema_version: int
+    declared_at: str
+    evidence_schema_version: int
+    evidence_sha256: str
+    market: str
+    symbol: str
+    approval_scope: str
+    operator_approval_declared: bool
+    writers_stopped_manually_confirmed: bool
+    live_orders_forbidden_confirmed: bool
+    activation_authorized: bool
+    runtime_activation_outcome: str
+    approval_intent_sha256: str
 
 
 def build_operator_approval_intent(
@@ -246,7 +292,7 @@ def build_operator_approval_intent(
         return _invalid()
     if declared_at_parsed < evidence_evaluated:
         return _invalid()
-    hash_payload = _intent_hash_payload(
+    hash_payload = operator_approval_intent_hash_payload(
         declared_at=declared_at_iso,
         evidence_schema_version=validated.schema_version,
         evidence_sha256=validated.evidence_sha256,
@@ -277,7 +323,7 @@ def build_operator_approval_intent(
     )
 
 
-def _intent_hash_payload(
+def operator_approval_intent_hash_payload(
     *,
     declared_at: str,
     evidence_schema_version: int,
@@ -301,6 +347,129 @@ def _intent_hash_payload(
         "activation_authorized": False,
         "runtime_activation_outcome": "no_go",
     }
+
+
+def validate_operator_approval_intent_scalars(
+    *,
+    schema_version: object,
+    declared_at: object,
+    evidence_schema_version: object,
+    evidence_sha256: object,
+    market: object,
+    symbol: object,
+    approval_scope: object,
+    operator_approval_declared: object,
+    writers_stopped_manually_confirmed: object,
+    live_orders_forbidden_confirmed: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    approval_intent_sha256: object,
+) -> ValidatedOperatorApprovalIntentScalars | None:
+    """Shared scalar+semantic contract — builder output과 verifier 입력 모두 동일 규칙."""
+
+    if type(schema_version) is not int or isinstance(schema_version, bool):
+        return None
+    if schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
+        return None
+
+    if not _approval_intent_declared_at_valid(declared_at):
+        return None
+
+    if type(evidence_schema_version) is not int or isinstance(evidence_schema_version, bool):
+        return None
+    if evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
+        return None
+
+    if not is_hex64(evidence_sha256):
+        return None
+
+    if not market_valid(market):
+        return None
+    if not symbol_valid(symbol):
+        return None
+
+    if type(approval_scope) is not str:
+        return None
+    if approval_scope != APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE:
+        return None
+
+    if not _exact_true_bool(operator_approval_declared):
+        return None
+    if not _exact_true_bool(writers_stopped_manually_confirmed):
+        return None
+    if not _exact_true_bool(live_orders_forbidden_confirmed):
+        return None
+    if not _exact_false_bool(activation_authorized):
+        return None
+
+    if type(runtime_activation_outcome) is not str:
+        return None
+    if runtime_activation_outcome != "no_go":
+        return None
+
+    if not is_hex64(approval_intent_sha256):
+        return None
+
+    return ValidatedOperatorApprovalIntentScalars(
+        schema_version=schema_version,
+        declared_at=declared_at,
+        evidence_schema_version=evidence_schema_version,
+        evidence_sha256=evidence_sha256,
+        market=market,
+        symbol=symbol,
+        approval_scope=approval_scope,
+        operator_approval_declared=True,
+        writers_stopped_manually_confirmed=True,
+        live_orders_forbidden_confirmed=True,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+        approval_intent_sha256=approval_intent_sha256,
+    )
+
+
+def validate_operator_approval_intent_object(
+    value: object,
+) -> ValidatedOperatorApprovalIntentScalars | None:
+    """Exact ``OperatorApprovalIntent`` dataclass만 허용 — subclass/duck-type 거부."""
+
+    if type(value) is not OperatorApprovalIntent:
+        return None
+    try:
+        return validate_operator_approval_intent_scalars(
+            schema_version=value.schema_version,
+            declared_at=value.declared_at,
+            evidence_schema_version=value.evidence_schema_version,
+            evidence_sha256=value.evidence_sha256,
+            market=value.market,
+            symbol=value.symbol,
+            approval_scope=value.approval_scope,
+            operator_approval_declared=value.operator_approval_declared,
+            writers_stopped_manually_confirmed=value.writers_stopped_manually_confirmed,
+            live_orders_forbidden_confirmed=value.live_orders_forbidden_confirmed,
+            activation_authorized=value.activation_authorized,
+            runtime_activation_outcome=value.runtime_activation_outcome,
+            approval_intent_sha256=value.approval_intent_sha256,
+        )
+    except AttributeError:
+        return None
+
+
+def _approval_intent_declared_at_valid(value: object) -> bool:
+    """ISO parseable timezone-aware ``declared_at`` string."""
+
+    if type(value) is not str or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return False
+    if type(parsed) is not datetime:
+        return False
+    try:
+        offset = parsed.utcoffset()
+    except Exception:
+        return False
+    return offset is not None
 
 
 def snapshot_declared_at(value: object) -> tuple[str, datetime] | None:

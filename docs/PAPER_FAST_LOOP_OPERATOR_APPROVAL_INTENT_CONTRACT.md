@@ -256,12 +256,20 @@ Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
 `reasons` only), FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption).
 See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md`.
 
+**RTM-7c.4q** adds shared scalar/hash helpers (`operator_approval_intent_hash_payload`,
+`validate_operator_approval_intent_scalars`, `validate_operator_approval_intent_object`) and
+standalone verifier `verify_operator_approval_intent_payload` plus CLI mode
+`--verify-operator-approval-intent` (stdin-only; VALID = schema/semantic/hash only — not
+authentication/consumption/activation). See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md`.
+
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
 evidence digest fields only.
 
 ## Related contracts
 
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` — CLI stdout intent generation (RTM-7c.4p)
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` — standalone intent verification (RTM-7c.4q)
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` — evidence schema v2 / hash binding
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition wiring root

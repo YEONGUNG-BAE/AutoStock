@@ -361,7 +361,8 @@ def test_approval_cli_mutually_exclusive_modes(capsys: pytest.CaptureFixture[str
     )
     assert code == 1
     assert payload["outcome"] == "FAIL"
-    assert "mutually exclusive" in payload["reason_code"]
+    assert payload["mode"] == "build-operator-approval-intent"
+    assert payload["reasons"] == ["approval_intent_mode_conflict"]
 
 
 @pytest.mark.parametrize(
@@ -939,3 +940,269 @@ def test_approval_cli_module_import_guard() -> None:
     for forbidden in ("socket", "websocket", "websockets", "http", "httpx", "urllib", "requests"):
         assert f"import {forbidden}" not in source
         assert f"from {forbidden}" not in source
+
+
+# --- RTM-7c.4q verify-operator-approval-intent CLI ---
+
+
+import test_operator_approval_intent_verifier as verify_helper
+
+_VERIFY_ENVELOPE_KEYS = frozenset(
+    {
+        "outcome",
+        "mode",
+        "schema_version",
+        "evidence_schema_version",
+        "evidence_sha256",
+        "approval_intent_sha256",
+        "reason_codes",
+        "activation_authorized",
+        "runtime_activation_outcome",
+        "approval_intent_authenticated",
+        "approval_intent_consumed",
+        "approval_intent_persisted",
+    }
+)
+
+
+def _verify_intent_argv(*extra: str) -> list[str]:
+    return ["--verify-operator-approval-intent", "--json", *extra]
+
+
+def _run_verify_intent_cli(
+    argv: list[str],
+    payload: dict[str, Any] | None,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, Any]]:
+    if payload is not None:
+        sys.stdin = _stdin_bytes(json.dumps(payload).encode("utf-8"))  # type: ignore[assignment]
+    code = cli.main(argv)
+    captured = capsys.readouterr()
+    body = json.loads(captured.out.strip().splitlines()[-1])
+    return code, body
+
+
+def _assert_verify_posture(payload: dict[str, Any]) -> None:
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert payload["approval_intent_authenticated"] is False
+    assert payload["approval_intent_consumed"] is False
+    assert payload["approval_intent_persisted"] is False
+
+
+def test_verify_intent_cli_valid_builder_output(capsys: pytest.CaptureFixture[str]) -> None:
+    intent = verify_helper._valid_intent_payload()
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), intent, capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+    assert payload["mode"] == "verify-operator-approval-intent"
+    assert payload["schema_version"] == 1
+    assert payload["evidence_schema_version"] == 2
+    assert _HEX64_RE.fullmatch(payload["evidence_sha256"])
+    assert _HEX64_RE.fullmatch(payload["approval_intent_sha256"])
+    assert payload["reason_codes"] == []
+    _assert_verify_posture(payload)
+    assert set(payload.keys()) == _VERIFY_ENVELOPE_KEYS
+
+
+def test_verify_intent_cli_missing_json_early(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "load_settings", lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("config must not load")
+    ))
+    monkeypatch.setattr(
+        cli,
+        "datetime",
+        type("_D", (), {"now": staticmethod(lambda tz=None: (_ for _ in ()).throw(
+            AssertionError("clock must not read")
+        ))})(),
+    )
+
+    code, payload = _run_verify_intent_cli(["--verify-operator-approval-intent"], None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["approval_intent_verification_json_required"]
+    assert stdin_reads == []
+    _assert_verify_posture(payload)
+
+
+@pytest.mark.parametrize(
+    "extra_argv",
+    [
+        pytest.param(["--config", "unused.toml"], id="config"),
+        pytest.param(["--max-age-microseconds", "100"], id="max_age"),
+        pytest.param(["--operator-approval-declared"], id="approval_flag"),
+    ],
+)
+def test_verify_intent_cli_argument_not_applicable(
+    extra_argv: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(*extra_argv), None, capsys)
+    assert code == 1
+    assert payload["reason_codes"] == ["approval_intent_verification_argument_not_applicable"]
+    assert stdin_reads == []
+
+
+def test_verify_intent_cli_mode_conflict(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_verify_intent_cli(
+        _verify_intent_argv("--build-operator-approval-intent"), None, capsys
+    )
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["approval_intent_verification_mode_conflict"]
+
+
+@pytest.mark.parametrize(
+    ("stdin_data", "expected_reason"),
+    [
+        (None, "approval_intent_input_empty"),
+        (b"\xff\xfe", "approval_intent_input_not_utf8"),
+        (b"{not json", "approval_intent_input_not_json"),
+        (b'{"schema_version": 1, "schema_version": 2}', "approval_intent_input_duplicate_key"),
+        (b"[" * 5000 + b"0" + b"]" * 5000, "approval_intent_input_too_deep"),
+        (b"x" * (cli._VERIFY_RECEIPT_STDIN_LIMIT + 1), "approval_intent_input_too_large"),
+    ],
+    ids=["empty", "invalid_utf8", "invalid_json", "duplicate_key", "too_deep", "too_large"],
+)
+def test_verify_intent_cli_stdin_failures(
+    capsys: pytest.CaptureFixture[str],
+    stdin_data: bytes | None,
+    expected_reason: str,
+) -> None:
+    if stdin_data is not None:
+        sys.stdin = _stdin_bytes(stdin_data)  # type: ignore[assignment]
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == [expected_reason]
+    assert payload["schema_version"] is None
+    assert payload["evidence_sha256"] is None
+    _assert_verify_posture(payload)
+
+
+def test_verify_intent_cli_tampered_invalid(capsys: pytest.CaptureFixture[str]) -> None:
+    intent = verify_helper._valid_intent_payload()
+    intent["operator_approval_declared"] = False
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), intent, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["approval_intent_invalid_declaration"]
+
+
+def test_verify_intent_cli_isolation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    intent = verify_helper._valid_intent_payload()
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return json.dumps(intent).encode("utf-8")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+
+    load_calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "load_settings",
+        lambda *_a, **_k: load_calls.append("load") or (_ for _ in ()).throw(
+            AssertionError("load_settings must not run")
+        ),
+    )
+
+    clock_calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "datetime",
+        type("_D", (), {"now": staticmethod(lambda tz=None: clock_calls.append("now") or (_ for _ in ()).throw(
+            AssertionError("clock must not read")
+        ))})(),
+    )
+
+    verifier_calls: list[str] = []
+    real_verify = cli.verify_operator_approval_intent_payload
+
+    def _spy_verify(payload: object) -> object:
+        verifier_calls.append("verify")
+        return real_verify(payload)
+
+    monkeypatch.setattr(cli, "verify_operator_approval_intent_payload", _spy_verify)
+
+    pipeline_calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "freshness_qualify_and_build_candidate_evidence",
+        lambda *_a, **_k: pipeline_calls.append("pipeline"),
+    )
+    builder_calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "build_operator_approval_intent",
+        lambda *_a, **_k: builder_calls.append("builder"),
+    )
+
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), None, capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+    assert len(stdin_reads) == 1
+    assert verifier_calls == ["verify"]
+    assert load_calls == []
+    assert clock_calls == []
+    assert pipeline_calls == []
+    assert builder_calls == []
+
+
+def test_verify_intent_cli_early_input_failure_skips_verifier(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    verifier_calls: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "verify_operator_approval_intent_payload",
+        lambda *_a, **_k: verifier_calls.append("verify"),
+    )
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), None, capsys)
+    assert code == 1
+    assert payload["reason_codes"] == ["approval_intent_input_empty"]
+    assert verifier_calls == []
+
+
+def test_verify_intent_cli_sanitizes_poison_output(capsys: pytest.CaptureFixture[str]) -> None:
+    intent = verify_helper._valid_intent_payload()
+    intent["evidence_sha256"] = "b" * 64
+    intent["approval_intent_sha256"] = "c" * 64
+    code, payload = _run_verify_intent_cli(_verify_intent_argv(), intent, capsys)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert "Traceback" not in combined
+    assert "/home/" not in combined
+    assert "KIS_" not in combined
+    assert json.dumps(intent) not in combined

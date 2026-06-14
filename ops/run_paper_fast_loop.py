@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Ten mutually-exclusive modes:
+Eleven mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -31,6 +31,9 @@ Ten mutually-exclusive modes:
   ``--max-age-microseconds`` + three required manual confirmation flags; composes
   freshness-qualified evidence then builds an approval intent to stdout only — no persistence,
   consumption, identity authentication, or activation authorization (RTM-7c.4p).
+* ``--verify-operator-approval-intent``: stdin-only strict approval-intent schema + hash
+  verification; no config, no env, no DB, no filesystem write, no network, no clock read
+  (RTM-7c.4q).
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -83,6 +86,11 @@ from composition.operator_approval_intent import (
     OperatorApprovalIntentOutcome,
     build_operator_approval_intent,
 )
+from composition.operator_approval_intent_verifier import (
+    OperatorApprovalIntentVerification,
+    OperatorApprovalIntentVerificationOutcome,
+    verify_operator_approval_intent_payload,
+)
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
@@ -95,6 +103,17 @@ DEFAULT_CONFIG_PATH = "config/config.toml.example"
 _KST = ZoneInfo("Asia/Seoul")
 _RUN_REFUSED_REASON = "live_run_not_implemented"
 _VERIFY_RECEIPT_STDIN_LIMIT = 1 << 20  # 1 MiB — untrusted stdin bound
+
+# receipt stdin parser reason → approval-intent verify CLI reason (외부 노출 분리).
+_RECEIPT_TO_APPROVAL_INTENT_INPUT_REASON: dict[str, str] = {
+    "receipt_input_empty": "approval_intent_input_empty",
+    "receipt_input_not_utf8": "approval_intent_input_not_utf8",
+    "receipt_input_not_json": "approval_intent_input_not_json",
+    "receipt_input_too_deep": "approval_intent_input_too_deep",
+    "receipt_input_duplicate_key": "approval_intent_input_duplicate_key",
+    "receipt_input_too_large": "approval_intent_input_too_large",
+    "receipt_input_read_error": "approval_intent_input_read_error",
+}
 
 
 class CliInputError(Exception):
@@ -198,6 +217,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--verify-operator-approval-intent",
+        action="store_true",
+        help=(
+            "stdin-only strict approval-intent verification (schema + hash); no config, "
+            "no env, no DB, no filesystem write, no network, no clock read; VALID is NOT "
+            "identity authentication or activation authorization"
+        ),
+    )
+    parser.add_argument(
         "--operator-approval-declared",
         action="store_true",
         help=(
@@ -248,6 +276,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("final-preflight-activation-candidate", args.final_preflight_activation_candidate),
             ("freshness-preflight-activation-candidate", args.freshness_preflight_activation_candidate),
             ("build-operator-approval-intent", args.build_operator_approval_intent),
+            ("verify-operator-approval-intent", args.verify_operator_approval_intent),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -259,6 +288,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             "--verify-precheck-receipt / --revalidate-activation-candidate / "
             "--final-preflight-activation-candidate / "
             "--freshness-preflight-activation-candidate / --build-operator-approval-intent / "
+            "--verify-operator-approval-intent / "
             "--replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
@@ -759,6 +789,88 @@ def _read_verify_stdin_payload() -> tuple[object | None, str | None]:
         return None, exc.reason_code
 
 
+def _read_approval_intent_verify_stdin_payload() -> tuple[object | None, str | None]:
+    """Approval-intent verify mode stdin — receipt parser 재사용, reason은 intent 전용으로 매핑."""
+
+    payload, reason = _read_verify_stdin_payload()
+    if reason is None:
+        return payload, None
+    return None, _RECEIPT_TO_APPROVAL_INTENT_INPUT_REASON.get(reason, "approval_intent_input_not_json")
+
+
+_VERIFY_APPROVAL_INTENT_CLI_MODE = "verify-operator-approval-intent"
+
+
+def _verify_approval_intent_posture_fields() -> dict[str, Any]:
+    return {
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "approval_intent_authenticated": False,
+        "approval_intent_consumed": False,
+        "approval_intent_persisted": False,
+    }
+
+
+def _verify_approval_intent_summary(result: Any) -> dict[str, Any]:
+    valid = result.outcome is OperatorApprovalIntentVerificationOutcome.VALID
+    return {
+        "outcome": "VALID" if valid else "INVALID",
+        "mode": _VERIFY_APPROVAL_INTENT_CLI_MODE,
+        "schema_version": result.schema_version,
+        "evidence_schema_version": result.evidence_schema_version,
+        "evidence_sha256": result.evidence_sha256,
+        "approval_intent_sha256": result.approval_intent_sha256,
+        "reason_codes": list(result.reason_codes),
+        **_verify_approval_intent_posture_fields(),
+    }
+
+
+def _verify_approval_intent_input_fail(reason_code: str, *, out: TextIO) -> int:
+    summary = _verify_approval_intent_summary(
+        OperatorApprovalIntentVerification(
+            outcome=OperatorApprovalIntentVerificationOutcome.INVALID,
+            schema_version=None,
+            evidence_schema_version=None,
+            evidence_sha256=None,
+            approval_intent_sha256=None,
+            reason_codes=(reason_code,),
+        )
+    )
+    print(json.dumps(summary, ensure_ascii=False), file=out)
+    return 1
+
+
+def _verify_approval_intent_verifier_fail(result: Any, *, out: TextIO) -> int:
+    summary = _verify_approval_intent_summary(result)
+    print(json.dumps(summary, ensure_ascii=False), file=out)
+    return 1
+
+
+def _verify_approval_intent_applicability_fail(reason_code: str, *, out: TextIO) -> int:
+    """Verify mode applicability/json 누락 — stdin/config/clock 이전 fail-closed."""
+
+    return _verify_approval_intent_input_fail(reason_code, out=out)
+
+
+def _approval_intent_mode_conflict_fail(
+    *,
+    build_requested: bool,
+    verify_requested: bool,
+    out: TextIO,
+) -> int:
+    """Build/verify approval mode가 포함된 mutually-exclusive conflict — approval JSON envelope."""
+
+    if verify_requested:
+        return _verify_approval_intent_input_fail(
+            "approval_intent_verification_mode_conflict", out=out
+        )
+    if build_requested:
+        return _approval_intent_cli_input_fail("approval_intent_mode_conflict", out=out)
+    return _verify_approval_intent_input_fail(
+        "approval_intent_verification_mode_conflict", out=out
+    )
+
+
 def _journal_to_dict(journal: Any) -> dict[str, Any] | None:
     if journal is None:
         return None
@@ -803,13 +915,36 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         mode = _resolve_mode(args)
-    except CliInputError as exc:
-        return _fail(str(exc), as_json=as_json, out=out)
+    except CliInputError:
+        if args.build_operator_approval_intent or args.verify_operator_approval_intent:
+            return _approval_intent_mode_conflict_fail(
+                build_requested=args.build_operator_approval_intent,
+                verify_requested=args.verify_operator_approval_intent,
+                out=out,
+            )
+        return _fail("modes are mutually exclusive.", as_json=as_json, out=out)
 
     # --run은 어떤 부작용보다 먼저 거부한다(credential/network/DB/fs 접근 전).
     if mode == "run":
         _emit(_run_refused_summary(), as_json=as_json, out=out)
         return 2
+
+    # verify-operator-approval-intent: explicit --json + forbidden args — stdin/config/clock 이전.
+    if mode == "verify-operator-approval-intent":
+        if not args.json:
+            return _verify_approval_intent_applicability_fail(
+                "approval_intent_verification_json_required", out=out
+            )
+        if (
+            args.config is not None
+            or args.max_age_microseconds is not None
+            or args.operator_approval_declared
+            or args.writers_stopped_manually_confirmed
+            or args.live_orders_forbidden_confirmed
+        ):
+            return _verify_approval_intent_applicability_fail(
+                "approval_intent_verification_argument_not_applicable", out=out
+            )
 
     # approval-intent confirmation flags는 build mode에서만 허용한다.
     if mode != "build-operator-approval-intent":
@@ -845,6 +980,21 @@ def main(argv: list[str] | None = None) -> int:
     config_path = (
         args.config if args.config is not None else DEFAULT_CONFIG_PATH
     )
+
+    # verify-operator-approval-intent: stdin-only — config/env/DB/fs write/network/clock read 없음.
+    if mode == "verify-operator-approval-intent":
+        payload, input_error = _read_approval_intent_verify_stdin_payload()
+        if input_error is not None:
+            return _verify_approval_intent_input_fail(input_error, out=out)
+        try:
+            result = verify_operator_approval_intent_payload(payload)
+        except Exception:
+            return _verify_approval_intent_input_fail(
+                "approval_intent_invalid_field", out=out
+            )
+        summary = _verify_approval_intent_summary(result)
+        print(json.dumps(summary, ensure_ascii=False), file=out)
+        return 0 if summary["outcome"] == "VALID" else 1
 
     # verify-precheck-receipt: stdin-only — config/env/DB/fs write/network/clock read 없음.
     if mode == "verify-precheck-receipt":
@@ -980,7 +1130,12 @@ def main(argv: list[str] | None = None) -> int:
             return _approval_intent_cli_input_fail("approval_intent_config_invalid", out=out)
         fast_loop = settings.runtime.paper_fast_loop
         policy = ReceiptFreshnessPolicy(max_age_microseconds=parsed_max_age)
-        now = datetime.now(tz=_KST)
+        try:
+            now = datetime.now(tz=_KST)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return _approval_intent_cli_no_go(["approval_intent_upstream_error"], out=out)
         try:
             combined = freshness_qualify_and_build_candidate_evidence(
                 settings=fast_loop,
@@ -988,6 +1143,8 @@ def main(argv: list[str] | None = None) -> int:
                 now=now,
                 policy=policy,
             )
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
         except Exception:
             return _approval_intent_cli_no_go(["approval_intent_upstream_error"], out=out)
         if combined.outcome is not FreshnessQualifiedEvidenceOutcome.PASS:
@@ -1000,6 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
                 writers_stopped_manually_confirmed=True,
                 live_orders_forbidden_confirmed=True,
             )
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
         except Exception:
             return _approval_intent_cli_no_go(
                 ["approval_intent_generation_invalid"], out=out
