@@ -137,10 +137,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--final-preflight-activation-candidate",
         action="store_true",
         help=(
-            "stdin receipt + config: 4g byte-state revalidation + fresh current-time machine "
-            "precheck (snapshot/active-decision validity) bound back to the receipt's "
-            "post-inspection state; fresh_precheck_executed reports whether that precheck ran, "
-            "receipt_age NOT evaluated, no freshness policy; mechanical PASS is NOT activation "
+            "stdin receipt + config: 4g byte-state revalidation + policy-neutral receipt time "
+            "observation (exact receipt_age_microseconds; future checked_at fail-closed) + fresh "
+            "current-time machine precheck (snapshot/active-decision validity) bound back to the "
+            "receipt's post-inspection state; fresh_precheck_executed reports whether that "
+            "precheck ran, no TTL/max-age/freshness policy; mechanical PASS is NOT activation "
             "authorization"
         ),
     )
@@ -370,14 +371,14 @@ def _revalidate_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> i
     return 1
 
 
-def _final_preflight_summary(result: Any, *, config_path: str) -> dict[str, Any]:
+def _final_preflight_summary(result: Any) -> dict[str, Any]:
     passed = result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
     precheck = result.current_precheck_result
     return {
         # mechanical PASS ≠ activation authorization — outcome reports only the time-aware verdict.
+        # config path는 출력하지 않는다(로컬 디렉터리/사용자명 노출 방지). path-free summary 유지.
         "outcome": "PASS" if passed else "NO_GO",
         "mode": "final-preflight-activation-candidate",
-        "config": config_path,
         "receipt_sha256": result.receipt_sha256,
         "market": result.market,
         "symbol": result.symbol,
@@ -387,7 +388,10 @@ def _final_preflight_summary(result: Any, *, config_path: str) -> dict[str, Any]
         # per-call 실행 사실: fresh precheck가 실제로 돌았는지. read-only DB inspection이
         # 이 안에서 일어날 수 있으나, connection 개수를 주장하지 않는다.
         "fresh_precheck_executed": result.fresh_precheck_executed,
+        # RTM-7c.4i policy-neutral receipt time observation: exact age in microseconds (or
+        # null for future/pre-comparison). NOT a TTL/max-age/freshness verdict.
         "receipt_age_evaluated": result.receipt_age_evaluated,
+        "receipt_age_microseconds": result.receipt_age_microseconds,
         "freshness_policy_evaluated": result.freshness_policy_evaluated,
         "activation_authorized": result.activation_authorized,
         "runtime_activation_outcome": result.runtime_activation_outcome,
@@ -416,6 +420,7 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
         "current_precheck_reasons": [],
         "fresh_precheck_executed": False,
         "receipt_age_evaluated": False,
+        "receipt_age_microseconds": None,
         "freshness_policy_evaluated": False,
         "activation_authorized": False,
         "runtime_activation_outcome": "no_go",
@@ -598,7 +603,7 @@ def main(argv: list[str] | None = None) -> int:
             return _final_preflight_input_fail(
                 f"final-preflight error: {type(exc).__name__}", as_json=as_json, out=out
             )
-        summary = _final_preflight_summary(result, config_path=args.config)
+        summary = _final_preflight_summary(result)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

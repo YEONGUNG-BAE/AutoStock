@@ -93,9 +93,15 @@ the **time-aware final preflight** step: 4g byte-state revalidation composed wit
 fresh caller-time precheck, so a byte-identical snapshot / active-decision whose
 validity window has since opened or closed is caught. The per-call
 `fresh_precheck_executed` flag records whether that fresh precheck actually ran (false for
-short-circuit NO_GOs that return before it). It still does **not** evaluate receipt age
-(`receipt_age_evaluated=false`) or freshness (`freshness_policy_evaluated=false`). Receipt
-freshness, receipt-age/TTL, authenticity, and Operator approval binding remain **OPEN**.
+short-circuit NO_GOs that return before it). RTM-7c.4i adds a **policy-neutral receipt time
+observation** between the 4g revalidation and the fresh precheck: it records the exact
+`receipt_age_microseconds` and **fail-closes a future receipt** (`checked_at` after the
+caller `now`, `candidate_receipt_time_in_future`, `fresh_precheck_executed=false`); the
+per-call `receipt_age_evaluated` flag flips `true` once that comparison runs. It still does
+**not** apply any receipt-age threshold, TTL, or freshness policy
+(`freshness_policy_evaluated=false`) — age is observed, never thresholded. Receipt
+freshness, receipt-age **TTL/max-age policy**, authenticity, and Operator approval binding
+remain **OPEN**.
 
 ## Orphan sidecar observation limit
 

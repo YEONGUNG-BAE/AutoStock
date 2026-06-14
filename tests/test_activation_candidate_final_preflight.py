@@ -68,19 +68,24 @@ def _pass_receipt_for_seeded_stack(tmp_path: Path, settings: RuntimePaperFastLoo
     return _receipt_dict_from_precheck(tmp_path, settings)
 
 
-def _assert_posture(result: Any, *, fresh_precheck_executed: bool) -> None:
-    """Assert the constant activation posture plus the per-call execution flag.
+def _assert_posture(
+    result: Any, *, fresh_precheck_executed: bool, receipt_age_evaluated: bool = False
+) -> None:
+    """Assert the constant activation posture plus the per-call execution flags.
 
     ``fresh_precheck_executed`` must be ``True`` only when the composed precheck actually
     ran (PASS, or a fresh-precheck machine NO_GO, or post-revalidation drift) and ``False``
-    for every short-circuit that returns before it (naive ``now``, any 4g NO_GO)."""
+    for every short-circuit that returns before it (invalid ``now``, any 4g NO_GO, future
+    receipt). ``receipt_age_evaluated`` is ``True`` once the verified receipt ``checked_at``
+    was compared against ``now`` (RTM-7c.4i); ``freshness_policy_evaluated`` is always
+    ``False``."""
 
     assert result.activation_authorized is False
     assert result.runtime_activation_outcome == "no_go"
     assert result.explicit_operator_approval_required is True
     assert result.writers_stopped_manual_confirmation_required is True
     assert result.fresh_precheck_executed is fresh_precheck_executed
-    assert result.receipt_age_evaluated is False
+    assert result.receipt_age_evaluated is receipt_age_evaluated
     assert result.freshness_policy_evaluated is False
     assert not hasattr(result, "current_validity_evaluated")
 
@@ -104,7 +109,7 @@ def test_final_preflight_pass_on_valid_now(tmp_path: Path) -> None:
     assert result.current_precheck_result is not None
     assert result.current_precheck_result.machine_outcome is MachineCheckOutcome.PASS
     assert result.revalidation_result is not None
-    _assert_posture(result, fresh_precheck_executed=True)
+    _assert_posture(result, fresh_precheck_executed=True, receipt_age_evaluated=True)
 
 
 def test_final_preflight_pass_with_kst_aware_now(tmp_path: Path) -> None:
@@ -115,7 +120,7 @@ def test_final_preflight_pass_with_kst_aware_now(tmp_path: Path) -> None:
         settings=settings, receipt_payload=receipt, now=_NOW_KST, base_dir=tmp_path
     )
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
-    _assert_posture(result, fresh_precheck_executed=True)
+    _assert_posture(result, fresh_precheck_executed=True, receipt_age_evaluated=True)
 
 
 # --- 15.3 current time validity (byte-identical, time-window NO_GO) ---
@@ -136,10 +141,15 @@ def test_final_preflight_no_go_when_snapshot_and_decision_expired(tmp_path: Path
     assert "candidate_current_precheck:active_decision_expired" in result.reasons
     # every current-validity reason carries the stable prefix; no raw precheck reason leaks.
     assert all(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result, fresh_precheck_executed=True)
+    _assert_posture(result, fresh_precheck_executed=True, receipt_age_evaluated=True)
 
 
-def test_final_preflight_no_go_when_snapshot_and_decision_not_yet_valid(tmp_path: Path) -> None:
+def test_final_preflight_future_receipt_preempts_fresh_precheck(tmp_path: Path) -> None:
+    """A ``now`` earlier than the receipt ``checked_at`` (here ``_PAST``, two days before the
+    receipt was built at ``_NOW``) is a future receipt: RTM-7c.4i's Step-2 fail-close fires
+    BEFORE the fresh precheck, so no ``candidate_current_precheck:*`` reason is produced and
+    ``fresh_precheck_executed`` stays False even though 4g byte-state revalidation PASSed."""
+
     settings = _settings(tmp_path)
     receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
 
@@ -148,10 +158,28 @@ def test_final_preflight_no_go_when_snapshot_and_decision_not_yet_valid(tmp_path
     )
 
     assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
-    assert "candidate_current_precheck:execution_inputs_not_yet_valid" in result.reasons
-    assert "candidate_current_precheck:active_decision_not_yet_valid" in result.reasons
-    assert all(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result, fresh_precheck_executed=True)
+    assert result.reasons == ("candidate_receipt_time_in_future",)
+    assert result.revalidation_result is not None  # 4g PASSed before the time check
+    assert result.current_precheck_result is None  # fresh precheck never ran
+    assert not any(r.startswith("candidate_current_precheck:") for r in result.reasons)
+    assert result.receipt_age_microseconds is None  # no non-negative age for a future receipt
+    _assert_posture(result, fresh_precheck_executed=False, receipt_age_evaluated=True)
+
+
+def test_final_preflight_future_receipt_does_not_run_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The future-receipt fail-close is a pre-precheck short-circuit: precheck call count 0."""
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    calls = _count_precheck_calls(monkeypatch)
+
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=_PAST, base_dir=tmp_path
+    )
+    assert result.reasons == ("candidate_receipt_time_in_future",)
+    assert len(calls) == 0
+    assert result.fresh_precheck_executed is False
 
 
 def test_final_preflight_current_precheck_result_carried_on_no_go(tmp_path: Path) -> None:
@@ -249,7 +277,7 @@ def test_final_preflight_post_revalidation_drift(
     # drift is NOT double-counted as the fresh precheck's own within-window change.
     assert f"precheck_artifact_changed:{artifact_name}" not in result.reasons
     assert not any(r.startswith("candidate_current_precheck:") for r in result.reasons)
-    _assert_posture(result, fresh_precheck_executed=True)
+    _assert_posture(result, fresh_precheck_executed=True, receipt_age_evaluated=True)
 
 
 # --- 15.5 receipt / config rejection (4g matrix preserved) ---
@@ -354,6 +382,81 @@ def test_final_preflight_naive_now_does_not_call_precheck(
     assert result.fresh_precheck_executed is False
 
 
+class _RaisingTzInfo(__import__("datetime").tzinfo):
+    def utcoffset(self, dt: datetime | None) -> Any:
+        raise ValueError("boom")  # internal tz failure must be swallowed, not leaked
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> Any:
+        return None
+
+
+class _NoneOffsetTzInfo(__import__("datetime").tzinfo):
+    def utcoffset(self, dt: datetime | None) -> Any:
+        return None  # aware-looking but no offset → still invalid
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> Any:
+        return None
+
+
+@pytest.mark.parametrize(
+    "bad_now",
+    [
+        None,
+        "2026-06-16T00:30:00+09:00",
+        1718498400,
+        datetime(2026, 6, 16, 0, 30),  # naive  # noqa: DTZ001
+        datetime(2026, 6, 16, 0, 30, tzinfo=_RaisingTzInfo()),  # utcoffset raises
+        datetime(2026, 6, 16, 0, 30, tzinfo=_NoneOffsetTzInfo()),  # utcoffset None
+    ],
+    ids=["none", "str", "int", "naive", "raising_tz", "none_offset"],
+)
+def test_final_preflight_invalid_now_is_strict_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_now: object
+) -> None:
+    """Any non-datetime / naive / malformed-tz now fails closed to candidate_invalid_now
+    with no precheck, no revalidation, and no raw exception/type/repr escaping."""
+    settings = _settings(tmp_path)
+    receipt = vrf_helper._valid_receipt()
+
+    def _fail_precheck(*_a: object, **_k: object) -> object:
+        raise AssertionError("precheck_runtime must not run for an invalid now")
+
+    def _fail_reval(*_a: object, **_k: object) -> object:
+        raise AssertionError("revalidate_activation_candidate must not run for an invalid now")
+
+    monkeypatch.setattr(final_mod, "precheck_runtime", _fail_precheck)
+    monkeypatch.setattr(final_mod, "revalidate_activation_candidate", _fail_reval)
+
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=bad_now, base_dir=tmp_path  # type: ignore[arg-type]
+    )
+    assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
+    assert result.reasons == ("candidate_invalid_now",)
+    assert result.revalidation_result is None
+    assert result.current_precheck_result is None
+    _assert_posture(result, fresh_precheck_executed=False)
+
+
+@pytest.mark.parametrize(
+    "good_now", [_NOW, _NOW_KST], ids=["aware_utc", "aware_kst"]
+)
+def test_final_preflight_accepts_aware_now(
+    tmp_path: Path, good_now: datetime
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=good_now, base_dir=tmp_path
+    )
+    assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
+
+
 def test_final_preflight_api_has_no_clock_read_in_source() -> None:
     source = (
         Path(__file__).resolve().parents[1]
@@ -392,25 +495,28 @@ def _no_go_receipt() -> dict[str, Any]:
 def test_final_preflight_short_circuit_paths_do_not_run_precheck(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every pre-precheck short-circuit: precheck_runtime call count 0 and
-    fresh_precheck_executed False."""
-    settings = _settings(tmp_path)
-    valid = vrf_helper._valid_receipt()
+    """Every pre-precheck short-circuit: exact reason, precheck_runtime call count 0,
+    fresh_precheck_executed False. Each case uses its OWN settings object — no shared
+    mutation — so a market-mismatch override cannot bleed into the symbol-mismatch case."""
 
-    cases: list[tuple[RuntimePaperFastLoopSettings, object, datetime]] = [
-        (settings, valid, datetime(2026, 6, 16)),  # naive now
-        (settings, {"schema_version": 1}, _NOW),  # invalid receipt
-        (settings, _no_go_receipt(), _NOW),  # machine NO_GO receipt
-        (_settings(tmp_path, enabled=False), vrf_helper._valid_receipt(enabled=False), _NOW),
-        (_market(settings, "US"), vrf_helper._valid_receipt(), _NOW),  # market mismatch
-        (settings, vrf_helper._valid_receipt(symbol="000660"), _NOW),  # symbol mismatch
+    def _disabled() -> RuntimePaperFastLoopSettings:
+        return _settings(tmp_path, enabled=False)
+
+    cases: list[tuple[str, RuntimePaperFastLoopSettings, object, datetime]] = [
+        ("candidate_invalid_now", _settings(tmp_path), vrf_helper._valid_receipt(), datetime(2026, 6, 16)),
+        ("candidate_receipt_invalid", _settings(tmp_path), {"schema_version": 1}, _NOW),
+        ("candidate_receipt_not_pass", _settings(tmp_path), _no_go_receipt(), _NOW),
+        ("candidate_config_disabled", _disabled(), vrf_helper._valid_receipt(enabled=False), _NOW),
+        ("candidate_market_mismatch", _market(_settings(tmp_path), "US"), vrf_helper._valid_receipt(), _NOW),
+        ("candidate_symbol_mismatch", _settings(tmp_path), vrf_helper._valid_receipt(symbol="000660"), _NOW),
     ]
-    for case_settings, receipt, now in cases:
+    for expected_reason, case_settings, receipt, now in cases:
         calls = _count_precheck_calls(monkeypatch)
         result = final_preflight_activation_candidate(
             settings=case_settings, receipt_payload=receipt, now=now, base_dir=tmp_path
         )
         assert result.outcome is ActivationCandidateFinalPreflightOutcome.NO_GO
+        assert result.reasons == (expected_reason,)
         assert result.fresh_precheck_executed is False
         assert result.current_precheck_result is None
         assert len(calls) == 0
@@ -422,12 +528,14 @@ def _market(settings: RuntimePaperFastLoopSettings, value: str) -> RuntimePaperF
     return settings
 
 
-@pytest.mark.parametrize("now", [_NOW, _FUTURE, _PAST], ids=["pass", "expired", "not_yet_valid"])
+# _PAST is intentionally excluded: with checked_at == _NOW, a _PAST now is a *future receipt*
+# whose Step-2 fail-close preempts the fresh precheck (call count 0) — covered separately.
+@pytest.mark.parametrize("now", [_NOW, _FUTURE], ids=["pass", "expired"])
 def test_final_preflight_executed_paths_run_precheck_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, now: datetime
 ) -> None:
     """PASS and fresh-precheck NO_GO both run precheck_runtime exactly once and report
-    fresh_precheck_executed True."""
+    fresh_precheck_executed True. (Both have checked_at <= now, so the receipt is not future.)"""
     settings = _settings(tmp_path)
     receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
     calls = _count_precheck_calls(monkeypatch)
@@ -438,6 +546,8 @@ def test_final_preflight_executed_paths_run_precheck_exactly_once(
     assert len(calls) == 1
     assert result.fresh_precheck_executed is True
     assert result.current_precheck_result is not None
+    assert result.receipt_age_evaluated is True
+    assert result.receipt_age_microseconds is not None and result.receipt_age_microseconds >= 0
 
 
 # --- 15.7 isolation (read-only connections allowed; no write/network/broker/env/spawn) ---
@@ -550,6 +660,15 @@ class _FutureClock:
         return _FUTURE.astimezone(_KST) if tz is not None else _FUTURE
 
 
+class _PastClock:
+    """Pins the CLI clock two days before ``_NOW``; the receipt (built at ``_NOW``) is then a
+    future receipt relative to this clock → RTM-7c.4i fail-close."""
+
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        return _PAST.astimezone(_KST) if tz is not None else _PAST
+
+
 def _run_final(
     argv: list[str], receipt: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> tuple[int, dict[str, Any]]:
@@ -581,7 +700,10 @@ def test_final_preflight_cli_pass(
     assert payload["current_precheck_outcome"] == "pass"
     assert payload["current_precheck_reasons"] == []
     assert payload["fresh_precheck_executed"] is True
-    assert payload["receipt_age_evaluated"] is False
+    # RTM-7c.4i: the receipt was built at the same instant the CLI clock is pinned to, so the
+    # observed age is exactly 0 µs; age is evaluated, freshness policy still is not.
+    assert payload["receipt_age_evaluated"] is True
+    assert payload["receipt_age_microseconds"] == 0
     assert payload["freshness_policy_evaluated"] is False
     assert payload["activation_authorized"] is False
     assert payload["runtime_activation_outcome"] == "no_go"
@@ -596,6 +718,34 @@ def test_final_preflight_cli_pass(
     assert "read_only_databases_opened" not in payload
     assert "database_opened" not in payload
     assert "current_validity_evaluated" not in payload
+
+
+def test_final_preflight_cli_omits_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The final-preflight CLI summary must be path-free: no absolute config path,
+    no 'config' field. Uses an absolute temp config path so any leak is detectable."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path).resolve()
+    assert config_path.is_absolute()
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+
+    sys.stdin = _stdin_bytes(json.dumps(receipt).encode("utf-8"))  # type: ignore[assignment]
+    code = cli.main(
+        ["--config", str(config_path), "--final-preflight-activation-candidate", "--json"]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    assert "config" not in payload
+    # the absolute path string must not appear anywhere in stdout or stderr.
+    assert str(config_path) not in captured.out
+    assert str(config_path) not in captured.err
+    assert str(tmp_path) not in captured.out
 
 
 def test_final_preflight_cli_no_go_expired(
@@ -619,8 +769,42 @@ def test_final_preflight_cli_no_go_expired(
     assert payload["outcome"] == "NO_GO"
     assert payload["current_precheck_outcome"] == "no_go"
     assert payload["fresh_precheck_executed"] is True
+    # checked_at (_NOW) precedes the future clock, so age is evaluated and positive.
+    assert payload["receipt_age_evaluated"] is True
+    assert payload["receipt_age_microseconds"] == int(
+        (_FUTURE - _NOW) / timedelta(microseconds=1)
+    )
+    assert payload["freshness_policy_evaluated"] is False
     assert any(r.startswith("candidate_current_precheck:") for r in payload["reasons"])
     assert "candidate_current_precheck:execution_inputs_expired" in payload["reasons"]
+
+
+def test_final_preflight_cli_future_receipt_no_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CLI future-receipt fail-close: sanitized NO_GO, age evaluated but null, no
+    current-precheck outcome, and no raw checked_at value echoed."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _PastClock)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    pfl_helper._seed_valid_stack(tmp_path, settings)
+    receipt = _receipt_dict_from_precheck(tmp_path, settings)
+
+    code, payload = _run_final(
+        ["--config", str(config_path), "--final-preflight-activation-candidate", "--json"],
+        receipt,
+        capsys,
+    )
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    assert payload["reasons"] == ["candidate_receipt_time_in_future"]
+    assert payload["fresh_precheck_executed"] is False
+    assert payload["receipt_age_evaluated"] is True
+    assert payload["receipt_age_microseconds"] is None
+    assert payload["current_precheck_outcome"] is None
+    # the receipt's checked_at value must not be echoed into the summary.
+    assert receipt["checked_at"] not in json.dumps(payload)
 
 
 def test_final_preflight_cli_mutually_exclusive(capsys: pytest.CaptureFixture[str]) -> None:
@@ -643,6 +827,9 @@ def test_final_preflight_cli_stdin_empty(capsys: pytest.CaptureFixture[str]) -> 
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["receipt_input_empty"]
     assert payload["fresh_precheck_executed"] is False
+    assert payload["receipt_age_evaluated"] is False
+    assert payload["receipt_age_microseconds"] is None
+    assert payload["freshness_policy_evaluated"] is False
     assert "read_only_databases_opened" not in payload
     assert "database_opened" not in payload
     assert "current_validity_evaluated" not in payload
@@ -664,9 +851,11 @@ def test_final_preflight_cli_config_disabled(
     assert code == 1
     assert payload["outcome"] == "NO_GO"
     assert payload["reasons"] == ["candidate_config_disabled"]
-    # revalidation short-circuit: fresh precheck never ran, no current-precheck outcome.
+    # revalidation short-circuit: fresh precheck never ran, receipt age never evaluated.
     assert payload["fresh_precheck_executed"] is False
     assert payload["current_precheck_outcome"] is None
+    assert payload["receipt_age_evaluated"] is False
+    assert payload["receipt_age_microseconds"] is None
     assert "read_only_databases_opened" not in payload
 
 

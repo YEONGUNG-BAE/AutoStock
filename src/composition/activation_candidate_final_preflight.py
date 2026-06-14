@@ -7,11 +7,14 @@ has since opened/closed (or any other current-time precheck NO_GO) is caught.
 
 When it runs the fresh precheck this lane evaluates **current state time-validity** only.
 The per-call ``fresh_precheck_executed`` flag records whether that precheck actually ran
-(it does not for short-circuit NO_GOs that return first). It deliberately does NOT evaluate
-receipt age / max-age (``receipt_age_evaluated = False``), nor any freshness policy
-(``freshness_policy_evaluated = False``). It does not authenticate the receipt, consume an
-Operator approval, assert writer-stop, or activate anything — the activation posture is a
-constant NO_GO.
+(it does not for short-circuit NO_GOs that return first). RTM-7c.4i adds a policy-neutral
+receipt time observation: after a 4g PASS it compares the verified receipt ``checked_at``
+against the caller ``now``, recording the exact ``receipt_age_microseconds`` and
+fail-closing a **future** ``checked_at`` (``candidate_receipt_time_in_future``);
+``receipt_age_evaluated`` flips ``True`` once that comparison runs. It still applies NO
+max-age / TTL / freshness threshold (``freshness_policy_evaluated = False``), does not
+authenticate the receipt, consume an Operator approval, assert writer-stop, or activate
+anything — the activation posture is a constant NO_GO.
 
 ``now`` is supplied by the caller and must be timezone-aware; this module reads no clock of
 its own. It opens no operational (read-write) SQLite connection, performs no network/credential
@@ -36,6 +39,10 @@ from composition.paper_fast_loop import (
     RuntimePrecheckResult,
     precheck_runtime,
 )
+from composition.receipt_time_assessment import (
+    ReceiptTimeAssessmentOutcome,
+    assess_receipt_time,
+)
 from composition.sqlite_inspector import ArtifactFingerprint
 from config.settings import RuntimePaperFastLoopSettings
 
@@ -45,14 +52,17 @@ __all__ = [
     "final_preflight_activation_candidate",
 ]
 
-def _posture(*, fresh_precheck_executed: bool) -> dict[str, object]:
+def _posture(*, fresh_precheck_executed: bool, receipt_age_evaluated: bool = False) -> dict[str, object]:
     """Activation posture for one return path.
 
-    activation/approval/receipt-age/freshness are never evaluated or granted (constant).
-    ``fresh_precheck_executed`` is the only per-call value: it is ``True`` only when the
-    composed ``precheck_runtime`` actually ran (current snapshot/active-decision validity
-    was re-checked at the caller ``now``), and ``False`` for every short-circuit that
-    returns before the fresh precheck (naive ``now``, any 4g revalidation NO_GO)."""
+    activation/approval are never granted and freshness is never evaluated (constant).
+    ``fresh_precheck_executed`` is ``True`` only when the composed ``precheck_runtime``
+    actually ran (current snapshot/active-decision validity was re-checked at the caller
+    ``now``), ``False`` for every short-circuit that returns before it (invalid ``now``, any
+    4g revalidation NO_GO). ``receipt_age_evaluated`` is ``True`` once the verified receipt's
+    ``checked_at`` was compared against ``now`` (RTM-7c.4i observation: VALID age or
+    future-receipt NO_GO), ``False`` before that comparison. ``freshness_policy_evaluated``
+    is constant ``False`` — no TTL / max-age / freshness threshold is applied."""
 
     return {
         "activation_authorized": False,
@@ -60,7 +70,7 @@ def _posture(*, fresh_precheck_executed: bool) -> dict[str, object]:
         "explicit_operator_approval_required": True,
         "writers_stopped_manual_confirmation_required": True,
         "fresh_precheck_executed": fresh_precheck_executed,
-        "receipt_age_evaluated": False,
+        "receipt_age_evaluated": receipt_age_evaluated,
         "freshness_policy_evaluated": False,
     }
 
@@ -77,9 +87,13 @@ class ActivationCandidateFinalPreflightResult:
     ``fresh_precheck_executed`` is a *per-call* fact: ``True`` iff the composed
     ``precheck_runtime`` actually ran and re-checked current snapshot/active-decision
     time-validity at the caller ``now``; ``False`` for every short-circuit that returns
-    before it (naive ``now``, any 4g revalidation NO_GO). ``receipt_age_evaluated`` /
-    ``freshness_policy_evaluated`` are constant ``False`` — this lane never evaluates receipt
-    age or any freshness policy. A mechanical PASS is NOT an activation authorization."""
+    before it (invalid ``now``, any 4g revalidation NO_GO). ``receipt_age_evaluated`` is
+    ``True`` once the verified receipt ``checked_at`` was compared against ``now`` (RTM-7c.4i
+    policy-neutral observation), with ``receipt_age_microseconds`` the exact ``now - checked_at``
+    integer microseconds (``>= 0``) — or ``None`` for a future receipt / pre-comparison
+    short-circuit. ``freshness_policy_evaluated`` is constant ``False`` — this lane evaluates
+    no TTL / max-age / freshness threshold. A mechanical PASS is NOT an activation
+    authorization."""
 
     outcome: ActivationCandidateFinalPreflightOutcome
     receipt_sha256: str | None
@@ -90,6 +104,7 @@ class ActivationCandidateFinalPreflightResult:
     current_precheck_result: RuntimePrecheckResult | None
     fresh_precheck_executed: bool
     receipt_age_evaluated: bool
+    receipt_age_microseconds: int | None
     freshness_policy_evaluated: bool
     activation_authorized: bool
     runtime_activation_outcome: str
@@ -107,11 +122,13 @@ def final_preflight_activation_candidate(
     """Run 4g byte-state revalidation then a fresh current-time machine precheck, binding the
     result back to the candidate receipt's post-inspection artifact state.
 
-    ``now`` must be timezone-aware; a naive/malformed ``now`` is a fail-closed
-    ``candidate_invalid_now`` NO_GO (the underlying ``precheck_runtime`` is never reached).
+    ``now`` must be a timezone-aware ``datetime``; any non-``datetime`` (``None``, ``str``,
+    ``int``), a naive ``datetime``, a ``None`` UTC offset, or a ``tzinfo`` whose
+    ``utcoffset`` raises is a fail-closed ``candidate_invalid_now`` NO_GO (the underlying
+    ``precheck_runtime`` is never reached; no raw exception/type/repr escapes).
     No clock read of its own; no operational DB write; no network/credential/broker."""
 
-    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+    if _now_is_invalid(now):
         return _no_go(
             reasons=("candidate_invalid_now",),
             receipt_sha256=None,
@@ -137,11 +154,34 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=False,
         )
 
-    # Step 2 — 현재 시각 기준 fresh machine precheck (snapshot/active-decision validity 포함).
+    # Step 2 — policy-neutral receipt time observation (RTM-7c.4i). 4g PASS guarantees a VALID
+    # receipt with an aware checked_at, so the only reachable NO_GO here is a future checked_at.
+    # No TTL/max-age/freshness threshold is applied; only age computation + future fail-close.
+    time_assessment = assess_receipt_time(receipt_payload=receipt_payload, now=now)
+    if time_assessment.outcome is not ReceiptTimeAssessmentOutcome.VALID:
+        reason = (
+            "candidate_receipt_time_in_future"
+            if "receipt_time_in_future" in time_assessment.reasons
+            else "candidate_receipt_time_invalid"
+        )
+        return _no_go(
+            reasons=(reason,),
+            receipt_sha256=revalidation.receipt_sha256,
+            market=revalidation.market,
+            symbol=revalidation.symbol,
+            revalidation=revalidation,
+            precheck=None,
+            fresh_precheck_executed=False,
+            receipt_age_evaluated=time_assessment.receipt_age_evaluated,
+            receipt_age_microseconds=time_assessment.receipt_age_microseconds,
+        )
+    receipt_age_microseconds = time_assessment.receipt_age_microseconds
+
+    # Step 3 — 현재 시각 기준 fresh machine precheck (snapshot/active-decision validity 포함).
     resolved_base = Path(".") if base_dir is None else Path(base_dir)
     precheck = precheck_runtime(settings=settings, now=now, base_dir=resolved_base)
 
-    # Step 3 — fresh precheck verdict. NO_GO면 기존 reason을 raw payload 없이 stable prefix로 전달.
+    # Step 4 — fresh precheck verdict. NO_GO면 기존 reason을 raw payload 없이 stable prefix로 전달.
     if precheck.machine_outcome is not MachineCheckOutcome.PASS:
         return _no_go(
             reasons=tuple(f"candidate_current_precheck:{reason}" for reason in precheck.reasons),
@@ -151,9 +191,11 @@ def final_preflight_activation_candidate(
             revalidation=revalidation,
             precheck=precheck,
             fresh_precheck_executed=True,
+            receipt_age_evaluated=True,
+            receipt_age_microseconds=receipt_age_microseconds,
         )
 
-    # Step 4 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
+    # Step 5 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
     # current-after == receipt fingerprints_after를 보장하므로 그 값을 비교 기준으로 쓴다.
     drift_reasons = _post_revalidation_drift_reasons(
         revalidation_after=revalidation.current_fingerprints_after,
@@ -168,9 +210,11 @@ def final_preflight_activation_candidate(
             revalidation=revalidation,
             precheck=precheck,
             fresh_precheck_executed=True,
+            receipt_age_evaluated=True,
+            receipt_age_microseconds=receipt_age_microseconds,
         )
 
-    # Step 5 — mechanical PASS. activation은 여전히 false.
+    # Step 6 — mechanical PASS. activation은 여전히 false.
     return ActivationCandidateFinalPreflightResult(
         outcome=ActivationCandidateFinalPreflightOutcome.PASS,
         receipt_sha256=revalidation.receipt_sha256,
@@ -179,8 +223,25 @@ def final_preflight_activation_candidate(
         reasons=(),
         revalidation_result=revalidation,
         current_precheck_result=precheck,
-        **_posture(fresh_precheck_executed=True),  # type: ignore[arg-type]
+        receipt_age_microseconds=receipt_age_microseconds,
+        **_posture(fresh_precheck_executed=True, receipt_age_evaluated=True),  # type: ignore[arg-type]
     )
+
+
+def _now_is_invalid(now: object) -> bool:
+    """Strict fail-closed ``now`` guard.
+
+    Returns ``True`` (invalid) for any non-``datetime`` (``None``/``str``/``int``), a naive
+    ``datetime``, a ``None`` UTC offset, or a ``tzinfo`` whose ``utcoffset`` raises. The
+    raising case is swallowed so no exception/type/repr escapes the API contract."""
+
+    if not isinstance(now, datetime):
+        return True
+    try:
+        offset = now.utcoffset()
+    except Exception:
+        return True
+    return offset is None
 
 
 def _post_revalidation_drift_reasons(
@@ -212,6 +273,8 @@ def _no_go(
     revalidation: ActivationCandidateRevalidationResult | None,
     precheck: RuntimePrecheckResult | None,
     fresh_precheck_executed: bool,
+    receipt_age_evaluated: bool = False,
+    receipt_age_microseconds: int | None = None,
 ) -> ActivationCandidateFinalPreflightResult:
     return ActivationCandidateFinalPreflightResult(
         outcome=ActivationCandidateFinalPreflightOutcome.NO_GO,
@@ -221,5 +284,9 @@ def _no_go(
         reasons=reasons,
         revalidation_result=revalidation,
         current_precheck_result=precheck,
-        **_posture(fresh_precheck_executed=fresh_precheck_executed),  # type: ignore[arg-type]
+        receipt_age_microseconds=receipt_age_microseconds,
+        **_posture(  # type: ignore[arg-type]
+            fresh_precheck_executed=fresh_precheck_executed,
+            receipt_age_evaluated=receipt_age_evaluated,
+        ),
     )
