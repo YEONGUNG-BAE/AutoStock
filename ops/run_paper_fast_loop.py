@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Seven mutually-exclusive modes:
+Eight mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -17,6 +17,12 @@ Seven mutually-exclusive modes:
   current artifact state against a verified machine PASS receipt (RTM-7c.4g). Config loads
   with empty ``environ``; no clock read, no DB connection, no filesystem write, no network.
   Mechanical PASS is NOT activation authorization.
+* ``--final-preflight-activation-candidate``: stdin receipt + config; 4g byte-state
+  revalidation followed by a fresh current-time machine precheck (snapshot / active-decision
+  validity windows) bound back to the receipt's post-inspection state (RTM-7c.4h). Config loads
+  with empty ``environ``; current-time validity IS evaluated, receipt age and freshness policy
+  are NOT; the composed precheck opens the configured DBs read-only (no write). Mechanical PASS
+  is NOT activation authorization.
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -54,6 +60,10 @@ from composition.precheck_receipt_stdin_json import ReceiptStdinJsonError, parse
 from composition.activation_candidate_revalidation import (
     ActivationCandidateRevalidationOutcome,
     revalidate_activation_candidate,
+)
+from composition.activation_candidate_final_preflight import (
+    ActivationCandidateFinalPreflightOutcome,
+    final_preflight_activation_candidate,
 )
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
@@ -124,6 +134,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--final-preflight-activation-candidate",
+        action="store_true",
+        help=(
+            "stdin receipt + config: 4g byte-state revalidation + fresh current-time machine "
+            "precheck (snapshot/active-decision validity) bound back to the receipt's "
+            "post-inspection state; current_validity_evaluated, receipt_age NOT evaluated, no "
+            "freshness policy; mechanical PASS is NOT activation authorization"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -147,6 +167,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("precheck-runtime", args.precheck_runtime),
             ("verify-precheck-receipt", args.verify_precheck_receipt),
             ("revalidate-activation-candidate", args.revalidate_activation_candidate),
+            ("final-preflight-activation-candidate", args.final_preflight_activation_candidate),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -155,8 +176,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
     if len(selected) > 1:
         raise CliInputError(
             "modes --validate-only / --inspect-existing / --precheck-runtime / "
-            "--verify-precheck-receipt / --revalidate-activation-candidate / --replay / "
-            "--run are mutually exclusive."
+            "--verify-precheck-receipt / --revalidate-activation-candidate / "
+            "--final-preflight-activation-candidate / --replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -348,6 +369,70 @@ def _revalidate_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> i
     return 1
 
 
+def _final_preflight_summary(result: Any, *, config_path: str) -> dict[str, Any]:
+    passed = result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
+    precheck = result.current_precheck_result
+    return {
+        # mechanical PASS ≠ activation authorization — outcome reports only the time-aware verdict.
+        "outcome": "PASS" if passed else "NO_GO",
+        "mode": "final-preflight-activation-candidate",
+        "config": config_path,
+        "receipt_sha256": result.receipt_sha256,
+        "market": result.market,
+        "symbol": result.symbol,
+        "reasons": list(result.reasons),
+        "current_precheck_outcome": precheck.machine_outcome.value if precheck is not None else None,
+        "current_precheck_reasons": list(precheck.reasons) if precheck is not None else [],
+        "current_validity_evaluated": result.current_validity_evaluated,
+        "receipt_age_evaluated": result.receipt_age_evaluated,
+        "freshness_policy_evaluated": result.freshness_policy_evaluated,
+        "activation_authorized": result.activation_authorized,
+        "runtime_activation_outcome": result.runtime_activation_outcome,
+        "explicit_operator_approval_required": result.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            result.writers_stopped_manual_confirmation_required
+        ),
+        "credential_read": False,
+        "network_called": False,
+        "broker_called": False,
+        # 합성 precheck는 inspect를 통해 DB를 read-only로 연다(쓰기 없음). database_opened은
+        # 정직하게 precheck 실행 여부를 반영한다.
+        "read_only_databases_opened": precheck is not None,
+        "operational_db_written": False,
+        "filesystem_written": False,
+        "runtime_file_created": False,
+    }
+
+
+def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> int:
+    summary = {
+        "outcome": "NO_GO",
+        "mode": "final-preflight-activation-candidate",
+        "receipt_sha256": None,
+        "market": None,
+        "symbol": None,
+        "reasons": [reason_code],
+        "current_precheck_outcome": None,
+        "current_precheck_reasons": [],
+        "current_validity_evaluated": True,
+        "receipt_age_evaluated": False,
+        "freshness_policy_evaluated": False,
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+        "credential_read": False,
+        "network_called": False,
+        "broker_called": False,
+        "read_only_databases_opened": False,
+        "operational_db_written": False,
+        "filesystem_written": False,
+        "runtime_file_created": False,
+    }
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
 def _verify_receipt_summary(result: Any) -> dict[str, Any]:
     valid = result.outcome is ReceiptVerificationOutcome.VALID
     return {
@@ -488,6 +573,33 @@ def main(argv: list[str] | None = None) -> int:
                 f"revalidate error: {type(exc).__name__}", as_json=as_json, out=out
             )
         summary = _revalidate_summary(result, config_path=args.config)
+        _emit(summary, as_json=as_json, out=out)
+        return 0 if summary["outcome"] == "PASS" else 1
+
+    # final-preflight-activation-candidate: stdin receipt + config(environ={}) + KST now.
+    # 4g revalidation 후 현재 시각 기준 fresh precheck. DB는 read-only로만 열린다(쓰기/네트워크 없음).
+    if mode == "final-preflight-activation-candidate":
+        payload, input_error = _read_verify_stdin_payload()
+        if input_error is not None:
+            return _final_preflight_input_fail(input_error, as_json=as_json, out=out)
+        try:
+            settings: AppSettings = load_settings(args.config, environ={})
+        except (SettingsError, OSError) as exc:
+            return _final_preflight_input_fail(
+                f"config error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        fast_loop = settings.runtime.paper_fast_loop
+        try:
+            result = final_preflight_activation_candidate(
+                settings=fast_loop,
+                receipt_payload=payload,
+                now=datetime.now(tz=_KST),
+            )
+        except Exception as exc:
+            return _final_preflight_input_fail(
+                f"final-preflight error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        summary = _final_preflight_summary(result, config_path=args.config)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

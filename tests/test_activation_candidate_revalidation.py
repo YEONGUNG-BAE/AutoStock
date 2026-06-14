@@ -346,6 +346,112 @@ def test_revalidation_receipt_artifact_mismatch_on_irregular_path(
     assert result.reasons == (f"candidate_receipt_artifact_mismatch:{canonical_name}",)
 
 
+# --- H1 carry-over: fingerprint read fail-closed ---
+
+
+def _raising_fp(real: Any, *, target: str, fail_on_call: int, exc: BaseException) -> Any:
+    seen: dict[str, int] = {}
+
+    def _fp(path: str | Path, *, name: str, is_sqlite: bool) -> ArtifactFingerprint:
+        if name == target:
+            seen[name] = seen.get(name, 0) + 1
+            if seen[name] == fail_on_call:
+                raise exc
+        return real(path, name=name, is_sqlite=is_sqlite)
+
+    return _fp
+
+
+@pytest.mark.parametrize("artifact_name", list(PRECHECK_RECEIPT_ARTIFACT_NAMES))
+@pytest.mark.parametrize("fail_on_call", [1, 2], ids=["first_pass", "second_pass"])
+@pytest.mark.parametrize(
+    "exc_cls",
+    [FileNotFoundError, PermissionError, OSError],
+    ids=["filenotfound", "permission", "oserror"],
+)
+def test_revalidation_artifact_unreadable_is_stable_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+    fail_on_call: int,
+    exc_cls: type[OSError],
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    real_fp = reval_mod.sqlite_inspector.fingerprint_artifact
+    leak_token = "SeNtInEl_RaW_PaTh_42"
+    exc = exc_cls(leak_token)
+    monkeypatch.setattr(
+        reval_mod.sqlite_inspector,
+        "fingerprint_artifact",
+        _raising_fp(real_fp, target=artifact_name, fail_on_call=fail_on_call, exc=exc),
+    )
+
+    # pure API must NOT propagate the OSError — it returns a stable NO_GO.
+    result = revalidate_activation_candidate(
+        settings=settings, receipt_payload=receipt, base_dir=tmp_path
+    )
+    assert result.outcome is ActivationCandidateRevalidationOutcome.NO_GO
+    assert result.reasons == (f"candidate_artifact_unreadable:{artifact_name}",)
+    # no raw exception type / message / path leaked into any reason.
+    for reason in result.reasons:
+        assert leak_token not in reason
+        assert exc_cls.__name__ not in reason
+    _assert_posture(result)
+
+
+def test_revalidation_artifact_unreadable_canonical_order_multi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    real_fp = reval_mod.sqlite_inspector.fingerprint_artifact
+
+    def _fp(path: str | Path, *, name: str, is_sqlite: bool) -> ArtifactFingerprint:
+        if name in ("ledger", "active_decision_store"):
+            raise PermissionError("denied")
+        return real_fp(path, name=name, is_sqlite=is_sqlite)
+
+    monkeypatch.setattr(reval_mod.sqlite_inspector, "fingerprint_artifact", _fp)
+    result = revalidate_activation_candidate(
+        settings=settings, receipt_payload=receipt, base_dir=tmp_path
+    )
+    # one reason per failing artifact, canonical order (ledger before active_decision_store).
+    assert result.reasons == (
+        "candidate_artifact_unreadable:ledger",
+        "candidate_artifact_unreadable:active_decision_store",
+    )
+
+
+def test_revalidate_cli_artifact_unreadable_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    real_fp = reval_mod.sqlite_inspector.fingerprint_artifact
+
+    def _fp(path: str | Path, *, name: str, is_sqlite: bool) -> ArtifactFingerprint:
+        if name == "trigger_journal":
+            raise OSError("boom")
+        return real_fp(path, name=name, is_sqlite=is_sqlite)
+
+    monkeypatch.setattr(reval_mod.sqlite_inspector, "fingerprint_artifact", _fp)
+    code, payload = _run_revalidate(
+        ["--config", str(config_path), "--revalidate-activation-candidate", "--json"],
+        receipt,
+        capsys,
+    )
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    # exact stable reason, NOT a generic "revalidate error:<type>".
+    assert payload["reasons"] == ["candidate_artifact_unreadable:trigger_journal"]
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
 # --- 10.4 revalidation-window drift ---
 
 

@@ -100,8 +100,21 @@ active_decision_store
 | `candidate_enabled_mismatch` | receipt `enabled` ≠ settings `enabled` |
 | `candidate_current_artifact_drift:<artifact>` | current before/after differ |
 | `candidate_receipt_artifact_mismatch:<artifact>` | stable current ≠ receipt after |
+| `candidate_artifact_unreadable:<artifact>` | raw fingerprint read raised `OSError` |
 
-Raw paths, SHA values, DB contents, and config secrets never appear in reasons.
+Raw paths, SHA values, DB contents, exception types, and config secrets never appear
+in reasons.
+
+## Fail-closed artifact reads (H1)
+
+Each artifact is fingerprinted by reading its bytes directly. A missing path is **not**
+an error (it yields an all-`None` fingerprint); only a genuine read failure
+(`FileNotFoundError` / `PermissionError` / generic `OSError`, including a TOCTOU
+file-replaced-between-probe-and-open race) produces a stable
+`candidate_artifact_unreadable:<artifact>` reason in canonical order. On any unreadable
+artifact the partial fingerprints are discarded so no synthetic observation is treated
+as healthy, and the call is a `NO_GO`. The raw exception type, message, and path are
+never surfaced.
 
 ## Fixed activation posture (every path)
 

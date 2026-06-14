@@ -53,6 +53,7 @@ There is **no** code path that sets `activation_authorized=true`.
 | Receipt `receipt_sha256` | `PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md` | signature, freshness, approval |
 | Receipt verifier VALID | `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` | authentication, approval, activation |
 | Activation candidate revalidation PASS | `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md` | approval, writer-stop, freshness, activation |
+| Time-aware final preflight PASS | `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` | receipt-age, freshness, approval, writer-stop, activation |
 | Composition offline stack | `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` | live runtime caller |
 
 ## Future activation prerequisites
@@ -87,8 +88,13 @@ There is **no** code path that sets `activation_authorized=true`.
 
 Unset policy items stay **OPEN**. RTM-7c.4g implements the machine-verifiable
 **approval-time revalidation** step (current artifact state vs `receipt.fingerprints_after`
-+ config binding) without consuming approval or authorizing activation. Receipt
-freshness, authenticity, and Operator approval binding remain **OPEN**.
++ config binding) without consuming approval or authorizing activation. RTM-7c.4h adds
+the **time-aware final preflight** step: 4g byte-state revalidation composed with a
+fresh caller-time precheck, so a byte-identical snapshot / active-decision whose
+validity window has since opened or closed is caught (`current_validity_evaluated`).
+It still does **not** evaluate receipt age (`receipt_age_evaluated=false`) or freshness
+(`freshness_policy_evaluated=false`). Receipt freshness, receipt-age/TTL, authenticity,
+and Operator approval binding remain **OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -122,7 +128,7 @@ No secret/config/raw DB values listed.
 
 | location | symbol / mode | notes |
 |----------|---------------|-------|
-| `ops/run_paper_fast_loop.py` | `--validate-only`, `--inspect-existing`, `--precheck-runtime`, `--verify-precheck-receipt`, `--revalidate-activation-candidate`, `--replay` | operator CLI; no live runtime |
+| `ops/run_paper_fast_loop.py` | `--validate-only`, `--inspect-existing`, `--precheck-runtime`, `--verify-precheck-receipt`, `--revalidate-activation-candidate`, `--final-preflight-activation-candidate`, `--replay` | operator CLI; no live runtime |
 | `src/composition/paper_fast_loop.py` | `build_paper_fast_loop_plan`, `inspect_paper_fast_loop`, `precheck_runtime`, `replay_offline` | composition root; replay uses temp dir |
 | `src/composition/precheck_receipt_verifier.py` | `verify_runtime_precheck_receipt_payload` | stdin/API verification only |
 | `tests/test_full_day_two_loop_rehearsal.py` | full-day rehearsal | fake clock; temp paths |

@@ -264,7 +264,7 @@ close-event log across all three handles (not merely a per-handle close count).
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 
-Seven mutually-exclusive modes (default `--validate-only`):
+Eight mutually-exclusive modes (default `--validate-only`):
 
 | mode | exit code | notes |
 |------|-----------|-------|
@@ -273,6 +273,7 @@ Seven mutually-exclusive modes (default `--validate-only`):
 | `--precheck-runtime` | 0 if machine `PASS`, else 1 (`NO_GO`) | read-only attended precheck; machine PASS is **not** an activation authorization; JSON includes nested `precheck_receipt` (RTM-7c.4d — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`) |
 | `--verify-precheck-receipt` | 0 if `VALID`, else 1 | stdin-only receipt schema + hash verification; no config/env/DB/fs write (RTM-7c.4e — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`) |
 | `--revalidate-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); read-only approval-time state revalidation; mechanical PASS is **not** activation authorization (RTM-7c.4g — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md`) |
+| `--final-preflight-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); composes 4g revalidation + fresh current-time precheck (`now=datetime.now(tz=KST)`); catches byte-identical time-window expiry; mechanical PASS is **not** activation authorization (RTM-7c.4h — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 

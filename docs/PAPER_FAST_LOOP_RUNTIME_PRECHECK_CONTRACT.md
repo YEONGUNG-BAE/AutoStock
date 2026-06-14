@@ -63,6 +63,11 @@ timezone-aware; naive → `ValueError`):
 | `trigger_journal` | `trigger_journal_path` | yes |
 | `active_decision_store` | `active_decision_store_path` | yes |
 
+This four-artifact set (name, path attr, SQLite flag, canonical order) is defined once
+in `composition.paper_fast_loop_artifacts.PAPER_FAST_LOOP_ARTIFACT_SPECS` (RTM-7c.4h
+H2) and derived from there by the precheck, the receipt schema, the activation-candidate
+revalidation, and the final preflight — they cannot drift apart.
+
 ### Artifact fingerprint (side-effect-free)
 
 `present`, `is_regular_file`, `size`, byte SHA-256 of the main file, SQLite

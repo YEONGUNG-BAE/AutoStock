@@ -14,6 +14,7 @@ from typing import Any
 
 from composition import sqlite_inspector
 from composition.paper_fast_loop import PaperFastLoopPaths
+from composition.paper_fast_loop_artifacts import PAPER_FAST_LOOP_ARTIFACT_SPECS
 from composition.precheck_receipt_schema import (
     PRECHECK_RECEIPT_ARTIFACT_NAMES,
     parse_fingerprint_list,
@@ -31,12 +32,9 @@ __all__ = [
     "revalidate_activation_candidate",
 ]
 
-# precheck와 동일한 4-artifact 순서·속성 매핑.
-_REVALIDATION_ARTIFACTS: tuple[tuple[str, str, bool], ...] = (
-    ("execution_inputs_snapshot", "snapshot_path", False),
-    ("ledger", "ledger_path", True),
-    ("trigger_journal", "trigger_journal_path", True),
-    ("active_decision_store", "active_decision_store_path", True),
+# precheck와 동일한 4-artifact 순서·속성 — 단일 출처(paper_fast_loop_artifacts)에서 파생.
+_REVALIDATION_ARTIFACTS: tuple[tuple[str, str, bool], ...] = tuple(
+    (spec.name, spec.path_attr, spec.is_sqlite) for spec in PAPER_FAST_LOOP_ARTIFACT_SPECS
 )
 
 _ACTIVATION_POSTURE: dict[str, object] = {
@@ -133,8 +131,28 @@ def revalidate_activation_candidate(
     receipt_target = tuple(_fingerprint_from_dict(fp) for fp in receipt_after)
 
     paths = PaperFastLoopPaths.from_settings(settings, base_dir=resolved_base)
-    current_before = _fingerprint_artifacts(paths)
-    current_after = _fingerprint_artifacts(paths)
+    current_before, before_unreadable = _fingerprint_artifacts_fail_closed(paths)
+    if before_unreadable:
+        return _no_go(
+            reasons=before_unreadable,
+            receipt_sha256=verification.receipt_sha256,
+            market=settings.market,
+            symbol=settings.symbol,
+            current_before=empty_fps,
+            current_after=empty_fps,
+        )
+    assert current_before is not None
+    current_after, after_unreadable = _fingerprint_artifacts_fail_closed(paths)
+    if after_unreadable:
+        return _no_go(
+            reasons=after_unreadable,
+            receipt_sha256=verification.receipt_sha256,
+            market=settings.market,
+            symbol=settings.symbol,
+            current_before=current_before,
+            current_after=empty_fps,
+        )
+    assert current_after is not None
 
     artifact_reasons = _artifact_revalidation_reasons(
         current_before=current_before,
@@ -190,13 +208,35 @@ def _config_binding_reason(
     return None
 
 
-def _fingerprint_artifacts(paths: PaperFastLoopPaths) -> tuple[sqlite_inspector.ArtifactFingerprint, ...]:
-    return tuple(
-        sqlite_inspector.fingerprint_artifact(
-            getattr(paths, attr), name=name, is_sqlite=is_sqlite
-        )
-        for name, attr, is_sqlite in _REVALIDATION_ARTIFACTS
-    )
+def _fingerprint_artifacts_fail_closed(
+    paths: PaperFastLoopPaths,
+) -> tuple[tuple[sqlite_inspector.ArtifactFingerprint, ...] | None, tuple[str, ...]]:
+    """Fingerprint every artifact in canonical order, converting raw-read ``OSError`` into a
+    stable ``candidate_artifact_unreadable:<artifact>`` reason (H1 carry-over).
+
+    ``fingerprint_artifact`` reads the artifact's bytes directly; a missing/permission-denied
+    path or a TOCTOU race (file replaced/removed between the ``exists``/``is_file`` probe and
+    the ``open``) can raise ``OSError`` (``FileNotFoundError`` / ``PermissionError`` / generic).
+    Absent paths are NOT errors — they yield an all-``None`` fingerprint, so only a genuine
+    read failure produces a reason. The raw exception type/message/path is never surfaced; one
+    reason is emitted per failing artifact in canonical order. When any artifact is unreadable
+    the partial fingerprints are discarded (``None`` returned) so no synthetic fingerprint is
+    ever treated as a healthy observation."""
+
+    fingerprints: list[sqlite_inspector.ArtifactFingerprint] = []
+    reasons: list[str] = []
+    for name, attr, is_sqlite in _REVALIDATION_ARTIFACTS:
+        try:
+            fingerprints.append(
+                sqlite_inspector.fingerprint_artifact(
+                    getattr(paths, attr), name=name, is_sqlite=is_sqlite
+                )
+            )
+        except OSError:
+            reasons.append(f"candidate_artifact_unreadable:{name}")
+    if reasons:
+        return None, tuple(reasons)
+    return tuple(fingerprints), ()
 
 
 def _fingerprint_from_dict(fp: dict[str, Any]) -> sqlite_inspector.ArtifactFingerprint:

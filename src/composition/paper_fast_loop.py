@@ -96,6 +96,7 @@ from orchestration.fast_loop_execution import (
 
 from decision.canonical_json import payload_sha256
 
+from composition.paper_fast_loop_artifacts import PAPER_FAST_LOOP_ARTIFACT_SPECS
 from composition.precheck_receipt_schema import (
     PRECHECK_RECEIPT_ARTIFACT_NAMES,
     PRECHECK_RECEIPT_SCHEMA_VERSION,
@@ -487,13 +488,11 @@ def inspect_paper_fast_loop(
     )
 
 
-# Artifacts fingerprinted before/after the read-only precheck. ``is_sqlite`` controls
-# whether ``user_version`` is parsed from the file header. The snapshot is JSON (not SQLite).
-_PRECHECK_ARTIFACTS: tuple[tuple[str, str, bool], ...] = (
-    ("execution_inputs_snapshot", "snapshot_path", False),
-    ("ledger", "ledger_path", True),
-    ("trigger_journal", "trigger_journal_path", True),
-    ("active_decision_store", "active_decision_store_path", True),
+# Artifacts fingerprinted before/after the read-only precheck — derived from the single
+# shared spec (``paper_fast_loop_artifacts``). ``is_sqlite`` controls whether ``user_version``
+# is parsed from the file header. The snapshot is JSON (not SQLite).
+_PRECHECK_ARTIFACTS: tuple[tuple[str, str, bool], ...] = tuple(
+    (spec.name, spec.path_attr, spec.is_sqlite) for spec in PAPER_FAST_LOOP_ARTIFACT_SPECS
 )
 
 # Inspection reasons a *present-but-irregular* artifact (directory/socket/fifo) produces,

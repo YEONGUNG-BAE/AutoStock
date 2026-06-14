@@ -10,16 +10,16 @@ import re
 from datetime import datetime
 from typing import Any
 
+from composition.paper_fast_loop_artifacts import (
+    PAPER_FAST_LOOP_ARTIFACT_NAMES,
+    PAPER_FAST_LOOP_SQLITE_ARTIFACT_NAMES,
+)
 from decision.canonical_json import payload_sha256
 
 PRECHECK_RECEIPT_SCHEMA_VERSION = 1
 
-PRECHECK_RECEIPT_ARTIFACT_NAMES: tuple[str, ...] = (
-    "execution_inputs_snapshot",
-    "ledger",
-    "trigger_journal",
-    "active_decision_store",
-)
+# 단일 출처(paper_fast_loop_artifacts)에서 파생 — precheck/revalidation/final-preflight과 동일 순서.
+PRECHECK_RECEIPT_ARTIFACT_NAMES: tuple[str, ...] = PAPER_FAST_LOOP_ARTIFACT_NAMES
 
 _RECEIPT_TOP_LEVEL_FIELDS = frozenset(
     {
@@ -54,7 +54,7 @@ FINGERPRINT_FIELDS = frozenset(
 )
 
 ALLOWED_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
-_SQLITE_ARTIFACT_NAMES = frozenset({"ledger", "trigger_journal", "active_decision_store"})
+_SQLITE_ARTIFACT_NAMES = PAPER_FAST_LOOP_SQLITE_ARTIFACT_NAMES
 _JSON_SNAPSHOT_NAME = "execution_inputs_snapshot"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # KRX 종목코드는 ASCII 숫자 6자리만 허용 — Unicode decimal digit(전각·아랍-인디크 등) 거부.
