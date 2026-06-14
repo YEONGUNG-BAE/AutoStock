@@ -349,6 +349,73 @@ def test_freshness_reasons_nonempty_is_invalid() -> None:
     )
 
 
+# --- final PASS semantic consistency: reasons must be () (RTM-7c.4n nested closure) ---
+
+
+def test_final_pass_with_nonempty_reasons_is_invalid() -> None:
+    bad_final = _final_pass(reasons=("candidate_current_precheck:expired",))
+    result = _build(_qualified_pass(final=bad_final))
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.reasons == ("candidate_evidence_invalid_input",)
+    assert result.evidence is None
+    # The raw final reason is never surfaced in the stable evidence reason.
+    assert "expired" not in result.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "reasons",
+    [
+        pytest.param([], id="final_reasons_empty_list"),
+        pytest.param(None, id="final_reasons_none"),
+        pytest.param(["x"], id="final_reasons_nonempty_list"),
+        pytest.param(object(), id="final_reasons_arbitrary_object"),
+    ],
+)
+def test_final_pass_non_empty_tuple_reasons_is_invalid(reasons: object) -> None:
+    bad_final = _final_pass(reasons=reasons)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_final_pass_with_deleted_reasons_is_invalid() -> None:
+    bad_final = _final_pass()
+    object.__delattr__(bad_final, "reasons")
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+# --- policy-neutral time assessment: freshness_policy_evaluated must be False ---
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        pytest.param(True, id="ta_policy_true"),
+        pytest.param(0, id="ta_policy_zero"),
+        pytest.param(1, id="ta_policy_one"),
+        pytest.param(None, id="ta_policy_none"),
+        pytest.param("false", id="ta_policy_string"),
+    ],
+)
+def test_time_assessment_policy_evaluated_not_false_is_invalid(flag: object) -> None:
+    bad_ta = replace(_time_assessment(), freshness_policy_evaluated=flag)
+    bad_final = _final_pass(ta=bad_ta)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_time_assessment_with_deleted_policy_flag_is_invalid() -> None:
+    bad_ta = _time_assessment()
+    object.__delattr__(bad_ta, "freshness_policy_evaluated")
+    bad_final = _final_pass(ta=bad_ta)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
 @pytest.mark.parametrize(
     "final_overrides",
     [

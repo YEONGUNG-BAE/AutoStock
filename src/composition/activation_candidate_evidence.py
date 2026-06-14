@@ -188,6 +188,7 @@ def build_activation_candidate_evidence(
     # feed validation and the hash payload (the caller objects are not re-read afterwards).
     try:
         final_outcome = final_result.outcome
+        final_reasons = final_result.reasons
         final_sha = final_result.receipt_sha256
         final_market = final_result.market
         final_symbol = final_result.symbol
@@ -219,11 +220,18 @@ def build_activation_candidate_evidence(
         ta_checked_at = time_assessment.receipt_checked_at
         ta_age = time_assessment.receipt_age_microseconds
         ta_age_evaluated = time_assessment.receipt_age_evaluated
+        ta_policy_evaluated = time_assessment.freshness_policy_evaluated
     except AttributeError:
         return _invalid()
 
     # Final preflight is policy-neutral; the freshness result is the explicit FRESH verdict.
+    # A final PASS that still carries failure reasons is a contradictory result (the PASS and
+    # the reasons cannot both hold) — reasons must be the empty tuple. A nonempty tuple, list,
+    # None, or arbitrary object all differ from ``()`` and fail closed; the raw reason content
+    # is never surfaced in the stable evidence reason.
     if final_outcome is not ActivationCandidateFinalPreflightOutcome.PASS:
+        return _invalid()
+    if final_reasons != ():
         return _invalid()
     if final_policy_evaluated is not False:
         return _invalid()
@@ -247,6 +255,12 @@ def build_activation_candidate_evidence(
     if ta_outcome is not ReceiptTimeAssessmentOutcome.VALID or ta_reasons != ():
         return _invalid()
     if ta_age_evaluated is not True:
+        return _invalid()
+    # The time assessment lane is policy-neutral by construction; it observes age but never
+    # evaluates a freshness policy. A True/0/1/None/string/deleted flag means the nested
+    # semantic roles overlap (the policy verdict belongs only to the freshness evaluation) and
+    # fails closed.
+    if ta_policy_evaluated is not False:
         return _invalid()
 
     # Identity must agree between the outer qualified result and the final preflight.

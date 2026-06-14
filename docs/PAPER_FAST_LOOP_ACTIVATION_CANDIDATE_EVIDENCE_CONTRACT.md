@@ -167,12 +167,19 @@ freshness evaluator 1, evidence builder ≤1 (0 on qualified NO_GO), clock read 
    - **Identity** — `final.receipt_sha256 == outer.receipt_sha256`,
      `final.market == outer.market`, `final.symbol == outer.symbol`
    - **Final preflight is policy-neutral** — `final.freshness_policy_evaluated is False`;
-     `final.outcome == PASS`; `final.fresh_precheck_executed is True`;
+     `final.outcome == PASS`; **`final.reasons == ()`** (a final PASS that still carries
+     failure reasons is contradictory — a non-empty tuple, a `list`, `None`, or an arbitrary
+     object all differ from `()` and fail closed; the raw reason content is never surfaced in
+     the stable evidence reason); `final.fresh_precheck_executed is True`;
      `final.receipt_age_evaluated is True`
    - **Freshness is the explicit FRESH verdict** — `freshness.freshness_policy_evaluated is
      True`; `freshness.outcome == FRESH`; `freshness.reasons == ()`
-   - **Time assessment is a clean VALID observation** — `time_assessment.outcome == VALID`;
-     `time_assessment.reasons == ()`; `time_assessment.receipt_age_evaluated is True`
+   - **Time assessment is a clean policy-neutral VALID observation** —
+     `time_assessment.outcome == VALID`; `time_assessment.reasons == ()`;
+     `time_assessment.receipt_age_evaluated is True`; **`time_assessment.freshness_policy_evaluated
+     is False`** (the time-assessment lane observes age but never evaluates a freshness policy;
+     a `True`/`0`/`1`/`None`/string/deleted flag means the nested semantic roles overlap — the
+     policy verdict belongs only to the freshness evaluation — and fails closed)
    - **Nested posture** — `activation_authorized is False` and
      `runtime_activation_outcome == "no_go"` on outer, final, *and* freshness;
      `explicit_operator_approval_required is True` and

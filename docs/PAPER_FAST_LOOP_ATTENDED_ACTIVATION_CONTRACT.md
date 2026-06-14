@@ -113,9 +113,14 @@ freshness-qualified candidate evidence** (`build_activation_candidate_evidence`)
 PASS/FRESH is frozen into one immutable canonical payload (`evidence_sha256` over 14 fields,
 schema version 1) that a *future* approval stage can reference. Evidence is generated **only**
 for PASS/FRESH whose outer/final/freshness/time-assessment observations are mutually consistent
-(matching identity, one agreed receipt age across all stages, policy-neutral final + explicit
-FRESH, constant NO-GO posture on every nested stage, and an `evaluated_at` whose exact integer
-microseconds from the verified `checked_at` equal the observed age); any mismatch fails closed.
+(matching identity, one agreed receipt age across all stages, a clean policy-neutral final
+preflight — `final.reasons == ()` and `final.freshness_policy_evaluated is False` — explicit
+FRESH freshness as the sole policy verdict, a policy-neutral time assessment
+(`time_assessment.freshness_policy_evaluated is False`) so the nested semantic roles never
+overlap, a constant NO-GO posture on every nested stage, and an `evaluated_at` whose exact
+integer microseconds from the verified `checked_at` equal the observed age); any mismatch —
+including a final PASS with failure reasons or a time assessment claiming a policy verdict —
+fails closed.
 The combined wrapper reports `PASS` only when evidence is `CREATED` — a qualified PASS whose
 evidence is not created is combined `NO_GO` (`candidate_evidence_generation_invalid`), so a
 qualified PASS can never advance to approval/activation without a digest. `NO_GO`/`STALE` → no

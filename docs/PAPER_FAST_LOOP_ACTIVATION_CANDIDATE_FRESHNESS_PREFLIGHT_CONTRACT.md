@@ -218,6 +218,14 @@ upstream stage) via `freshness_qualify_and_build_candidate_evidence`. The digest
 approval or activation authorization — see
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`.
 
+Evidence is `CREATED` only when the nested final preflight, freshness evaluation, and time
+assessment hold non-overlapping semantic roles: the final preflight is a clean PASS
+(`final.reasons == ()`) and policy-neutral (`final.freshness_policy_evaluated is False`), the
+freshness evaluation is the sole policy verdict (`FRESH`, `freshness_policy_evaluated is True`),
+and the time assessment observes age only (`time_assessment.freshness_policy_evaluated is
+False`). A final PASS carrying failure reasons, or a time assessment that claims to have
+evaluated a freshness policy, fails closed to `INVALID` → combined `NO_GO`.
+
 ## Out of scope (unchanged)
 
 - Default max-age / config/env max-age field
