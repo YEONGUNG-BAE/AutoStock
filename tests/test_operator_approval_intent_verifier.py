@@ -332,3 +332,249 @@ def test_verifier_never_raises_on_poison_payload(capsys: pytest.CaptureFixture[s
     combined = captured.out + captured.err
     assert "POISON" not in combined
     assert "Traceback" not in combined
+
+
+# --- RTM-7c.4q strict hex64 exact-type closure ---
+
+
+class _KeySub(str):
+    pass
+
+
+class _PoisonKey(str):
+    def __new__(cls, value: str) -> _PoisonKey:
+        obj = super().__new__(cls, value)
+        obj.hash_calls = 0  # type: ignore[attr-defined]
+        return obj
+
+    def __hash__(self) -> int:
+        self.hash_calls += 1  # type: ignore[attr-defined]
+        if self.hash_calls >= 2:
+            raise RuntimeError("POISON_INTENT_KEY")
+        return super().__hash__()
+
+
+class _PoisonEqKey(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("POISON_INTENT_KEY_EQ")
+
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError("POISON_INTENT_KEY_EQ")
+
+
+class _AlwaysEqualKey:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+
+@pytest.mark.parametrize(
+    "field,expected",
+    [
+        pytest.param("evidence_sha256", "approval_intent_invalid_evidence_binding", id="evidence"),
+        pytest.param("approval_intent_sha256", "approval_intent_invalid_field", id="intent"),
+    ],
+)
+def test_hash_str_subclass_rejected(field: str, expected: str) -> None:
+    payload = _valid_intent_payload()
+    payload[field] = _StrSub(payload[field])
+    assert validate_operator_approval_intent_scalars(**payload) is None
+    result = _verify(payload)
+    assert result.reason_codes == (expected,)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        pytest.param("evidence_sha256", b"a" * 64, id="evidence_bytes"),
+        pytest.param("evidence_sha256", None, id="evidence_none"),
+        pytest.param("evidence_sha256", 0, id="evidence_int"),
+        pytest.param("evidence_sha256", object(), id="evidence_object"),
+        pytest.param("approval_intent_sha256", b"b" * 64, id="intent_bytes"),
+        pytest.param("approval_intent_sha256", None, id="intent_none"),
+        pytest.param("approval_intent_sha256", 1, id="intent_int"),
+        pytest.param("approval_intent_sha256", object(), id="intent_object"),
+    ],
+)
+def test_hash_digest_exact_type_matrix(field: str, bad: object) -> None:
+    payload = _valid_intent_payload()
+    payload[field] = bad
+    assert validate_operator_approval_intent_scalars(**payload) is None
+    result = _verify(payload)
+    if field == "evidence_sha256":
+        assert result.reason_codes == ("approval_intent_invalid_evidence_binding",)
+    else:
+        assert result.reason_codes == ("approval_intent_invalid_field",)
+
+
+def test_object_validator_rejects_str_subclass_digest() -> None:
+    result = intent_helper._build_intent()
+    assert result.intent is not None
+    fields = asdict(result.intent)
+    fields["evidence_sha256"] = _StrSub(fields["evidence_sha256"])
+    assert validate_operator_approval_intent_scalars(**fields) is None
+
+
+# --- RTM-7c.4q strict key / field-set closure ---
+
+
+def test_str_subclass_canonical_key_unknown_field() -> None:
+    payload = _valid_intent_payload()
+    value = payload.pop("schema_version")
+    payload[_KeySub("schema_version")] = value
+    result = _verify(payload)
+    assert result.reason_codes == ("approval_intent_unknown_field",)
+
+
+def test_non_string_key_unknown_field() -> None:
+    payload = _valid_intent_payload()
+    payload[999] = "extra"
+    result = _verify(payload)
+    assert result.reason_codes == ("approval_intent_unknown_field",)
+
+
+def test_unknown_exact_string_key_unknown_field() -> None:
+    payload = _valid_intent_payload()
+    payload["extra_field"] = True
+    result = _verify(payload)
+    assert result.reason_codes == ("approval_intent_unknown_field",)
+
+
+@pytest.mark.parametrize(
+    "key_factory",
+    [
+        pytest.param(lambda: _PoisonKey("schema_version"), id="poison_hash"),
+        pytest.param(lambda: _PoisonEqKey("schema_version"), id="poison_eq"),
+        pytest.param(lambda: _KeySub("schema_version"), id="str_subclass"),
+        pytest.param(lambda: _AlwaysEqualKey(), id="always_equal"),
+    ],
+)
+def test_custom_key_fail_closed_without_escape(
+    key_factory: object,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = _valid_intent_payload()
+    value = payload.pop("schema_version")
+    key = key_factory()  # type: ignore[operator]
+    payload[key] = value
+    hash_calls = getattr(key, "hash_calls", 0)
+    result = _verify(payload)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert result.outcome is OperatorApprovalIntentVerificationOutcome.INVALID
+    assert result.reason_codes == ("approval_intent_unknown_field",)
+    assert "POISON_INTENT_KEY" not in combined
+    assert "RuntimeError" not in combined
+    assert "Traceback" not in combined
+    assert getattr(key, "hash_calls", 0) == hash_calls
+
+
+def test_non_string_key_only_dict_unknown_field() -> None:
+    result = _verify({1: "schema_version"})
+    assert result.reason_codes == ("approval_intent_unknown_field",)
+
+
+def test_dict_mutation_runtime_error_fail_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = _valid_intent_payload()
+
+    class _MutatingDict(dict):
+        def items(self):  # type: ignore[override]
+            raise RuntimeError("POISON_INTENT_MUTATION")
+
+    result = _verify(_MutatingDict(payload))
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert result.reason_codes == ("approval_intent_not_object",)
+    assert "POISON_INTENT_MUTATION" not in combined
+    assert "Traceback" not in combined
+
+
+# --- RTM-7c.4q detached payload snapshot ---
+
+
+def test_snapshot_isolates_caller_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import composition.operator_approval_intent_verifier as verifier_mod
+
+    original = _valid_intent_payload()
+    caller = dict(original)
+    real_snap = verifier_mod._snapshot_operator_approval_intent_payload
+
+    def _spy_snap(payload: object) -> tuple[dict[str, object] | None, str | None]:
+        detached, reason = real_snap(payload)
+        if type(payload) is dict:
+            payload.clear()
+            payload["mutated_after_snapshot"] = True
+        return detached, reason
+
+    monkeypatch.setattr(verifier_mod, "_snapshot_operator_approval_intent_payload", _spy_snap)
+    result = _verify(caller)
+    assert result.outcome is OperatorApprovalIntentVerificationOutcome.VALID
+    assert result.approval_intent_sha256 == original["approval_intent_sha256"]
+    assert "mutated_after_snapshot" in caller
+
+
+def test_snapshot_isolates_caller_key_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import composition.operator_approval_intent_verifier as verifier_mod
+
+    original = _valid_intent_payload()
+    caller = dict(original)
+    real_snap = verifier_mod._snapshot_operator_approval_intent_payload
+
+    def _spy_snap(payload: object) -> tuple[dict[str, object] | None, str | None]:
+        detached, reason = real_snap(payload)
+        if type(payload) is dict:
+            payload["schema_version"] = 99
+            payload["evidence_sha256"] = "f" * 64
+        return detached, reason
+
+    monkeypatch.setattr(verifier_mod, "_snapshot_operator_approval_intent_payload", _spy_snap)
+    result = _verify(caller)
+    assert result.outcome is OperatorApprovalIntentVerificationOutcome.VALID
+    assert result.schema_version == original["schema_version"]
+
+
+def test_snapshot_helper_exact_key_type_guard() -> None:
+    import composition.operator_approval_intent_verifier as verifier_mod
+
+    payload = _valid_intent_payload()
+    value = payload.pop("market")
+    payload[_KeySub("market")] = value
+    detached, reason = verifier_mod._snapshot_operator_approval_intent_payload(payload)
+    assert detached is None
+    assert reason == "approval_intent_unknown_field"
+
+
+def test_verifier_source_guard_no_unsafe_payload_access() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "operator_approval_intent_verifier.py"
+    ).read_text(encoding="utf-8")
+    verify_body = source.split("def verify_operator_approval_intent_payload", 1)[1]
+    verify_body = verify_body.split("\ndef _snapshot_operator_approval_intent_payload", 1)[0]
+    assert "set(payload.keys())" not in verify_body
+    assert 'payload["' not in verify_body
+    assert "type(key) is not str" in source
+    assert "_snapshot_operator_approval_intent_payload" in source
+
+
+def test_is_exact_hex64_helper_in_intent_module() -> None:
+    from composition.operator_approval_intent import _is_exact_hex64
+
+    assert _is_exact_hex64("a" * 64) is True
+    assert _is_exact_hex64(_StrSub("a" * 64)) is False
+    assert _is_exact_hex64("A" * 64) is False

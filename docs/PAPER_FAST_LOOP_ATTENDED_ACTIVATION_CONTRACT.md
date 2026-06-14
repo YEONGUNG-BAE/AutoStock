@@ -156,6 +156,8 @@ FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption/identity/
 **RTM-7c.4q** adds standalone stdin-only intent verification
 (`verify_operator_approval_intent_payload` + `--verify-operator-approval-intent`) — VALID means
 schema/semantic/hash consistency only (not authentication/consumption/freshness/activation).
+**RTM-7c.4q closure:** exact built-in hex64 digests (str subclass rejected); detached payload
+snapshot before schema/semantic/hash (caller mutation after snapshot cannot change verdict).
 Approval consumption and activation caller remain **OPEN**.
 
 ## Orphan sidecar observation limit

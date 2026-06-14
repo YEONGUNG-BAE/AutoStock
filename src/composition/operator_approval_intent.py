@@ -35,6 +35,12 @@ from composition.activation_candidate_evidence import (
     validate_activation_candidate_evidence_scalars,
 )
 from composition.precheck_receipt_schema import is_hex64, market_valid, symbol_valid
+
+
+def _is_exact_hex64(value: object) -> bool:
+    """Exact built-in lowercase hex64 string — str subclass 거부."""
+
+    return type(value) is str and is_hex64(value)
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
     ActivationCandidateFreshnessPreflightResult,
@@ -380,7 +386,7 @@ def validate_operator_approval_intent_scalars(
     if evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
         return None
 
-    if not is_hex64(evidence_sha256):
+    if not _is_exact_hex64(evidence_sha256):
         return None
 
     if not market_valid(market):
@@ -407,7 +413,7 @@ def validate_operator_approval_intent_scalars(
     if runtime_activation_outcome != "no_go":
         return None
 
-    if not is_hex64(approval_intent_sha256):
+    if not _is_exact_hex64(approval_intent_sha256):
         return None
 
     return ValidatedOperatorApprovalIntentScalars(

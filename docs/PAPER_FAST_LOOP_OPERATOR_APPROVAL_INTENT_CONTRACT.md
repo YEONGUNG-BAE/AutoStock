@@ -263,6 +263,12 @@ standalone verifier `verify_operator_approval_intent_payload` plus CLI mode
 authentication/consumption/activation). See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md`.
 
+**RTM-7c.4q exact digest + detached snapshot closure:** Digest fields (`evidence_sha256`,
+`approval_intent_sha256`) require exact built-in lowercase hex64 strings (`_is_exact_hex64` — str
+subclass rejected). Verifier snapshots caller dict once via `tuple(items())` into a detached
+built-in dict; exact built-in string keys only; caller mutation after snapshot cannot change
+verdict; malformed custom keys fail closed without exception escape.
+
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
 evidence digest fields only.
 

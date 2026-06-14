@@ -75,6 +75,32 @@ approval_intent_sha256                 = exact built-in str, lowercase hex64
 
 `bool` as `int` is rejected. String/int/bool subclasses and custom equality objects are rejected.
 
+**RTM-7c.4q exact digest closure:** `evidence_sha256` and `approval_intent_sha256` require
+`type(value) is str` **and** lowercase hex64 via shared `_is_exact_hex64` — str subclasses with
+matching content are rejected (`isinstance(value, str)` alone is insufficient).
+
+## Detached payload snapshot (RTM-7c.4q closure)
+
+On verifier entry, caller-owned dict is observed **once** via `tuple(payload.items())` and copied
+into a detached built-in dict with exact built-in string keys only:
+
+```text
+1. type(payload) is dict          (exact built-in dict — subclass → not_object)
+2. tuple(payload.items())         (single observation; RuntimeError/KeyError → unknown_field)
+3. type(key) is str for each key  (before any set/hash membership on keys)
+4. key in canonical field set
+5. copy values into new built-in dict
+6. all subsequent schema/semantic/hash reads use detached dict only
+```
+
+- Non-exact / non-string / unknown key → `approval_intent_unknown_field` (before missing-field)
+- Missing canonical key → `approval_intent_missing_field`
+- Caller mutation after snapshot cannot change verdict (point-in-time snapshot; not a concurrent
+  atomicity guarantee)
+- Malformed custom key objects fail closed — no raw exception escape; key `__hash__`/`__eq__`
+  hooks are not invoked for non-exact keys (type guard precedes membership checks)
+- `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised; broad `BaseException` catch forbidden
+
 ## Canonical hash verification
 
 Hash payload reuses `operator_approval_intent_hash_payload` (same 12 fields as builder; excludes
