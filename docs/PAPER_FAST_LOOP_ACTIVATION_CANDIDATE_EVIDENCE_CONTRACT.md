@@ -101,8 +101,18 @@ runtime_activation_outcome
 ```
 
 The constant NO-GO posture fields are part of the digest, so a tampered posture changes the
-hash. Independent recomputation: take `asdict(evidence)`, drop `evidence_sha256`, and
+hash. Independent recomputation: use `activation_candidate_evidence_hash_payload(...)` with
+the validated scalars (or `asdict(evidence)` minus `evidence_sha256` in tests only) →
 `payload_sha256(...)` — the result equals the stored digest.
+
+### Shared semantic validator (RTM-7c.4o)
+
+`validate_activation_candidate_evidence_scalars` / `validate_activation_candidate_evidence_object`
+are the single-source strict schema-v2 contract for detached evidence scalars. They validate
+exact types, PASS/FRESH outcomes, observation flags, age bounds, receipt hashes, constant
+NO-GO posture, and independent hash parity. Hash equality alone is insufficient — semantically
+invalid evidence with a recomputed matching hash still fails closed. The approval-intent builder
+reuses this helper; production validation does not use `asdict`/`deepcopy` on caller evidence.
 
 ### Fresh machine-proof binding (`fresh_precheck_receipt_sha256`)
 
@@ -372,9 +382,10 @@ writers_stopped_manual_confirmation_required = true
 ## Downstream: Operator approval intent (RTM-7c.4o)
 
 A future approval consumer may reference the `evidence_sha256` produced here. RTM-7c.4o adds
-`build_operator_approval_intent`, which binds one CREATED evidence digest (schema v2, hash
-recomputation match) plus three manual Operator declarations and a caller `declared_at`. Intent
-is **not** evidence, approval consumption, identity, or activation authorization. See
+`build_operator_approval_intent`, which binds one CREATED evidence digest that must satisfy the
+full schema-v2 semantic contract via `validate_activation_candidate_evidence_scalars` (matching
+hash alone is insufficient) plus three manual Operator declarations and a caller `declared_at`.
+Intent is **not** evidence, approval consumption, identity, or activation authorization. See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
 ## Related contracts

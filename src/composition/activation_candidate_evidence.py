@@ -81,8 +81,12 @@ __all__ = [
     "ActivationCandidateEvidenceResult",
     "FreshnessQualifiedEvidenceOutcome",
     "FreshnessQualifiedEvidenceResult",
+    "ValidatedActivationCandidateEvidence",
+    "activation_candidate_evidence_hash_payload",
     "build_activation_candidate_evidence",
     "freshness_qualify_and_build_candidate_evidence",
+    "validate_activation_candidate_evidence_object",
+    "validate_activation_candidate_evidence_scalars",
 ]
 
 ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION = 2
@@ -130,6 +134,33 @@ class ActivationCandidateEvidenceResult:
     outcome: ActivationCandidateEvidenceOutcome
     reasons: tuple[str, ...]
     evidence: ActivationCandidateEvidence | None
+
+
+@dataclass(frozen=True)
+class ValidatedActivationCandidateEvidence:
+    """Strict schema-v2 evidence scalars after semantic validation and hash parity.
+
+    Returned by :func:`validate_activation_candidate_evidence_scalars` /
+    :func:`validate_activation_candidate_evidence_object` so downstream consumers
+    (approval-intent binding, future approval lanes) reuse one contract without
+    re-reading caller-owned evidence objects."""
+
+    schema_version: int
+    evaluated_at: str
+    receipt_sha256: str
+    fresh_precheck_receipt_sha256: str
+    market: str
+    symbol: str
+    max_age_microseconds: int
+    receipt_age_microseconds: int
+    final_preflight_outcome: str
+    freshness_outcome: str
+    fresh_precheck_executed: bool
+    receipt_age_evaluated: bool
+    freshness_policy_evaluated: bool
+    activation_authorized: bool
+    runtime_activation_outcome: str
+    evidence_sha256: str
 
 
 class FreshnessQualifiedEvidenceOutcome(StrEnum):
@@ -447,6 +478,178 @@ def freshness_qualify_and_build_candidate_evidence(
     )
 
 
+def activation_candidate_evidence_hash_payload(
+    *,
+    evaluated_at: str,
+    receipt_sha256: str,
+    fresh_precheck_receipt_sha256: str,
+    market: str,
+    symbol: str,
+    max_age_microseconds: int,
+    receipt_age_microseconds: int,
+    final_preflight_outcome: str,
+    freshness_outcome: str,
+    fresh_precheck_executed: bool,
+    receipt_age_evaluated: bool,
+    freshness_policy_evaluated: bool,
+) -> dict[str, object]:
+    """Public canonical hash payload — every evidence field except ``evidence_sha256``.
+
+    Single source for builder digest recomputation and approval-intent semantic validation."""
+
+    return _evidence_hash_payload(
+        evaluated_at=evaluated_at,
+        receipt_sha256=receipt_sha256,
+        fresh_precheck_receipt_sha256=fresh_precheck_receipt_sha256,
+        market=market,
+        symbol=symbol,
+        max_age_microseconds=max_age_microseconds,
+        receipt_age_microseconds=receipt_age_microseconds,
+        final_preflight_outcome=final_preflight_outcome,
+        freshness_outcome=freshness_outcome,
+        fresh_precheck_executed=fresh_precheck_executed,
+        receipt_age_evaluated=receipt_age_evaluated,
+        freshness_policy_evaluated=freshness_policy_evaluated,
+    )
+
+
+def validate_activation_candidate_evidence_object(
+    evidence: object,
+) -> ValidatedActivationCandidateEvidence | None:
+    """Validate exact ``ActivationCandidateEvidence`` with strict schema-v2 semantics.
+
+    Reads each caller-owned field once into locals, then delegates to
+    :func:`validate_activation_candidate_evidence_scalars`. Malformed or deleted fields
+    fail closed as ``None`` (no raw value/exception escapes)."""
+
+    if type(evidence) is not ActivationCandidateEvidence:
+        return None
+    try:
+        return validate_activation_candidate_evidence_scalars(
+            schema_version=evidence.schema_version,
+            evaluated_at=evidence.evaluated_at,
+            receipt_sha256=evidence.receipt_sha256,
+            fresh_precheck_receipt_sha256=evidence.fresh_precheck_receipt_sha256,
+            market=evidence.market,
+            symbol=evidence.symbol,
+            max_age_microseconds=evidence.max_age_microseconds,
+            receipt_age_microseconds=evidence.receipt_age_microseconds,
+            final_preflight_outcome=evidence.final_preflight_outcome,
+            freshness_outcome=evidence.freshness_outcome,
+            fresh_precheck_executed=evidence.fresh_precheck_executed,
+            receipt_age_evaluated=evidence.receipt_age_evaluated,
+            freshness_policy_evaluated=evidence.freshness_policy_evaluated,
+            activation_authorized=evidence.activation_authorized,
+            runtime_activation_outcome=evidence.runtime_activation_outcome,
+            evidence_sha256=evidence.evidence_sha256,
+        )
+    except AttributeError:
+        return None
+
+
+def validate_activation_candidate_evidence_scalars(
+    *,
+    schema_version: object,
+    evaluated_at: object,
+    receipt_sha256: object,
+    fresh_precheck_receipt_sha256: object,
+    market: object,
+    symbol: object,
+    max_age_microseconds: object,
+    receipt_age_microseconds: object,
+    final_preflight_outcome: object,
+    freshness_outcome: object,
+    fresh_precheck_executed: object,
+    receipt_age_evaluated: object,
+    freshness_policy_evaluated: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    evidence_sha256: object,
+) -> ValidatedActivationCandidateEvidence | None:
+    """Strict schema-v2 semantic contract over detached evidence scalars.
+
+    Hash equality alone is insufficient — every field must match the exact PASS/FRESH
+    evidence contract (types, outcomes, observation flags, age bounds, receipt hashes,
+    constant NO-GO posture). On success returns validated locals with an independently
+    recomputed ``evidence_sha256`` matching the supplied digest."""
+
+    if (
+        type(schema_version) is not int
+        or isinstance(schema_version, bool)
+        or schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION
+    ):
+        return None
+    if _parse_aware(evaluated_at) is None:
+        return None
+    if not _is_lower_hex64(receipt_sha256):
+        return None
+    if not _is_lower_hex64(fresh_precheck_receipt_sha256):
+        return None
+    if not _is_lower_hex64(evidence_sha256):
+        return None
+    if type(market) is not str or not market_valid(market):
+        return None
+    if type(symbol) is not str or not symbol_valid(symbol):
+        return None
+    if not _is_nonnegative_int(max_age_microseconds):
+        return None
+    if not _is_nonnegative_int(receipt_age_microseconds):
+        return None
+    if receipt_age_microseconds > max_age_microseconds:
+        return None
+    if type(final_preflight_outcome) is not str or final_preflight_outcome != "pass":
+        return None
+    if type(freshness_outcome) is not str or freshness_outcome != "fresh":
+        return None
+    if not _exact_true_bool(fresh_precheck_executed):
+        return None
+    if not _exact_true_bool(receipt_age_evaluated):
+        return None
+    if not _exact_true_bool(freshness_policy_evaluated):
+        return None
+    if not _exact_false_bool(activation_authorized):
+        return None
+    if type(runtime_activation_outcome) is not str or runtime_activation_outcome != "no_go":
+        return None
+
+    hash_payload = activation_candidate_evidence_hash_payload(
+        evaluated_at=evaluated_at,
+        receipt_sha256=receipt_sha256,
+        fresh_precheck_receipt_sha256=fresh_precheck_receipt_sha256,
+        market=market,
+        symbol=symbol,
+        max_age_microseconds=max_age_microseconds,
+        receipt_age_microseconds=receipt_age_microseconds,
+        final_preflight_outcome=final_preflight_outcome,
+        freshness_outcome=freshness_outcome,
+        fresh_precheck_executed=fresh_precheck_executed,
+        receipt_age_evaluated=receipt_age_evaluated,
+        freshness_policy_evaluated=freshness_policy_evaluated,
+    )
+    recomputed = payload_sha256(hash_payload)
+    if recomputed != evidence_sha256:
+        return None
+
+    return ValidatedActivationCandidateEvidence(
+        schema_version=schema_version,
+        evaluated_at=evaluated_at,
+        receipt_sha256=receipt_sha256,
+        fresh_precheck_receipt_sha256=fresh_precheck_receipt_sha256,
+        market=market,
+        symbol=symbol,
+        max_age_microseconds=max_age_microseconds,
+        receipt_age_microseconds=receipt_age_microseconds,
+        final_preflight_outcome=final_preflight_outcome,
+        freshness_outcome=freshness_outcome,
+        fresh_precheck_executed=fresh_precheck_executed,
+        receipt_age_evaluated=receipt_age_evaluated,
+        freshness_policy_evaluated=freshness_policy_evaluated,
+        activation_authorized=activation_authorized,
+        runtime_activation_outcome=runtime_activation_outcome,
+        evidence_sha256=recomputed,
+    )
+
+
 def _evidence_hash_payload(
     *,
     evaluated_at: str,
@@ -709,6 +912,18 @@ def _is_lower_hex64(value: object) -> bool:
 
 def _is_nonnegative_int(value: object) -> bool:
     return type(value) is int and not isinstance(value, bool) and value >= 0
+
+
+def _exact_true_bool(value: object) -> bool:
+    """Exact built-in ``True`` only — rejects ``False``/``0``/``1``/``None``/string/subclass."""
+
+    return type(value) is bool and value is True
+
+
+def _exact_false_bool(value: object) -> bool:
+    """Exact built-in ``False`` only — rejects ``True``/``0``/``1``/``None``/string/subclass."""
+
+    return type(value) is bool and value is False
 
 
 def _invalid() -> ActivationCandidateEvidenceResult:

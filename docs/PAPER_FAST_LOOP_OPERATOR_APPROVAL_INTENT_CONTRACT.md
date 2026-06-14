@@ -51,12 +51,25 @@ type(evidence_result) is ActivationCandidateEvidenceResult
 evidence_result.outcome           = CREATED
 evidence_result.reasons           = ()
 type(evidence) is ActivationCandidateEvidence
-evidence.schema_version           = ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION (2)
-evidence.evidence_sha256          = lowercase hex64 (independent recomputation matches)
-evidence.market                   = KR
-evidence.symbol                   = ASCII [0-9]{6}
-evidence.activation_authorized    = false
-evidence.runtime_activation_outcome = no_go
+evidence passes full schema-v2 semantic contract via validate_activation_candidate_evidence_scalars
+  (matching evidence_sha256 alone is insufficient)
+  schema_version                    = exact built-in int == 2
+  evaluated_at                      = exact built-in str, timezone-aware ISO
+  receipt_sha256                    = lowercase hex64
+  fresh_precheck_receipt_sha256     = lowercase hex64
+  evidence_sha256                   = lowercase hex64 (independent recomputation matches)
+  market                            = KR
+  symbol                            = ASCII [0-9]{6}
+  max_age_microseconds              = exact non-negative built-in int
+  receipt_age_microseconds          = exact non-negative built-in int
+  receipt_age_microseconds          <= max_age_microseconds
+  final_preflight_outcome           = "pass"
+  freshness_outcome                 = "fresh"
+  fresh_precheck_executed           = exact True
+  receipt_age_evaluated             = exact True
+  freshness_policy_evaluated        = exact True
+  activation_authorized             = exact False
+  runtime_activation_outcome        = "no_go"
 declared_at                       = exact built-in tz-aware datetime
 declared_at                       >= evidence.evaluated_at (strict parse)
 all three manual confirmations    = exact True
@@ -64,8 +77,8 @@ all three manual confirmations    = exact True
 
 Combined `NO_GO` → `NOT_ELIGIBLE` (`approval_intent_not_eligible`). A contradictory combined
 `PASS` (non-empty reasons, missing/`None`/wrong-type evidence result, evidence not `CREATED`,
-malformed evidence, hash mismatch, invalid declarations, or invalid `declared_at`) → `INVALID`
-(`approval_intent_invalid_input`).
+semantically invalid evidence even with matching hash, hash mismatch, invalid declarations, or
+invalid `declared_at`) → `INVALID` (`approval_intent_invalid_input`).
 
 ## Intent model
 
@@ -141,6 +154,29 @@ Pure function constraints:
 The builder reads each caller-owned object once into locals and reuses those locals for
 validation and the hash payload. Malformed or deleted fields fail closed via `AttributeError`
 catch → `INVALID`.
+
+Production validation does **not** use `dataclasses.asdict` or `copy.deepcopy` on
+caller-owned evidence. Caller-defined `__deepcopy__` hooks are never invoked. After the
+single-read snapshot, strict semantic validation runs via the shared
+`validate_activation_candidate_evidence_scalars` helper (same contract as
+`validate_activation_candidate_evidence_object` in the evidence module). Validation reuses
+the detached locals for canonical hash recomputation — the caller evidence object is not
+re-read afterwards.
+
+## Evidence semantic contract (RTM-7c.4o closure)
+
+Matching `evidence_sha256` alone is **insufficient**. Approval intent requires the full
+evidence schema v2 semantic contract:
+
+- Both receipt hashes must be lowercase hex64
+- `final_preflight_outcome` must be exactly `"pass"` and `freshness_outcome` exactly `"fresh"`
+- All three observation flags (`fresh_precheck_executed`, `receipt_age_evaluated`,
+  `freshness_policy_evaluated`) must be exact built-in `True`
+- Receipt age must not exceed explicit max-age
+- Rejects bool/float/string schema versions, ages, flags, unknown outcomes, and enum/object
+  substitutes for expected exact strings
+
+Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
 
 ## Integration scope (this lane)
 

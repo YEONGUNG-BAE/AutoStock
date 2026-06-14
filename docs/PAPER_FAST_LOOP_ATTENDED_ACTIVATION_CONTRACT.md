@@ -135,12 +135,14 @@ qualified PASS can never advance to approval/activation without a digest. `NO_GO
 digest. Evidence is **not** authenticity, signing, approval, writer-stop, an activation token,
 or activation authorization, is never persisted, and the posture stays constant NO-GO.
 **RTM-7c.4o** adds API-only **Operator approval intent**
-(`build_operator_approval_intent`): a combined PASS with CREATED evidence (schema v2, matching
-`evidence_sha256`) plus three manual Operator declarations and a caller `declared_at` freeze into
-one immutable `approval_intent_sha256`. Intent is **not** identity, signature, writer-stop machine
-proof, approval consumption, replay prevention, or activation authorization; it is never
-persisted and is not wired into CLI in this lane. Approval consumption and activation caller
-remain **OPEN**.
+(`build_operator_approval_intent`): a combined PASS with CREATED evidence that satisfies the
+full schema-v2 semantic contract (matching hash alone is insufficient; both receipt hashes
+lowercase hex64; PASS/FRESH outcomes; all observation flags exact `True`; receipt age
+`<= max_age`) plus three manual Operator declarations and a caller `declared_at` freeze into
+one immutable `approval_intent_sha256`. Production validation does not use `asdict`/`deepcopy`
+on caller evidence. Intent is **not** identity, signature, writer-stop machine proof, approval
+consumption, replay prevention, or activation authorization; it is never persisted and is not
+wired into CLI in this lane. Approval consumption and activation caller remain **OPEN**.
 
 ## Orphan sidecar observation limit
 

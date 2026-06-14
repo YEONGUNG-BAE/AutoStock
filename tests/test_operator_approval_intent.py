@@ -28,8 +28,11 @@ from composition.activation_candidate_evidence import (
     ActivationCandidateEvidenceResult,
     FreshnessQualifiedEvidenceOutcome,
     FreshnessQualifiedEvidenceResult,
+    activation_candidate_evidence_hash_payload,
     build_activation_candidate_evidence,
     freshness_qualify_and_build_candidate_evidence,
+    validate_activation_candidate_evidence_object,
+    validate_activation_candidate_evidence_scalars,
 )
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
@@ -116,6 +119,55 @@ def _intent_hash_from(intent: Any) -> str:
     return payload_sha256(payload)
 
 
+def _evidence_hash_from_fields(**fields: Any) -> str:
+    """Independent evidence hash recomputation for test fixtures only."""
+
+    payload = activation_candidate_evidence_hash_payload(
+        evaluated_at=fields["evaluated_at"],
+        receipt_sha256=fields["receipt_sha256"],
+        fresh_precheck_receipt_sha256=fields["fresh_precheck_receipt_sha256"],
+        market=fields["market"],
+        symbol=fields["symbol"],
+        max_age_microseconds=fields["max_age_microseconds"],
+        receipt_age_microseconds=fields["receipt_age_microseconds"],
+        final_preflight_outcome=fields["final_preflight_outcome"],
+        freshness_outcome=fields["freshness_outcome"],
+        fresh_precheck_executed=fields["fresh_precheck_executed"],
+        receipt_age_evaluated=fields["receipt_age_evaluated"],
+        freshness_policy_evaluated=fields["freshness_policy_evaluated"],
+    )
+    return payload_sha256(payload)
+
+
+def _evidence_with_matching_hash(**overrides: Any) -> ActivationCandidateEvidence:
+    """Tamper evidence fields then recompute ``evidence_sha256`` for semantic-invalid matrix."""
+
+    ev = ev_helper._build().evidence
+    assert ev is not None
+    fields = asdict(ev)
+    fields.update(overrides)
+    hash_fields = {k: fields[k] for k in fields if k != "evidence_sha256"}
+    try:
+        new_hash = _evidence_hash_from_fields(**hash_fields)
+    except (TypeError, ValueError):
+        # Non-JSON-serializable tamper (e.g. arbitrary object outcomes) — hash parity is moot.
+        new_hash = "c" * 64
+    fields["evidence_sha256"] = new_hash
+    return ActivationCandidateEvidence(**fields)
+
+
+def _intent_from_evidence(
+    ev: ActivationCandidateEvidence,
+    *,
+    declared_at: datetime = _DECL_AT,
+    **kwargs: Any,
+) -> Any:
+    er = ActivationCandidateEvidenceResult(
+        outcome=ActivationCandidateEvidenceOutcome.CREATED, reasons=(), evidence=ev
+    )
+    return _build_intent(_combined_pass(evidence_result=er), declared_at=declared_at, **kwargs)
+
+
 # --- eligibility: CREATED ---
 
 
@@ -134,8 +186,8 @@ def test_combined_pass_created_evidence_creates_intent() -> None:
     assert intent.live_orders_forbidden_confirmed is True
     assert intent.activation_authorized is False
     assert intent.runtime_activation_outcome == "no_go"
-    assert intent_mod._is_lower_hex64(intent.approval_intent_sha256)
-    assert intent_mod._is_lower_hex64(intent.evidence_sha256)
+    assert evidence_mod._is_lower_hex64(intent.approval_intent_sha256)
+    assert evidence_mod._is_lower_hex64(intent.evidence_sha256)
 
 
 def test_real_seeded_combined_pass_creates_intent(tmp_path: Path) -> None:
@@ -541,6 +593,7 @@ def test_builder_uses_single_read_locals_for_combined_and_evidence() -> None:
         "ev_evaluated_at = evidence.evaluated_at",
     ):
         assert snippet in source
+    assert "asdict(evidence)" not in source
 
 
 # --- isolation ---
@@ -615,3 +668,261 @@ def test_invalid_reason_is_stable_without_raw_hash() -> None:
     assert result.reasons == ("approval_intent_invalid_input",)
     assert _SHA not in result.reasons[0]
     assert "b" * 64 not in result.reasons[0]
+
+
+# --- RTM-7c.4o semantic-parity closure: matching hash alone is insufficient ---
+
+
+def test_p1_semantic_invalid_matching_hash_is_invalid() -> None:
+    ev = _evidence_with_matching_hash(
+        receipt_sha256="not-a-hash",
+        fresh_precheck_receipt_sha256="also-not-a-hash",
+        max_age_microseconds=0,
+        receipt_age_microseconds=1,
+        final_preflight_outcome="no_go",
+        freshness_outcome="stale",
+        fresh_precheck_executed=False,
+        receipt_age_evaluated=False,
+        freshness_policy_evaluated=False,
+    )
+    result = _intent_from_evidence(ev)
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    assert result.reasons == ("approval_intent_invalid_input",)
+    assert result.intent is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"receipt_sha256": "not-a-hash"}, id="original_receipt_invalid"),
+        pytest.param({"fresh_precheck_receipt_sha256": "also-not-a-hash"}, id="fresh_receipt_invalid"),
+        pytest.param({"schema_version": True}, id="schema_bool"),
+        pytest.param({"schema_version": 2.0}, id="schema_float"),
+        pytest.param({"schema_version": "2"}, id="schema_string"),
+        pytest.param({"max_age_microseconds": True}, id="max_age_bool"),
+        pytest.param({"max_age_microseconds": 1.0}, id="max_age_float"),
+        pytest.param({"max_age_microseconds": "300000000"}, id="max_age_string"),
+        pytest.param({"max_age_microseconds": -1}, id="max_age_negative"),
+        pytest.param({"receipt_age_microseconds": True}, id="receipt_age_bool"),
+        pytest.param({"receipt_age_microseconds": 1.0}, id="receipt_age_float"),
+        pytest.param({"receipt_age_microseconds": "1000"}, id="receipt_age_string"),
+        pytest.param({"receipt_age_microseconds": -1}, id="receipt_age_negative"),
+        pytest.param({"max_age_microseconds": 0, "receipt_age_microseconds": 1}, id="age_above_max"),
+        pytest.param({"final_preflight_outcome": "no_go"}, id="final_outcome_no_go"),
+        pytest.param({"final_preflight_outcome": "unknown"}, id="final_outcome_unknown"),
+        pytest.param({"final_preflight_outcome": object()}, id="final_outcome_object"),
+        pytest.param({"freshness_outcome": "stale"}, id="freshness_outcome_stale"),
+        pytest.param({"freshness_outcome": "no_go"}, id="freshness_outcome_no_go"),
+        pytest.param({"freshness_outcome": "unknown"}, id="freshness_outcome_unknown"),
+        pytest.param({"freshness_outcome": object()}, id="freshness_outcome_object"),
+        pytest.param({"fresh_precheck_executed": False}, id="fresh_executed_false"),
+        pytest.param({"fresh_precheck_executed": 0}, id="fresh_executed_zero"),
+        pytest.param({"fresh_precheck_executed": 1}, id="fresh_executed_one"),
+        pytest.param({"fresh_precheck_executed": None}, id="fresh_executed_none"),
+        pytest.param({"fresh_precheck_executed": "true"}, id="fresh_executed_string"),
+        pytest.param({"receipt_age_evaluated": False}, id="age_evaluated_false"),
+        pytest.param({"receipt_age_evaluated": 0}, id="age_evaluated_zero"),
+        pytest.param({"freshness_policy_evaluated": False}, id="policy_evaluated_false"),
+        pytest.param({"freshness_policy_evaluated": 1}, id="policy_evaluated_one"),
+        pytest.param({"activation_authorized": True}, id="activation_true"),
+        pytest.param({"runtime_activation_outcome": "go"}, id="runtime_outcome_go"),
+    ],
+)
+def test_semantic_invalid_matching_hash_matrix(overrides: dict[str, Any]) -> None:
+    ev = _evidence_with_matching_hash(**overrides)
+    result = _intent_from_evidence(ev)
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    assert result.reasons == ("approval_intent_invalid_input",)
+    assert result.intent is None
+
+
+def test_valid_evidence_independent_hash_recomputation_matches() -> None:
+    ev = ev_helper._build().evidence
+    assert ev is not None
+    fields = asdict(ev)
+    fields.pop("evidence_sha256")
+    assert _evidence_hash_from_fields(**fields) == ev.evidence_sha256
+    validated = validate_activation_candidate_evidence_object(ev)
+    assert validated is not None
+    assert validated.evidence_sha256 == ev.evidence_sha256
+
+
+def test_shared_validator_accepts_real_builder_output() -> None:
+    ev = ev_helper._build().evidence
+    assert ev is not None
+    assert validate_activation_candidate_evidence_object(ev) is not None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(object(), id="arbitrary_object"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_shared_validator_rejects_wrong_object(bad: object) -> None:
+    assert validate_activation_candidate_evidence_object(bad) is None
+
+
+def test_shared_validator_rejects_evidence_subclass() -> None:
+    ev = ev_helper._build().evidence
+    assert ev is not None
+
+    class _Sub(ActivationCandidateEvidence):
+        pass
+
+    sub = _Sub(**asdict(ev))
+    assert validate_activation_candidate_evidence_object(sub) is None
+
+
+def test_shared_validator_rejects_deleted_field() -> None:
+    ev = ev_helper._build().evidence
+    assert ev is not None
+
+    class _Broken:
+        schema_version = ev.schema_version
+        evaluated_at = ev.evaluated_at
+
+    assert validate_activation_candidate_evidence_object(_Broken()) is None
+
+
+# --- malformed / custom object / deepcopy hook matrix ---
+
+
+class _PoisonDeepcopy:
+    def __deepcopy__(self, memo: dict[int, object]) -> object:
+        raise RuntimeError("POISON_EVIDENCE_DEEPCOPY")
+
+
+class _DeepcopyReturnsSelf:
+    def __deepcopy__(self, memo: dict[int, object]) -> "_DeepcopyReturnsSelf":
+        return self
+
+
+class _DeepcopyReturnsOther:
+    def __deepcopy__(self, memo: dict[int, object]) -> int:
+        return 42
+
+
+class _Cyclic:
+    def __init__(self) -> None:
+        self.ref: _Cyclic | None = self
+
+
+class _VeryDeep:
+    def __init__(self, depth: int) -> None:
+        self.child = _VeryDeep(depth - 1) if depth > 0 else None
+
+
+@pytest.mark.parametrize(
+    "scalar",
+    [
+        pytest.param(_PoisonDeepcopy(), id="poison_deepcopy"),
+        pytest.param(_DeepcopyReturnsSelf(), id="deepcopy_returns_self"),
+        pytest.param(_DeepcopyReturnsOther(), id="deepcopy_returns_other"),
+        pytest.param([1, 2, 3], id="list_scalar"),
+        pytest.param({"k": "v"}, id="dict_scalar"),
+        pytest.param(_Cyclic(), id="cyclic_object"),
+        pytest.param(_VeryDeep(50), id="very_deep_object"),
+    ],
+)
+def test_custom_scalar_on_max_age_is_invalid_without_exception(
+    scalar: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ev = ev_helper._build().evidence
+    assert ev is not None
+    tampered = replace(ev, max_age_microseconds=scalar)  # type: ignore[arg-type]
+    result = _intent_from_evidence(tampered)
+    captured = capsys.readouterr()
+    assert result.outcome is OperatorApprovalIntentOutcome.INVALID
+    assert result.reasons == ("approval_intent_invalid_input",)
+    assert result.intent is None
+    combined = captured.out + captured.err
+    for forbidden in (
+        "POISON_EVIDENCE_DEEPCOPY",
+        "RuntimeError",
+        "Traceback",
+        "/home/",
+        "KIS_",
+        "APP_KEY",
+        "APP_SECRET",
+    ):
+        assert forbidden not in combined
+
+
+def test_production_path_has_no_asdict_on_evidence() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "operator_approval_intent.py"
+    ).read_text(encoding="utf-8")
+    assert "asdict(evidence)" not in source
+    assert "from copy import" not in source
+    assert "deepcopy(" not in source
+    assert "from dataclasses import asdict" not in source
+
+
+def test_builder_single_read_evidence_field_snippets() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "operator_approval_intent.py"
+    ).read_text(encoding="utf-8")
+    for snippet in (
+        "ev_schema_version = evidence.schema_version",
+        "ev_evaluated_at = evidence.evaluated_at",
+        "ev_receipt_sha256 = evidence.receipt_sha256",
+        "ev_fresh_receipt_sha256 = evidence.fresh_precheck_receipt_sha256",
+        "market = evidence.market",
+        "symbol = evidence.symbol",
+        "ev_max_age = evidence.max_age_microseconds",
+        "ev_receipt_age = evidence.receipt_age_microseconds",
+        "ev_final_outcome = evidence.final_preflight_outcome",
+        "ev_freshness_outcome = evidence.freshness_outcome",
+        "ev_fresh_executed = evidence.fresh_precheck_executed",
+        "ev_age_evaluated = evidence.receipt_age_evaluated",
+        "ev_policy_evaluated = evidence.freshness_policy_evaluated",
+        "ev_activation = evidence.activation_authorized",
+        "ev_runtime = evidence.runtime_activation_outcome",
+        "evidence_sha256 = evidence.evidence_sha256",
+        "validate_activation_candidate_evidence_scalars(",
+    ):
+        assert snippet in source
+
+
+def test_validate_scalars_rejects_matching_hash_semantic_invalid() -> None:
+    ev = _evidence_with_matching_hash(
+        receipt_sha256="not-a-hash",
+        fresh_precheck_receipt_sha256="also-not-a-hash",
+        max_age_microseconds=0,
+        receipt_age_microseconds=1,
+        final_preflight_outcome="no_go",
+        freshness_outcome="stale",
+        fresh_precheck_executed=False,
+        receipt_age_evaluated=False,
+        freshness_policy_evaluated=False,
+    )
+    assert validate_activation_candidate_evidence_object(ev) is None
+    assert (
+        validate_activation_candidate_evidence_scalars(
+            schema_version=ev.schema_version,
+            evaluated_at=ev.evaluated_at,
+            receipt_sha256=ev.receipt_sha256,
+            fresh_precheck_receipt_sha256=ev.fresh_precheck_receipt_sha256,
+            market=ev.market,
+            symbol=ev.symbol,
+            max_age_microseconds=ev.max_age_microseconds,
+            receipt_age_microseconds=ev.receipt_age_microseconds,
+            final_preflight_outcome=ev.final_preflight_outcome,
+            freshness_outcome=ev.freshness_outcome,
+            fresh_precheck_executed=ev.fresh_precheck_executed,
+            receipt_age_evaluated=ev.receipt_age_evaluated,
+            freshness_policy_evaluated=ev.freshness_policy_evaluated,
+            activation_authorized=ev.activation_authorized,
+            runtime_activation_outcome=ev.runtime_activation_outcome,
+            evidence_sha256=ev.evidence_sha256,
+        )
+        is None
+    )

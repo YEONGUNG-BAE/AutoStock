@@ -9,32 +9,31 @@ machine proof, approval consumption, replay prevention, an activation token, or 
 activation authorization. The activation posture is a constant NO-GO on every code path.
 
 Intent is produced **only** for a combined ``PASS`` whose evidence is ``CREATED`` with a
-strict schema-v2 evidence contract and a recomputed matching ``evidence_sha256``. Combined
-``NO_GO`` is ``NOT_ELIGIBLE``; a contradictory combined ``PASS`` or malformed evidence is
-``INVALID``.
+strict schema-v2 evidence semantic contract (matching hash alone is insufficient) and a
+recomputed matching ``evidence_sha256``. Combined ``NO_GO`` is ``NOT_ELIGIBLE``; a
+contradictory combined ``PASS`` or malformed evidence is ``INVALID``.
 
 No clock read of its own (the caller passes ``declared_at``), no network/credential/broker
 access, no operational DB write, no filesystem/intent-file write, no persistence, and no
-receipt verifier / precheck / evaluator / evidence-builder re-invocation.
+receipt verifier / precheck / evaluator / evidence-builder re-invocation. Production validation
+does not serialize or deep-copy caller-owned evidence objects.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
 from composition.activation_candidate_evidence import (
-    ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
     ActivationCandidateEvidence,
     ActivationCandidateEvidenceOutcome,
     ActivationCandidateEvidenceResult,
     FreshnessQualifiedEvidenceOutcome,
     FreshnessQualifiedEvidenceResult,
+    validate_activation_candidate_evidence_scalars,
 )
 from composition.activation_candidate_final_preflight import final_preflight_now_is_invalid
-from composition.precheck_receipt_schema import market_valid, symbol_valid
 from decision.canonical_json import payload_sha256
 
 __all__ = [
@@ -49,8 +48,6 @@ __all__ = [
 OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION = 1
 
 APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE = "attended_paper_fast_loop_candidate"
-
-_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 class OperatorApprovalIntentOutcome(StrEnum):
@@ -146,32 +143,46 @@ def build_operator_approval_intent(
     if type(evidence) is not ActivationCandidateEvidence:
         return _invalid()
 
-    # Single-read snapshot of evidence scalars into locals; validation + hash reuse them.
+    # Single-read snapshot of every evidence scalar into locals; validation + hash reuse them.
     try:
         ev_schema_version = evidence.schema_version
         ev_evaluated_at = evidence.evaluated_at
-        evidence_sha256 = evidence.evidence_sha256
+        ev_receipt_sha256 = evidence.receipt_sha256
+        ev_fresh_receipt_sha256 = evidence.fresh_precheck_receipt_sha256
         market = evidence.market
         symbol = evidence.symbol
+        ev_max_age = evidence.max_age_microseconds
+        ev_receipt_age = evidence.receipt_age_microseconds
+        ev_final_outcome = evidence.final_preflight_outcome
+        ev_freshness_outcome = evidence.freshness_outcome
+        ev_fresh_executed = evidence.fresh_precheck_executed
+        ev_age_evaluated = evidence.receipt_age_evaluated
+        ev_policy_evaluated = evidence.freshness_policy_evaluated
         ev_activation = evidence.activation_authorized
         ev_runtime = evidence.runtime_activation_outcome
+        evidence_sha256 = evidence.evidence_sha256
     except AttributeError:
         return _invalid()
 
-    if ev_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
-        return _invalid()
-    if not _is_lower_hex64(evidence_sha256):
-        return _invalid()
-    if not market_valid(market) or not symbol_valid(symbol):
-        return _invalid()
-    if not _posture_ok(ev_activation, ev_runtime):
-        return _invalid()
-
-    evidence_payload = asdict(evidence)
-    stored_evidence_sha = evidence_payload.pop("evidence_sha256")
-    if stored_evidence_sha != evidence_sha256:
-        return _invalid()
-    if payload_sha256(evidence_payload) != evidence_sha256:
+    validated = validate_activation_candidate_evidence_scalars(
+        schema_version=ev_schema_version,
+        evaluated_at=ev_evaluated_at,
+        receipt_sha256=ev_receipt_sha256,
+        fresh_precheck_receipt_sha256=ev_fresh_receipt_sha256,
+        market=market,
+        symbol=symbol,
+        max_age_microseconds=ev_max_age,
+        receipt_age_microseconds=ev_receipt_age,
+        final_preflight_outcome=ev_final_outcome,
+        freshness_outcome=ev_freshness_outcome,
+        fresh_precheck_executed=ev_fresh_executed,
+        receipt_age_evaluated=ev_age_evaluated,
+        freshness_policy_evaluated=ev_policy_evaluated,
+        activation_authorized=ev_activation,
+        runtime_activation_outcome=ev_runtime,
+        evidence_sha256=evidence_sha256,
+    )
+    if validated is None:
         return _invalid()
 
     if not _exact_true_bool(operator_approval_declared):
@@ -185,7 +196,7 @@ def build_operator_approval_intent(
     if type(declared_at) is not datetime or final_preflight_now_is_invalid(declared_at):
         return _invalid()
 
-    evidence_evaluated = _parse_aware(ev_evaluated_at)
+    evidence_evaluated = _parse_aware(validated.evaluated_at)
     if evidence_evaluated is None:
         return _invalid()
     if declared_at < evidence_evaluated:
@@ -194,20 +205,20 @@ def build_operator_approval_intent(
     declared_at_iso = declared_at.isoformat()
     hash_payload = _intent_hash_payload(
         declared_at=declared_at_iso,
-        evidence_schema_version=ev_schema_version,
-        evidence_sha256=evidence_sha256,
-        market=market,
-        symbol=symbol,
+        evidence_schema_version=validated.schema_version,
+        evidence_sha256=validated.evidence_sha256,
+        market=validated.market,
+        symbol=validated.symbol,
     )
     approval_intent_sha256 = payload_sha256(hash_payload)
 
     intent = OperatorApprovalIntent(
         schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
         declared_at=declared_at_iso,
-        evidence_schema_version=ev_schema_version,
-        evidence_sha256=evidence_sha256,
-        market=market,
-        symbol=symbol,
+        evidence_schema_version=validated.schema_version,
+        evidence_sha256=validated.evidence_sha256,
+        market=validated.market,
+        symbol=validated.symbol,
         approval_scope=APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE,
         operator_approval_declared=True,
         writers_stopped_manually_confirmed=True,
@@ -255,10 +266,6 @@ def _exact_true_bool(value: object) -> bool:
     return type(value) is bool and value is True
 
 
-def _posture_ok(activation_authorized: object, runtime_activation_outcome: object) -> bool:
-    return activation_authorized is False and runtime_activation_outcome == "no_go"
-
-
 def _parse_aware(value: object) -> datetime | None:
     """Parse evidence ``evaluated_at`` into a timezone-aware datetime, else ``None``."""
 
@@ -277,10 +284,6 @@ def _parse_aware(value: object) -> datetime | None:
     if offset is None:
         return None
     return parsed
-
-
-def _is_lower_hex64(value: object) -> bool:
-    return type(value) is str and _HEX64.fullmatch(value) is not None
 
 
 def _invalid() -> OperatorApprovalIntentResult:
