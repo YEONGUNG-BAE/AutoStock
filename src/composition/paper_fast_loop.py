@@ -93,16 +93,19 @@ __all__ = [
     "PaperFastLoopPaths",
     "PaperFastLoopOutcome",
     "InspectionOutcome",
+    "MachineCheckOutcome",
     "PaperFastLoopPlan",
     "PaperFastLoopInspection",
     "ExecutionInputsInspection",
     "ActiveDecisionInspection",
+    "RuntimePrecheckResult",
     "OfflineReplayResult",
     "PaperFastLoopStack",
     "build_offline_paper_fast_loop_stack",
     "AVAILABLE_REPLAY_FIXTURES",
     "build_paper_fast_loop_plan",
     "inspect_paper_fast_loop",
+    "precheck_runtime",
     "replay_offline",
 ]
 
@@ -114,6 +117,13 @@ class PaperFastLoopOutcome(StrEnum):
 
 class InspectionOutcome(StrEnum):
     OK = "ok"
+    NO_GO = "no_go"
+
+
+class MachineCheckOutcome(StrEnum):
+    """Mechanically-verifiable precheck verdict. NEVER a runtime-activation authorization."""
+
+    PASS = "pass"
     NO_GO = "no_go"
 
 
@@ -218,6 +228,42 @@ class PaperFastLoopInspection:
     execution_inputs: ExecutionInputsInspection | None
     active_decision: ActiveDecisionInspection | None
     missing_databases: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RuntimePrecheckResult:
+    """Attended bounded fast-loop runtime precheck verdict (read-only; runs no runtime).
+
+    ``machine_outcome`` is the *mechanical* verdict: ``PASS`` only when the reused
+    ``inspect_paper_fast_loop`` is OK AND every artifact fingerprint is byte-identical
+    before and after the inspection (proving the precheck mutated nothing). It is **never**
+    an authorization to activate the runtime — the activation fields below are constants that
+    always hold:
+
+    * ``activation_authorized`` is always ``False``;
+    * ``runtime_activation_outcome`` is always ``"no_go"``;
+    * ``explicit_operator_approval_required`` is always ``True``;
+    * ``writers_stopped_manual_confirmation_required`` is always ``True`` — sidecar absence
+      proves only a *momentary* quiescence, not that every writer process is stopped (no
+      process scan / PID inspection / OS lock is in scope), so writer-stop stays a
+      machine-unverified MANUAL requirement.
+
+    ``reasons`` is the reused inspection's reasons followed by any precheck-specific reason
+    (``precheck_artifact_changed:<artifact>`` / ``precheck_artifact_not_regular_file:<artifact>``).
+    Missing artifacts are reported by the reused inspection layer (``missing_database:<db>`` /
+    ``missing_execution_inputs_snapshot``); precheck does not re-report them (drift avoidance)."""
+
+    machine_outcome: MachineCheckOutcome
+    activation_authorized: bool
+    runtime_activation_outcome: str
+    explicit_operator_approval_required: bool
+    writers_stopped_manual_confirmation_required: bool
+    market: str
+    symbol: str
+    inspection: PaperFastLoopInspection
+    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...]
+    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...]
     reasons: tuple[str, ...]
 
 
@@ -382,6 +428,81 @@ def inspect_paper_fast_loop(
         active_decision=active_decision,
         missing_databases=tuple(missing),
         reasons=tuple(reasons),
+    )
+
+
+# Artifacts fingerprinted before/after the read-only precheck. ``is_sqlite`` controls
+# whether ``user_version`` is parsed from the file header. The snapshot is JSON (not SQLite).
+_PRECHECK_ARTIFACTS: tuple[tuple[str, str, bool], ...] = (
+    ("execution_inputs_snapshot", "snapshot_path", False),
+    ("ledger", "ledger_path", True),
+    ("trigger_journal", "trigger_journal_path", True),
+    ("active_decision_store", "active_decision_store_path", True),
+)
+
+
+def _fingerprint_artifacts(paths: PaperFastLoopPaths) -> tuple[sqlite_inspector.ArtifactFingerprint, ...]:
+    return tuple(
+        sqlite_inspector.fingerprint_artifact(
+            getattr(paths, attr), name=name, is_sqlite=is_sqlite
+        )
+        for name, attr, is_sqlite in _PRECHECK_ARTIFACTS
+    )
+
+
+def precheck_runtime(
+    *, settings: RuntimePaperFastLoopSettings, now: datetime, base_dir: Path | str = Path(".")
+) -> RuntimePrecheckResult:
+    """Attended bounded fast-loop runtime precheck — read-only, runs no runtime.
+
+    Fingerprints every configured artifact (execution-inputs snapshot + ledger / journal /
+    active-decision SQLite DBs), reuses ``inspect_paper_fast_loop`` for the machine-check
+    body (config + snapshot + DB readiness; no store construction, no schema create/migrate,
+    no reconcile), then re-fingerprints. The mechanical ``machine_outcome`` is ``PASS`` only
+    when the inspection is OK and no fingerprint changed; otherwise ``NO_GO``.
+
+    This NEVER authorizes runtime activation: the result always carries
+    ``activation_authorized=False`` / ``runtime_activation_outcome="no_go"`` and the manual
+    requirements (explicit Operator approval; writer-stop confirmation). No network, no
+    credential read, no broker call, no order, no operational DB write, no schema work, no
+    process/thread/daemon, no runtime file creation. ``now`` must be timezone-aware."""
+
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("precheck_runtime requires a timezone-aware 'now'.")
+
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
+    before = _fingerprint_artifacts(paths)
+    inspection = inspect_paper_fast_loop(settings=settings, now=now, base_dir=base_dir)
+    after = _fingerprint_artifacts(paths)
+
+    precheck_reasons: list[str] = []
+    # A present-but-irregular artifact (directory/socket/fifo) cannot be trusted read-only.
+    # Inspect's open_read_only catches this for the DBs it opens (``sqlite_not_a_file``), but
+    # not for the JSON snapshot, so the fingerprint covers all four uniformly, fail-closed.
+    for fb in before:
+        if fb.present and not fb.is_regular_file:
+            precheck_reasons.append(f"precheck_artifact_not_regular_file:{fb.name}")
+    # Read-only proof: every artifact must be byte-identical (and same sidecar set) across
+    # the inspection. Any difference means the precheck mutated operator state → NO_GO.
+    for fb, fa in zip(before, after):
+        if fb != fa:
+            precheck_reasons.append(f"precheck_artifact_changed:{fb.name}")
+
+    reasons = tuple(inspection.reasons) + tuple(precheck_reasons)
+    machine_no_go = inspection.outcome is InspectionOutcome.NO_GO or bool(precheck_reasons)
+    machine_outcome = MachineCheckOutcome.NO_GO if machine_no_go else MachineCheckOutcome.PASS
+    return RuntimePrecheckResult(
+        machine_outcome=machine_outcome,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+        explicit_operator_approval_required=True,
+        writers_stopped_manual_confirmation_required=True,
+        market=settings.market,
+        symbol=settings.symbol,
+        inspection=inspection,
+        fingerprints_before=before,
+        fingerprints_after=after,
+        reasons=reasons,
     )
 
 

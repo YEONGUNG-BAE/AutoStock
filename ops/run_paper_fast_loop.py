@@ -32,9 +32,11 @@ from zoneinfo import ZoneInfo
 from composition.paper_fast_loop import (
     AVAILABLE_REPLAY_FIXTURES,
     InspectionOutcome,
+    MachineCheckOutcome,
     PaperFastLoopOutcome,
     build_paper_fast_loop_plan,
     inspect_paper_fast_loop,
+    precheck_runtime,
     replay_offline,
 )
 from config.settings import AppSettings, SettingsError, load_settings
@@ -72,6 +74,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--precheck-runtime",
+        action="store_true",
+        help=(
+            "read-only attended runtime precheck: reuses inspect-existing and fingerprints "
+            "every artifact before/after to prove read-only; machine PASS is NOT an activation "
+            "authorization (activation_authorized stays false; explicit Operator approval + "
+            "manual writer-stop confirmation required)"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -92,6 +104,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
         for name, on in (
             ("run", args.run),
             ("inspect-existing", args.inspect_existing),
+            ("precheck-runtime", args.precheck_runtime),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -99,7 +112,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
     ]
     if len(selected) > 1:
         raise CliInputError(
-            "modes --validate-only / --inspect-existing / --replay / --run are mutually exclusive."
+            "modes --validate-only / --inspect-existing / --precheck-runtime / --replay / "
+            "--run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -176,6 +190,37 @@ def _inspect_summary(inspection: Any, *, config_path: str, enabled: bool) -> dic
     }
 
 
+def _precheck_summary(result: Any, *, config_path: str, enabled: bool) -> dict[str, Any]:
+    passed = result.machine_outcome is MachineCheckOutcome.PASS
+    return {
+        # machine PASS ≠ activation authorization — outcome reports only the mechanical verdict.
+        "outcome": "PASS" if passed else "NO_GO",
+        "mode": "precheck-runtime",
+        "config": config_path,
+        "enabled": enabled,
+        "market": result.market,
+        "symbol": result.symbol,
+        "machine_check_outcome": result.machine_outcome.value,
+        "activation_authorized": result.activation_authorized,
+        "runtime_activation_outcome": result.runtime_activation_outcome,
+        "explicit_operator_approval_required": result.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            result.writers_stopped_manual_confirmation_required
+        ),
+        "reasons": list(result.reasons),
+        "inspection_outcome": result.inspection.outcome.value,
+        "inspection_reasons": list(result.inspection.reasons),
+        "missing_databases": list(result.inspection.missing_databases),
+        "fingerprints_before": [asdict(fp) for fp in result.fingerprints_before],
+        "fingerprints_after": [asdict(fp) for fp in result.fingerprints_after],
+        "network_called": False,
+        "credential_read": False,
+        "broker_called": False,
+        "production_db_written": False,
+        "runtime_file_created": False,
+    }
+
+
 def _journal_to_dict(journal: Any) -> dict[str, Any] | None:
     if journal is None:
         return None
@@ -247,6 +292,15 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
             return _fail(f"inspect error: {type(exc).__name__}", as_json=as_json, out=out)
         summary = _inspect_summary(inspection, config_path=args.config, enabled=fast_loop.enabled)
+        _emit(summary, as_json=as_json, out=out)
+        return 0 if summary["outcome"] == "PASS" else 1
+
+    if mode == "precheck-runtime":
+        try:
+            result = precheck_runtime(settings=fast_loop, now=datetime.now(tz=_KST))
+        except Exception as exc:  # 어떤 sqlite/내부 오류도 traceback 없이 sanitized fail로.
+            return _fail(f"precheck error: {type(exc).__name__}", as_json=as_json, out=out)
+        summary = _precheck_summary(result, config_path=args.config, enabled=fast_loop.enabled)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

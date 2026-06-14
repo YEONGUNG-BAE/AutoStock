@@ -17,6 +17,7 @@ databases store credentials.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -217,6 +218,75 @@ def sidecar_files(path: str | Path) -> tuple[str, ...]:
         suffix
         for suffix in _SIDECAR_SUFFIXES
         if resolved.with_name(resolved.name + suffix).exists()
+    )
+
+
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+_SQLITE_USER_VERSION_OFFSET = 60
+
+
+def _user_version_from_header(data: bytes) -> int | None:
+    """Read the SQLite ``user_version`` from the 100-byte file header bytes, side-effect free.
+
+    The user version is a 4-byte big-endian integer at offset 60 of a SQLite database
+    header. Returning it from already-read bytes avoids opening a connection (which on a
+    WAL-mode database would materialize a ``-shm``/``-wal`` sidecar). Non-SQLite files
+    (e.g. the JSON snapshot) return ``None``."""
+
+    if len(data) < _SQLITE_USER_VERSION_OFFSET + 4 or data[:16] != _SQLITE_HEADER_MAGIC:
+        return None
+    return int.from_bytes(data[_SQLITE_USER_VERSION_OFFSET:_SQLITE_USER_VERSION_OFFSET + 4], "big")
+
+
+@dataclass(frozen=True)
+class ArtifactFingerprint:
+    """Side-effect-free fingerprint of one on-disk artifact (snapshot or SQLite DB).
+
+    Captures only what can be read WITHOUT opening a SQLite connection: presence,
+    regular-file-ness, byte size, byte SHA-256 of the *main* file, the SQLite
+    ``user_version`` (from the header bytes; ``None`` for non-SQLite or absent files), and
+    the set of live sidecar suffixes. Two fingerprints taken around a read-only operation
+    must be equal — any difference proves the operation mutated operator state."""
+
+    name: str
+    present: bool
+    is_regular_file: bool
+    size: int | None
+    sha256: str | None
+    user_version: int | None
+    sidecar_suffixes: tuple[str, ...]
+
+
+def fingerprint_artifact(path: str | Path, *, name: str, is_sqlite: bool) -> ArtifactFingerprint:
+    """Fingerprint ``path`` without opening a SQLite connection (no sidecar materialization).
+
+    Reads the main file's bytes directly for size + SHA-256 and parses ``user_version`` from
+    the header bytes when ``is_sqlite``. An absent path yields an all-``None`` fingerprint; a
+    present-but-irregular path (directory, socket, fifo) yields ``is_regular_file=False`` with
+    no hash. Sidecar suffixes are always probed so a writer that left a live WAL/shm/journal
+    shows up in the fingerprint (and thus in any before/after diff)."""
+
+    resolved = Path(path)
+    if not resolved.exists():
+        return ArtifactFingerprint(
+            name=name, present=False, is_regular_file=False, size=None, sha256=None,
+            user_version=None, sidecar_suffixes=(),
+        )
+    sidecars = sidecar_files(resolved)
+    if not resolved.is_file():
+        return ArtifactFingerprint(
+            name=name, present=True, is_regular_file=False, size=None, sha256=None,
+            user_version=None, sidecar_suffixes=sidecars,
+        )
+    data = resolved.read_bytes()
+    return ArtifactFingerprint(
+        name=name,
+        present=True,
+        is_regular_file=True,
+        size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        user_version=_user_version_from_header(data) if is_sqlite else None,
+        sidecar_suffixes=sidecars,
     )
 
 

@@ -232,3 +232,88 @@ def test_validate_only_opens_no_databases(
     assert not paths.ledger_path.exists()
     assert not paths.trigger_journal_path.exists()
     assert not paths.active_decision_store_path.exists()
+
+
+# --- RTM-7c.4c precheck-runtime CLI (machine PASS ≠ activation authorization) ---
+
+
+def test_precheck_runtime_pass_when_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 0
+    assert payload["mode"] == "precheck-runtime"
+    assert payload["outcome"] == "PASS"
+    assert payload["machine_check_outcome"] == "pass"
+    # Machine PASS NEVER authorizes activation — the activation fields are hard constants.
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert payload["explicit_operator_approval_required"] is True
+    assert payload["writers_stopped_manual_confirmation_required"] is True
+    assert payload["reasons"] == []
+    # Read-only / no-side-effect attestations.
+    assert payload["network_called"] is False
+    assert payload["credential_read"] is False
+    assert payload["broker_called"] is False
+    assert payload["production_db_written"] is False
+    assert payload["runtime_file_created"] is False
+
+
+def test_precheck_runtime_no_go_when_missing_dbs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = _write_config(tmp_path)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 1
+    assert payload["mode"] == "precheck-runtime"
+    assert payload["outcome"] == "NO_GO"
+    assert payload["machine_check_outcome"] == "no_go"
+    assert payload["activation_authorized"] is False
+    assert "missing_database:ledger" in payload["reasons"]
+    assert set(payload["missing_databases"]) == {
+        "ledger",
+        "trigger_journal",
+        "active_decision_store",
+    }
+
+
+def test_precheck_runtime_mutually_exclusive_with_inspect(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload = _run(["--precheck-runtime", "--inspect-existing", "--json"], capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert "mutually exclusive" in payload["reason_code"]
+
+
+def test_precheck_runtime_non_quiescent_is_fail_closed_and_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    wal = paths.active_decision_store_path.with_name(
+        paths.active_decision_store_path.name + "-wal"
+    )
+    wal.write_bytes(b"")
+    code = cli.main(["--config", str(config_path), "--precheck-runtime", "--json"])
+    out = capsys.readouterr().out
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    assert payload["activation_authorized"] is False
+    assert "database_not_quiescent:active_decision_store" in payload["reasons"]
+    assert "Traceback" not in out
+    assert "OperationalError" not in out
+    assert "sqlite3.Error" not in out

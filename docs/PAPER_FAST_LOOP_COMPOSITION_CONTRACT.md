@@ -261,12 +261,13 @@ close-event log across all three handles (not merely a per-handle close count).
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 
-Four mutually-exclusive modes (default `--validate-only`):
+Five mutually-exclusive modes (default `--validate-only`):
 
 | mode | exit code | notes |
 |------|-----------|-------|
 | `--validate-only` | 0 if `PASS` (READY), else 1 | snapshot only (no DB open) |
 | `--inspect-existing` | 0 if `PASS` (`OK`), else 1 (`NO_GO`) | read-only, fail-closed |
+| `--precheck-runtime` | 0 if machine `PASS`, else 1 (`NO_GO`) | read-only attended precheck; machine PASS is **not** an activation authorization (see `PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 

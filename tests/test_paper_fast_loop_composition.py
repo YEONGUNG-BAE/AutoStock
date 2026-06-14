@@ -28,6 +28,7 @@ from composition import paper_fast_loop as _pfl
 from composition.paper_fast_loop import (
     AVAILABLE_REPLAY_FIXTURES,
     InspectionOutcome,
+    MachineCheckOutcome,
     PaperFastLoopOutcome,
     PaperFastLoopPaths,
     _analysis_decision,
@@ -36,6 +37,7 @@ from composition.paper_fast_loop import (
     build_paper_fast_loop_plan,
     build_replay_snapshot_payload,
     inspect_paper_fast_loop,
+    precheck_runtime,
     replay_offline,
 )
 from config.settings import RuntimePaperFastLoopSettings
@@ -544,6 +546,75 @@ def test_inspect_plan_consistency_mismatch_emits_stable_reason(tmp_path: Path) -
     assert "active_bundle_corrupt" not in inspection.reasons
 
 
+def test_inspect_buy_without_plan_emits_stable_reason(tmp_path: Path) -> None:
+    # H3 (RTM-7c.4c carry-over): symmetric arm to the HOLD-with-plan test above. A fully
+    # valid BUY active decision that carries NO plan is the mirror plan-consistency
+    # violation. The runtime DecisionTriggerBundle rejects it, but inspect must surface the
+    # distinct, actionable `active_plan_consistency_mismatch` reason exactly once — never the
+    # generic `active_bundle_corrupt`, and never `active_pointer_identity_mismatch`. We
+    # hand-seed the row (the real store would refuse to publish BUY-without-plan) with a
+    # correctly recomputed hash + publication_id so only the plan-consistency gate can fire.
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)  # creates schema; replaced below.
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+
+    decision = _analysis_decision(
+        action=AnalysisAction.BUY, symbol=settings.symbol, decision_id="dec-buy"
+    )
+    valid_from = _DECISION_AT
+    expires_at = _DECISION_AT + timedelta(days=1)
+    bundle_payload = {
+        "decision": decision.model_dump(mode="json"),
+        "plan": None,  # BUY MUST carry a plan → inconsistency.
+        "valid_from": valid_from.isoformat(),
+        "expires_at": expires_at.isoformat(),
+    }
+    bundle_json = canonical_json_dumps(bundle_payload)
+    bundle_hash = payload_sha256(json.loads(bundle_json))
+    publication_id = payload_sha256(
+        {
+            "market": decision.market,
+            "symbol": decision.symbol,
+            "decision_id": decision.decision_id.value,
+            "decision_created_at": decision.created_at.isoformat(),
+            "bundle_hash": bundle_hash,
+        }
+    )
+    conn = sqlite3.connect(paths.active_decision_store_path)
+    conn.execute("DELETE FROM active_decision_pointers")
+    conn.execute("DELETE FROM decision_bundle_versions")
+    conn.execute(
+        "INSERT INTO decision_bundle_versions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            publication_id, decision.market, decision.symbol, decision.decision_id.value,
+            None, decision.created_at.isoformat(), valid_from.isoformat(),
+            expires_at.isoformat(), bundle_json, bundle_hash, bundle_hash,
+            _DECISION_AT.isoformat(),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO active_decision_pointers VALUES (?,?,?,?)",
+        (decision.market, decision.symbol, publication_id, _DECISION_AT.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = paths.active_decision_store_path.with_name(
+            paths.active_decision_store_path.name + suffix
+        )
+        if sidecar.exists():
+            sidecar.unlink()
+
+    inspection = inspect_paper_fast_loop(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert inspection.outcome is InspectionOutcome.NO_GO
+    assert "active_plan_consistency_mismatch" in inspection.reasons
+    assert inspection.reasons.count("active_plan_consistency_mismatch") == 1
+    assert "active_bundle_corrupt" not in inspection.reasons
+    assert "active_pointer_identity_mismatch" not in inspection.reasons
+
+
 def test_inspect_never_constructs_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Section 6: inspect must NOT construct ActiveDecisionStore / SQLiteLedger /
     # SqliteTriggerJournal (their __init__ creates/migrates schema = a write).
@@ -574,3 +645,178 @@ def test_inspect_requires_timezone_aware_now(tmp_path: Path) -> None:
     naive = datetime(2026, 6, 16, 9, 30)
     with pytest.raises(ValueError, match="timezone-aware"):
         inspect_paper_fast_loop(settings=settings, now=naive, base_dir=tmp_path)
+
+
+# --- attended bounded runtime precheck (RTM-7c.4c) ---
+
+
+def _precheck_db_paths(settings: RuntimePaperFastLoopSettings, base_dir: Path) -> tuple[Path, ...]:
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=base_dir)
+    return (paths.ledger_path, paths.trigger_journal_path, paths.active_decision_store_path)
+
+
+def _assert_activation_never_authorized(result: Any) -> None:
+    # Machine PASS is NEVER an activation authorization: the four activation fields are
+    # constants that must hold regardless of the mechanical verdict.
+    assert result.activation_authorized is False
+    assert result.runtime_activation_outcome == "no_go"
+    assert result.explicit_operator_approval_required is True
+    assert result.writers_stopped_manual_confirmation_required is True
+
+
+def test_precheck_passes_on_fully_seeded_quiescent_stack(tmp_path: Path) -> None:
+    # Happy path: fully seeded quiescent stack → machine PASS, activation never authorized,
+    # fingerprints byte-identical before/after, no precheck reasons, 0 new sidecars.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    db_paths = _precheck_db_paths(settings, tmp_path)
+    before = {p: _fingerprint(p) for p in db_paths}
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.PASS
+    _assert_activation_never_authorized(result)
+    assert result.inspection.outcome is InspectionOutcome.OK
+    assert result.reasons == ()
+    assert result.market == settings.market
+    assert result.symbol == settings.symbol
+    # Fingerprint tuple is captured before AND after inspection and must match byte-for-byte.
+    assert result.fingerprints_before == result.fingerprints_after
+    after = {p: _fingerprint(p) for p in db_paths}
+    assert after == before
+    for p in db_paths:
+        assert _pfl.sqlite_inspector.sidecar_files(p) == ()
+
+
+def test_precheck_no_go_when_databases_missing(tmp_path: Path) -> None:
+    # Fail-closed: precheck reuses inspect's missing-DB reasons and does NOT re-report them
+    # under a precheck_* code (drift avoidance). Only the snapshot is present.
+    settings = _settings(tmp_path)
+    _write_snapshot(tmp_path, settings, _snapshot_payload())
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(result)
+    assert result.inspection.outcome is InspectionOutcome.NO_GO
+    assert result.inspection.missing_databases != ()
+    # No precheck_artifact_missing drift: missing artifacts owned by the inspect layer.
+    assert not any(r.startswith("precheck_artifact_") for r in result.reasons)
+
+
+def test_precheck_no_go_on_non_quiescent_db(tmp_path: Path) -> None:
+    # Fail-closed: a live -wal sidecar means a writer may be active → inspect NO_GO carries
+    # through to the precheck machine verdict.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    wal = paths.active_decision_store_path.with_name(
+        paths.active_decision_store_path.name + "-wal"
+    )
+    wal.write_bytes(b"")
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(result)
+    assert "database_not_quiescent:active_decision_store" in result.reasons
+
+
+def test_precheck_flags_artifact_changed_when_inspection_mutates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Read-only proof: if the (monkeypatched) inspection mutated an artifact between the two
+    # fingerprints, precheck detects the byte change and fails closed with a precise reason —
+    # even though the underlying inspection reports OK.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+
+    real_inspect = _pfl.inspect_paper_fast_loop
+
+    def _mutating_inspect(*args: Any, **kwargs: Any):
+        out = real_inspect(*args, **kwargs)
+        # Simulate a mutation that occurred during the inspection window.
+        with paths.ledger_path.open("ab") as fh:
+            fh.write(b"\x00")
+        return out
+
+    monkeypatch.setattr(_pfl, "inspect_paper_fast_loop", _mutating_inspect)
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(result)
+    assert "precheck_artifact_changed:ledger" in result.reasons
+    assert result.fingerprints_before != result.fingerprints_after
+
+
+def test_precheck_flags_artifact_not_regular_file(tmp_path: Path) -> None:
+    # Fail-closed: a present-but-irregular artifact (here the snapshot replaced by a directory)
+    # cannot be trusted read-only. The fingerprint covers the JSON snapshot uniformly with the
+    # DBs, so even a non-SQLite artifact is caught.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    paths.snapshot_path.unlink()
+    paths.snapshot_path.mkdir()
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.NO_GO
+    _assert_activation_never_authorized(result)
+    assert "precheck_artifact_not_regular_file:execution_inputs_snapshot" in result.reasons
+
+
+def test_precheck_never_constructs_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Isolation: precheck (like inspect) must construct NO store — store __init__ creates/
+    # migrates schema, which is a write. Fingerprinting reads raw bytes only.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+
+    calls: list[str] = []
+
+    def _spy(name: str):
+        def _raise(*_a: Any, **_k: Any):
+            calls.append(name)
+            raise AssertionError(f"precheck constructed {name}")
+
+        return _raise
+
+    monkeypatch.setattr(_pfl, "ActiveDecisionStore", _spy("ActiveDecisionStore"))
+    monkeypatch.setattr(_pfl, "SQLiteLedger", _spy("SQLiteLedger"))
+    monkeypatch.setattr(_pfl, "SqliteTriggerJournal", _spy("SqliteTriggerJournal"))
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+
+    assert result.machine_outcome is MachineCheckOutcome.PASS
+    assert calls == []
+
+
+def test_precheck_is_read_only_and_creates_no_sidecars(tmp_path: Path) -> None:
+    # Read-only filesystem invariant: byte-hash / size / user_version / sidecar set unchanged
+    # across the whole precheck, and the snapshot JSON itself is untouched.
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    paths = PaperFastLoopPaths.from_settings(settings, base_dir=tmp_path)
+    db_paths = _precheck_db_paths(settings, tmp_path)
+    db_before = {p: _fingerprint(p) for p in db_paths}
+    snap_before = paths.snapshot_path.read_bytes()
+
+    result = precheck_runtime(settings=settings, now=_NOW, base_dir=tmp_path)
+    assert result.machine_outcome is MachineCheckOutcome.PASS
+
+    assert {p: _fingerprint(p) for p in db_paths} == db_before
+    assert paths.snapshot_path.read_bytes() == snap_before
+    for p in db_paths:
+        assert _pfl.sqlite_inspector.sidecar_files(p) == ()
+
+
+def test_precheck_requires_timezone_aware_now(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _seed_valid_stack(tmp_path, settings)
+    naive = datetime(2026, 6, 16, 9, 30)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        precheck_runtime(settings=settings, now=naive, base_dir=tmp_path)

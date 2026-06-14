@@ -285,21 +285,24 @@ def test_reader_deserialize_failure_no_fallback(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "column, bad_value",
+    "column",
+    ["decision_created_at", "valid_from", "expires_at", "published_at"],
+)
+@pytest.mark.parametrize(
+    "bad_value, kind",
     [
-        ("published_at", "not-a-date"),                 # malformed ISO
-        ("published_at", "2026-06-16T09:00:00"),         # naive (no tz)
-        ("valid_from", "not-a-date"),                    # malformed ISO
-        ("expires_at", "2026-06-17T09:00:00"),           # naive (no tz)
-        ("decision_created_at", "not-a-date"),           # malformed ISO
+        ("not-a-date", "malformed"),          # unparseable ISO → ValueError
+        ("2026-06-16T09:00:00", "naive"),     # parseable but no timezone offset
     ],
 )
 def test_read_time_stored_datetime_corruption_raises_publication_error(
-    tmp_path: Path, column: str, bad_value: str
+    tmp_path: Path, column: str, bad_value: str, kind: str
 ) -> None:
-    # P2-C: a malformed/naive stored datetime column must fail-closed as PublicationError on
-    # the read path — never leak a raw ValueError/timezone error. read_active's contract is
-    # that deserialization/integrity failures surface as PublicationError with no fallback.
+    # H2 (RTM-7c.4c carry-over): full symmetric matrix — each of the four stored datetime
+    # columns, with BOTH a malformed ISO and a naive (tz-less) value, must fail-closed as
+    # PublicationError on the read path. Raw ValueError / timezone-validation errors must
+    # never leak, and read_active performs no fallback and no state change (the helper
+    # _parse_stored_datetime normalizes every parse on the read path).
     store = _store(tmp_path)
     store.publish(_candidate(plan=_plan()), now=NOW)
     store._conn.execute(  # type: ignore[attr-defined]
