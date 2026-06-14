@@ -973,7 +973,7 @@ def test_freshness_cli_pass_emits_evidence_digest(
     assert payload["outcome"] == "PASS"
     digest = payload["candidate_evidence_sha256"]
     assert isinstance(digest, str) and _HEX64_RE.fullmatch(digest)
-    assert payload["candidate_evidence_schema_version"] == 1
+    assert payload["candidate_evidence_schema_version"] == 2
     _assert_freshness_posture(payload, policy_evaluated=True)
 
 

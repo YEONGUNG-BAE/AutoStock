@@ -203,7 +203,7 @@ On a freshness-qualified PASS the CLI also emits two optional fields:
 
 ```text
 candidate_evidence_sha256        # lowercase hex64 on CREATED PASS, else null
-candidate_evidence_schema_version # 1 on CREATED PASS, else null
+candidate_evidence_schema_version # 2 on CREATED PASS, else null
 ```
 
 The CLI `outcome`/exit are driven by the **combined** verdict (`FreshnessQualifiedEvidenceOutcome`):
@@ -225,6 +225,14 @@ freshness evaluation is the sole policy verdict (`FRESH`, `freshness_policy_eval
 and the time assessment observes age only (`time_assessment.freshness_policy_evaluated is
 False`). A final PASS carrying failure reasons, or a time assessment that claims to have
 evaluated a freshness policy, fails closed to `INVALID` → combined `NO_GO`.
+
+Evidence (schema v2) additionally requires the **actual** fresh machine-proof result objects —
+a real `revalidation_result` PASS and a real `current_precheck_result` PASS (with an OK
+inspection and a fresh precheck receipt whose `checked_at == evaluated_at.isoformat()` and whose
+`receipt_sha256` recomputes via the canonical receipt-schema helper). A boolean
+`fresh_precheck_executed=True` with `revalidation_result`/`current_precheck_result` `None` is
+insufficient and fails closed to `INVALID` → combined `NO_GO`. The digest binds **both** the
+original candidate `receipt_sha256` and the fresh-precheck `fresh_precheck_receipt_sha256`.
 
 ## Out of scope (unchanged)
 

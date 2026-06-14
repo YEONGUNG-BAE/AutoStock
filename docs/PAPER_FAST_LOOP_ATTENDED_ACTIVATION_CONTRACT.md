@@ -110,17 +110,23 @@ verified final core → freshness evaluation (snapshot policy only); invalid `no
 snapshot does not change verdict. Receipt freshness threshold selection, config/CLI binding,
 authenticity, and Operator approval binding remain **OPEN**. RTM-7c.4n adds **canonical
 freshness-qualified candidate evidence** (`build_activation_candidate_evidence`): a qualified
-PASS/FRESH is frozen into one immutable canonical payload (`evidence_sha256` over 14 fields,
-schema version 1) that a *future* approval stage can reference. Evidence is generated **only**
+PASS/FRESH is frozen into one immutable canonical payload (`evidence_sha256` over 15 fields,
+schema version 2) that a *future* approval stage can reference. Evidence is generated **only**
 for PASS/FRESH whose outer/final/freshness/time-assessment observations are mutually consistent
 (matching identity, one agreed receipt age across all stages, a clean policy-neutral final
 preflight — `final.reasons == ()` and `final.freshness_policy_evaluated is False` — explicit
 FRESH freshness as the sole policy verdict, a policy-neutral time assessment
 (`time_assessment.freshness_policy_evaluated is False`) so the nested semantic roles never
-overlap, a constant NO-GO posture on every nested stage, and an `evaluated_at` whose exact
-integer microseconds from the verified `checked_at` equal the observed age); any mismatch —
-including a final PASS with failure reasons or a time assessment claiming a policy verdict —
-fails closed.
+overlap, a constant NO-GO posture on every nested stage, and an `evaluated_at` of exact `type
+datetime` whose exact integer microseconds from the verified `checked_at` equal the observed
+age) **and** which carry the *actual* fresh machine-proof result objects — a real
+`revalidation_result` PASS and a real `current_precheck_result` PASS (exact types, OK
+inspection, fresh receipt with `checked_at == evaluated_at.isoformat()` and a `receipt_sha256`
+recomputed via the canonical receipt-schema helper) sharing one canonical 4-artifact observation
+held identical from revalidation through the fresh precheck; the digest binds **both** receipt
+hashes (`receipt_sha256` + `fresh_precheck_receipt_sha256`). Any mismatch — including a final
+PASS with failure reasons, a time assessment claiming a policy verdict, or a boolean-only
+`fresh_precheck_executed=True` with `None` machine-proof objects — fails closed.
 The combined wrapper reports `PASS` only when evidence is `CREATED` — a qualified PASS whose
 evidence is not created is combined `NO_GO` (`candidate_evidence_generation_invalid`), so a
 qualified PASS can never advance to approval/activation without a digest. `NO_GO`/`STALE` → no

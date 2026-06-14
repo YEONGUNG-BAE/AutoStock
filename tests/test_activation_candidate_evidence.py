@@ -29,6 +29,24 @@ from composition.activation_candidate_final_preflight import (
     ActivationCandidateFinalPreflightOutcome,
     ActivationCandidateFinalPreflightResult,
 )
+from composition.activation_candidate_revalidation import (
+    ActivationCandidateRevalidationOutcome,
+    ActivationCandidateRevalidationResult,
+)
+from composition.paper_fast_loop import (
+    InspectionOutcome,
+    MachineCheckOutcome,
+    PaperFastLoopInspection,
+    RuntimePrecheckReceipt,
+    RuntimePrecheckResult,
+)
+from composition.paper_fast_loop_artifacts import PAPER_FAST_LOOP_ARTIFACT_NAMES
+from composition.precheck_receipt_schema import (
+    PRECHECK_RECEIPT_SCHEMA_VERSION,
+    build_receipt_hash_payload,
+    compute_receipt_sha256,
+)
+from composition.sqlite_inspector import ArtifactFingerprint
 from composition.activation_candidate_freshness_preflight import (
     ActivationCandidateFreshnessPreflightOutcome,
     ActivationCandidateFreshnessPreflightResult,
@@ -51,6 +69,160 @@ _EVAL_AT = datetime(2026, 6, 14, 12, 0, 0, tzinfo=_KST)
 _SHA = "a" * 64
 _AGE = 1000
 _MAX = 300_000_000
+
+
+# --- machine-proof nested builders (fast, no filesystem) — fully consistent by default ---
+
+
+def _fingerprints(variant: int = 0) -> tuple[ArtifactFingerprint, ...]:
+    """Canonical 4-artifact fingerprint tuple in the single-source order.
+
+    ``variant`` perturbs only the artifact body (sha256), producing a distinct — but still
+    internally consistent — fresh precheck receipt hash."""
+
+    return tuple(
+        ArtifactFingerprint(
+            name=name,
+            present=True,
+            is_regular_file=True,
+            size=100 + i,
+            sha256=f"{variant:02d}{i:02d}" + "f" * 60,
+            user_version=i,
+            sidecar_suffixes=(),
+        )
+        for i, name in enumerate(PAPER_FAST_LOOP_ARTIFACT_NAMES)
+    )
+
+
+def _revalidation(
+    *,
+    sha: str = _SHA,
+    market: str = "KR",
+    symbol: str = "005930",
+    fps: tuple[ArtifactFingerprint, ...] | None = None,
+    **overrides: Any,
+) -> ActivationCandidateRevalidationResult:
+    if fps is None:
+        fps = _fingerprints()
+    base = dict(
+        outcome=ActivationCandidateRevalidationOutcome.PASS,
+        receipt_sha256=sha,
+        market=market,
+        symbol=symbol,
+        reasons=(),
+        current_fingerprints_before=fps,
+        current_fingerprints_after=fps,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+        explicit_operator_approval_required=True,
+        writers_stopped_manual_confirmation_required=True,
+        freshness_evaluated=False,
+    )
+    base.update(overrides)
+    return ActivationCandidateRevalidationResult(**base)
+
+
+def _inspection(
+    *, market: str = "KR", symbol: str = "005930", **overrides: Any
+) -> PaperFastLoopInspection:
+    base = dict(
+        outcome=InspectionOutcome.OK,
+        market=market,
+        symbol=symbol,
+        ledger=None,
+        journal=None,
+        active_store=None,
+        execution_inputs=None,
+        active_decision=None,
+        missing_databases=(),
+        reasons=(),
+    )
+    base.update(overrides)
+    return PaperFastLoopInspection(**base)
+
+
+def _fresh_receipt(
+    *,
+    checked_at: str,
+    market: str = "KR",
+    symbol: str = "005930",
+    fps: tuple[ArtifactFingerprint, ...] | None = None,
+    recompute_sha: bool = True,
+    **overrides: Any,
+) -> RuntimePrecheckReceipt:
+    if fps is None:
+        fps = _fingerprints()
+    sha = compute_receipt_sha256(
+        build_receipt_hash_payload(
+            schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+            checked_at=checked_at,
+            market=market,
+            symbol=symbol,
+            enabled=True,
+            machine_outcome="pass",
+            inspection_outcome="ok",
+            reasons=(),
+            fingerprints_before=fps,
+            fingerprints_after=fps,
+        )
+    )
+    base = dict(
+        schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,
+        checked_at=checked_at,
+        market=market,
+        symbol=symbol,
+        enabled=True,
+        machine_outcome="pass",
+        inspection_outcome="ok",
+        reasons=(),
+        fingerprints_before=fps,
+        fingerprints_after=fps,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+        explicit_operator_approval_required=True,
+        writers_stopped_manual_confirmation_required=True,
+        receipt_sha256=sha,
+    )
+    base.update(overrides)
+    if recompute_sha and "receipt_sha256" not in overrides:
+        base["receipt_sha256"] = sha
+    return RuntimePrecheckReceipt(**base)
+
+
+def _precheck(
+    *,
+    checked_at: str,
+    market: str = "KR",
+    symbol: str = "005930",
+    fps: tuple[ArtifactFingerprint, ...] | None = None,
+    inspection: Any = ...,
+    receipt: Any = ...,
+    **overrides: Any,
+) -> RuntimePrecheckResult:
+    if fps is None:
+        fps = _fingerprints()
+    base = dict(
+        machine_outcome=MachineCheckOutcome.PASS,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+        explicit_operator_approval_required=True,
+        writers_stopped_manual_confirmation_required=True,
+        market=market,
+        symbol=symbol,
+        inspection=(
+            _inspection(market=market, symbol=symbol) if inspection is ... else inspection
+        ),
+        fingerprints_before=fps,
+        fingerprints_after=fps,
+        reasons=(),
+        receipt=(
+            _fresh_receipt(checked_at=checked_at, market=market, symbol=symbol, fps=fps)
+            if receipt is ...
+            else receipt
+        ),
+    )
+    base.update(overrides)
+    return RuntimePrecheckResult(**base)
 
 
 # --- synthetic result builders (fast, no filesystem) — fully consistent by default ---
@@ -80,14 +252,21 @@ def _time_assessment(
 def _final_pass(
     *, age: int = _AGE, evaluated_at: datetime = _EVAL_AT, ta: Any = ..., **overrides: Any
 ) -> ActivationCandidateFinalPreflightResult:
+    market = overrides.get("market", "KR")
+    symbol = overrides.get("symbol", "005930")
+    sha = overrides.get("receipt_sha256", _SHA)
+    fps = _fingerprints()
+    checked_at = evaluated_at.isoformat()
     base = dict(
         outcome=ActivationCandidateFinalPreflightOutcome.PASS,
         receipt_sha256=_SHA,
         market="KR",
         symbol="005930",
         reasons=(),
-        revalidation_result=None,
-        current_precheck_result=None,
+        revalidation_result=_revalidation(sha=sha, market=market, symbol=symbol, fps=fps),
+        current_precheck_result=_precheck(
+            checked_at=checked_at, market=market, symbol=symbol, fps=fps
+        ),
         fresh_precheck_executed=True,
         receipt_age_evaluated=True,
         receipt_age_microseconds=age,
@@ -545,6 +724,423 @@ def test_age_exceeds_max_is_invalid() -> None:
     assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
 
 
+# --- machine-proof absence matrix (RTM-7c.4n fresh machine-proof closure) ---
+
+
+def _ISO() -> str:
+    return _EVAL_AT.isoformat()
+
+
+@pytest.mark.parametrize(
+    "final_overrides",
+    [
+        pytest.param({"revalidation_result": None}, id="revalidation_none"),
+        pytest.param({"current_precheck_result": None}, id="current_precheck_none"),
+        pytest.param(
+            {"revalidation_result": None, "current_precheck_result": None},
+            id="flag_only_both_none",
+        ),
+        pytest.param({"revalidation_result": object()}, id="revalidation_wrong_object"),
+        pytest.param({"current_precheck_result": object()}, id="current_precheck_wrong_object"),
+        pytest.param({"revalidation_result": "pass"}, id="revalidation_str"),
+    ],
+)
+def test_machine_proof_absent_is_invalid(final_overrides: dict[str, Any]) -> None:
+    # ``fresh_precheck_executed`` stays True; only a boolean flag without the real result
+    # objects must fail closed (no created evidence).
+    bad_final = _final_pass(**final_overrides)
+    result = _build(_qualified_pass(final=bad_final))
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.evidence is None
+
+
+def test_machine_proof_revalidation_subclass_is_invalid() -> None:
+    class _SubReval(ActivationCandidateRevalidationResult):
+        pass
+
+    sub = _SubReval(**asdict(_revalidation()))  # type: ignore[arg-type]
+    bad_final = _final_pass(revalidation_result=sub)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_machine_proof_precheck_subclass_is_invalid() -> None:
+    class _SubPrecheck(RuntimePrecheckResult):
+        pass
+
+    sub = _SubPrecheck(**asdict(_precheck(checked_at=_ISO())))  # type: ignore[arg-type]
+    bad_final = _final_pass(current_precheck_result=sub)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_machine_proof_revalidation_deleted_field_is_invalid() -> None:
+    bad_reval = _revalidation()
+    object.__delattr__(bad_reval, "outcome")
+    bad_final = _final_pass(revalidation_result=bad_reval)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+# --- revalidation strict contract matrix ---
+
+
+@pytest.mark.parametrize(
+    "reval_overrides",
+    [
+        pytest.param(
+            {"outcome": ActivationCandidateRevalidationOutcome.NO_GO}, id="reval_no_go"
+        ),
+        pytest.param({"reasons": ("unexpected",)}, id="reval_reasons_nonempty"),
+        pytest.param({"sha": "b" * 64}, id="reval_sha_mismatch"),
+        pytest.param({"market": "US"}, id="reval_market_mismatch"),
+        pytest.param({"symbol": "000660"}, id="reval_symbol_mismatch"),
+        pytest.param({"activation_authorized": True}, id="reval_activation_true"),
+        pytest.param({"runtime_activation_outcome": "go"}, id="reval_runtime_go"),
+        pytest.param({"explicit_operator_approval_required": False}, id="reval_approval_false"),
+        pytest.param(
+            {"writers_stopped_manual_confirmation_required": False}, id="reval_writers_false"
+        ),
+        pytest.param({"freshness_evaluated": True}, id="reval_freshness_evaluated"),
+    ],
+)
+def test_revalidation_contract_violation_is_invalid(reval_overrides: dict[str, Any]) -> None:
+    bad_reval = _revalidation(**reval_overrides)
+    bad_final = _final_pass(revalidation_result=bad_reval)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_revalidation_fingerprints_before_after_differ_is_invalid() -> None:
+    bad_reval = _revalidation(current_fingerprints_after=_fingerprints(variant=1))
+    bad_final = _final_pass(revalidation_result=bad_reval)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_fps",
+    [
+        pytest.param((), id="reval_fps_empty"),
+        pytest.param(("x",), id="reval_fps_wrong_element"),
+        pytest.param(_fingerprints()[:3], id="reval_fps_short"),
+        pytest.param(object(), id="reval_fps_not_tuple"),
+    ],
+)
+def test_revalidation_malformed_fingerprints_is_invalid(bad_fps: object) -> None:
+    bad_reval = _revalidation(
+        current_fingerprints_before=bad_fps, current_fingerprints_after=bad_fps
+    )
+    bad_final = _final_pass(revalidation_result=bad_reval)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_revalidation_fingerprint_subclass_is_invalid() -> None:
+    class _SubFp(ArtifactFingerprint):
+        pass
+
+    base_fps = _fingerprints()
+    bad_fps = (_SubFp(**asdict(base_fps[0])),) + base_fps[1:]  # type: ignore[arg-type]
+    bad_reval = _revalidation(
+        current_fingerprints_before=bad_fps, current_fingerprints_after=bad_fps
+    )
+    # precheck/receipt must mirror so the only deviation is the subclass element
+    bad_pc = _precheck(
+        checked_at=_ISO(),
+        fingerprints_before=bad_fps,
+        fingerprints_after=bad_fps,
+        receipt=_fresh_receipt(checked_at=_ISO(), fps=bad_fps),
+    )
+    bad_final = _final_pass(revalidation_result=bad_reval, current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+# --- current precheck strict contract matrix ---
+
+
+@pytest.mark.parametrize(
+    "pc_overrides",
+    [
+        pytest.param({"machine_outcome": MachineCheckOutcome.NO_GO}, id="pc_machine_no_go"),
+        pytest.param({"reasons": ("unexpected",)}, id="pc_reasons_nonempty"),
+        pytest.param({"market": "US"}, id="pc_market_mismatch"),
+        pytest.param({"symbol": "000660"}, id="pc_symbol_mismatch"),
+        pytest.param({"activation_authorized": True}, id="pc_activation_true"),
+        pytest.param({"runtime_activation_outcome": "go"}, id="pc_runtime_go"),
+        pytest.param({"explicit_operator_approval_required": False}, id="pc_approval_false"),
+        pytest.param(
+            {"writers_stopped_manual_confirmation_required": False}, id="pc_writers_false"
+        ),
+    ],
+)
+def test_current_precheck_contract_violation_is_invalid(pc_overrides: dict[str, Any]) -> None:
+    bad_pc = _precheck(checked_at=_ISO(), **pc_overrides)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+@pytest.mark.parametrize(
+    "insp",
+    [
+        pytest.param(object(), id="inspection_wrong_object"),
+        pytest.param(None, id="inspection_none"),
+    ],
+)
+def test_current_precheck_inspection_wrong_object_is_invalid(insp: object) -> None:
+    bad_pc = _precheck(checked_at=_ISO(), inspection=insp)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+@pytest.mark.parametrize(
+    "insp_overrides",
+    [
+        pytest.param({"outcome": InspectionOutcome.NO_GO}, id="inspection_no_go"),
+        pytest.param({"reasons": ("x",)}, id="inspection_reasons_nonempty"),
+        pytest.param({"market": "US"}, id="inspection_market_mismatch"),
+        pytest.param({"symbol": "000660"}, id="inspection_symbol_mismatch"),
+    ],
+)
+def test_current_precheck_inspection_contract_violation_is_invalid(
+    insp_overrides: dict[str, Any]
+) -> None:
+    bad_insp = _inspection(**insp_overrides)
+    bad_pc = _precheck(checked_at=_ISO(), inspection=bad_insp)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_current_precheck_fingerprints_differ_from_revalidation_is_invalid() -> None:
+    # precheck internally consistent but its artifact observation differs from revalidation's
+    other = _fingerprints(variant=2)
+    bad_pc = _precheck(
+        checked_at=_ISO(),
+        fingerprints_before=other,
+        fingerprints_after=other,
+        receipt=_fresh_receipt(checked_at=_ISO(), fps=other),
+    )
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_current_precheck_before_after_differ_is_invalid() -> None:
+    bad_pc = _precheck(checked_at=_ISO(), fingerprints_after=_fingerprints(variant=3))
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+# --- fresh precheck receipt strict contract matrix ---
+
+
+@pytest.mark.parametrize(
+    "receipt_overrides",
+    [
+        pytest.param({"machine_outcome": "no_go"}, id="receipt_machine_not_pass"),
+        pytest.param({"inspection_outcome": "no_go"}, id="receipt_inspection_not_ok"),
+        pytest.param({"reasons": ("x",)}, id="receipt_reasons_nonempty"),
+        pytest.param({"market": "US"}, id="receipt_market_mismatch"),
+        pytest.param({"symbol": "000660"}, id="receipt_symbol_mismatch"),
+        pytest.param({"enabled": False}, id="receipt_enabled_false"),
+        pytest.param({"activation_authorized": True}, id="receipt_activation_true"),
+        pytest.param({"runtime_activation_outcome": "go"}, id="receipt_runtime_go"),
+        pytest.param(
+            {"explicit_operator_approval_required": False}, id="receipt_approval_false"
+        ),
+        pytest.param(
+            {"writers_stopped_manual_confirmation_required": False}, id="receipt_writers_false"
+        ),
+    ],
+)
+def test_fresh_receipt_contract_violation_is_invalid(receipt_overrides: dict[str, Any]) -> None:
+    # Build a receipt whose stored hash matches its (tampered) payload would still fail the
+    # strict field guards; here the canonical-hash recompute is left at the clean value so the
+    # field guard — not the hash — is what fails closed.
+    bad_receipt = _fresh_receipt(checked_at=_ISO(), **receipt_overrides)
+    bad_pc = _precheck(checked_at=_ISO(), receipt=bad_receipt)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_fresh_receipt_wrong_object_is_invalid() -> None:
+    bad_pc = _precheck(checked_at=_ISO(), receipt=object())
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_fresh_receipt_checked_at_mismatch_is_invalid() -> None:
+    # receipt stamped at a different instant than the caller now
+    other_iso = (_EVAL_AT + timedelta(seconds=1)).isoformat()
+    bad_receipt = _fresh_receipt(checked_at=other_iso)
+    bad_pc = _precheck(checked_at=_ISO(), receipt=bad_receipt)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_fresh_receipt_hash_mismatch_is_invalid() -> None:
+    # stored sha is valid hex64 but not the canonical recomputation of the receipt payload
+    bad_receipt = _fresh_receipt(checked_at=_ISO(), receipt_sha256="c" * 64)
+    bad_pc = _precheck(checked_at=_ISO(), receipt=bad_receipt)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_sha",
+    [
+        pytest.param("ABC" + "0" * 61, id="receipt_sha_uppercase"),
+        pytest.param("z" * 64, id="receipt_sha_non_hex"),
+        pytest.param("a" * 63, id="receipt_sha_short"),
+        pytest.param("", id="receipt_sha_empty"),
+    ],
+)
+def test_fresh_receipt_non_hex_sha_is_invalid(bad_sha: str) -> None:
+    bad_receipt = _fresh_receipt(checked_at=_ISO(), receipt_sha256=bad_sha)
+    bad_pc = _precheck(checked_at=_ISO(), receipt=bad_receipt)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+def test_fresh_receipt_malformed_fingerprints_is_invalid() -> None:
+    bad_receipt = _fresh_receipt(
+        checked_at=_ISO(), fingerprints_before=(), fingerprints_after=()
+    )
+    bad_pc = _precheck(checked_at=_ISO(), receipt=bad_receipt)
+    bad_final = _final_pass(current_precheck_result=bad_pc)
+    assert _build(_qualified_pass(final=bad_final)).outcome is (
+        ActivationCandidateEvidenceOutcome.INVALID
+    )
+
+
+# --- schema v2 + fresh_precheck_receipt_sha256 binding ---
+
+
+def test_evidence_schema_version_is_two() -> None:
+    assert ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION == 2
+    ev = _build().evidence
+    assert ev is not None
+    assert ev.schema_version == 2
+
+
+def test_fresh_precheck_receipt_sha256_is_bound_and_recomputable() -> None:
+    ev = _build().evidence
+    assert ev is not None
+    assert evidence_mod._is_lower_hex64(ev.fresh_precheck_receipt_sha256)
+    # the bound fresh receipt hash is the independently-recomputed receipt sha of the default fps
+    expected = _fresh_receipt(checked_at=_ISO()).receipt_sha256
+    assert ev.fresh_precheck_receipt_sha256 == expected
+
+
+def test_fresh_precheck_receipt_sha256_in_canonical_hash_payload() -> None:
+    ev = _build().evidence
+    assert ev is not None
+    payload = asdict(ev)
+    assert "fresh_precheck_receipt_sha256" in payload
+    payload.pop("evidence_sha256")
+    assert payload_sha256(payload) == ev.evidence_sha256
+
+
+def test_original_receipt_hash_change_changes_digest() -> None:
+    base = _digest()
+    assert _digest(sha="b" * 64) != base
+
+
+def test_fresh_receipt_hash_change_changes_digest() -> None:
+    base = _build().evidence
+    assert base is not None
+    # perturb only the fresh precheck artifact observation → different fresh receipt hash
+    fps2 = _fingerprints(variant=1)
+    final = _final_pass(
+        revalidation_result=_revalidation(fps=fps2),
+        current_precheck_result=_precheck(checked_at=_ISO(), fps=fps2),
+    )
+    ev = _build(_qualified_pass(final=final)).evidence
+    assert ev is not None
+    assert ev.fresh_precheck_receipt_sha256 != base.fresh_precheck_receipt_sha256
+    assert ev.evidence_sha256 != base.evidence_sha256
+    # the original candidate receipt hash is unchanged — only the fresh binding moved
+    assert ev.receipt_sha256 == base.receipt_sha256
+
+
+# --- P2: evaluated_at datetime subclass fail-closed ---
+
+
+def test_datetime_subclass_evaluated_at_is_invalid() -> None:
+    class _DTSub(datetime):
+        pass
+
+    sub = _DTSub(2026, 6, 14, 12, 0, 0, tzinfo=_KST)
+    result = _build(evaluated_at=sub)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.evidence is None
+
+
+def test_datetime_subclass_with_raising_isoformat_is_invalid() -> None:
+    class _BadDT(datetime):
+        def isoformat(self, *a: Any, **k: Any) -> str:  # noqa: D401
+            raise RuntimeError("boom")
+
+    sub = _BadDT(2026, 6, 14, 12, 0, 0, tzinfo=_KST)
+    result = _build(evaluated_at=sub)
+    assert result.outcome is ActivationCandidateEvidenceOutcome.INVALID
+    assert result.evidence is None
+
+
+# --- real seeded PASS regression (no synthetic None fixtures) ---
+
+
+def test_real_seeded_pass_creates_evidence(tmp_path: Path) -> None:
+    # A genuinely seeded freshness-qualified PASS (real revalidation PASS + real fresh precheck
+    # PASS + real fresh receipt) must still produce CREATED evidence with schema v2.
+    settings = fr_helper._settings(tmp_path)
+    receipt = fr_helper._pass_receipt(tmp_path, settings)
+    combined = freshness_qualify_and_build_candidate_evidence(
+        settings=settings,
+        receipt_payload=receipt,
+        now=fr_helper._NOW,
+        policy=ReceiptFreshnessPolicy(max_age_microseconds=1_000_000_000),
+        base_dir=tmp_path,
+    )
+    assert combined.outcome is FreshnessQualifiedEvidenceOutcome.PASS
+    assert combined.evidence_result is not None
+    assert combined.evidence_result.outcome is ActivationCandidateEvidenceOutcome.CREATED
+    ev = combined.evidence_result.evidence
+    assert ev is not None
+    assert ev.schema_version == 2
+    assert evidence_mod._is_lower_hex64(ev.fresh_precheck_receipt_sha256)
+    assert ev.fresh_precheck_executed is True
+    assert ev.activation_authorized is False
+    assert ev.runtime_activation_outcome == "no_go"
+
+
 # --- evaluated_at <-> observed age exact binding (P1 closure) ---
 
 
@@ -555,7 +1151,13 @@ def test_time_binding_exact_same_now_creates_evidence() -> None:
 
 
 def test_time_binding_utc_same_instant_creates_evidence() -> None:
-    result = _build(evaluated_at=_EVAL_AT.astimezone(timezone.utc))
+    # The single caller ``now`` is used everywhere (qualified result and builder), so the fresh
+    # precheck receipt's checked_at is that exact UTC instant's isoformat — a consistent UTC now
+    # qualifies. (A cross-tz now whose receipt was stamped in another zone fails closed on the
+    # strict ``checked_at == evaluated_at.isoformat()`` binding; that never occurs in composition.)
+    utc = _EVAL_AT.astimezone(timezone.utc)
+    qual, _ = _consistent(evaluated_at=utc)
+    result = build_activation_candidate_evidence(qualified_result=qual, evaluated_at=utc)
     assert result.outcome is ActivationCandidateEvidenceOutcome.CREATED
 
 

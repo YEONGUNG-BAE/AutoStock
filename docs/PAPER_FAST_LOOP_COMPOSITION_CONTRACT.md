@@ -327,18 +327,26 @@ snapshot → shared `now` guard → receipt snapshot → verified final core →
 API: `build_activation_candidate_evidence(*, qualified_result, evaluated_at)` and the
 composition wrapper `freshness_qualify_and_build_candidate_evidence` (runs the qualified
 preflight once, then builds evidence on PASS only, reusing the same `now`). A qualified
-PASS/FRESH is frozen into one immutable `ActivationCandidateEvidence` (schema version 1;
-`evidence_sha256` via `decision.canonical_json.payload_sha256` over the 14 non-digest fields)
-**only** when the outer/final/freshness/time-assessment observations are mutually consistent —
-matching identity (sha/market/symbol), one agreed receipt age across all three stages, a
-policy-neutral final preflight (`final.reasons == ()`, `final.freshness_policy_evaluated is
-False`) + explicit FRESH freshness, a policy-neutral time assessment
-(`time_assessment.freshness_policy_evaluated is False` — the policy verdict belongs only to the
-freshness evaluation, so the nested semantic roles never overlap), a constant NO-GO posture on
-every nested stage, and an `evaluated_at` whose exact integer microseconds from the verified
-`checked_at` equal the observed age. Any mismatch — including a final PASS that still carries
-failure reasons or a time assessment that claims to have evaluated a freshness policy — fails
-closed to `INVALID` (RTM-7c.4n consistency + nested PASS semantic closure). The wrapper returns a combined `FreshnessQualifiedEvidenceOutcome`: a
+PASS/FRESH is frozen into one immutable `ActivationCandidateEvidence` (schema version 2;
+`evidence_sha256` via `decision.canonical_json.payload_sha256` over the 15 non-digest fields,
+which bind **both** the original candidate `receipt_sha256` and the fresh-precheck
+`fresh_precheck_receipt_sha256`) **only** when the outer/final/freshness/time-assessment
+observations are mutually consistent — matching identity (sha/market/symbol), one agreed receipt
+age across all three stages, a policy-neutral final preflight (`final.reasons == ()`,
+`final.freshness_policy_evaluated is False`) + explicit FRESH freshness, a policy-neutral time
+assessment (`time_assessment.freshness_policy_evaluated is False` — the policy verdict belongs
+only to the freshness evaluation, so the nested semantic roles never overlap), a constant NO-GO
+posture on every nested stage, an `evaluated_at` of exact `type datetime` whose exact integer
+microseconds from the verified `checked_at` equal the observed age, **and** the bound *actual*
+machine-proof result objects — a real `revalidation_result` PASS and a real
+`current_precheck_result` PASS (exact types, OK inspection, fresh receipt with
+`checked_at == evaluated_at.isoformat()` and a `receipt_sha256` recomputed via the canonical
+receipt-schema helper), sharing one canonical 4-artifact observation held identical from
+revalidation through the fresh precheck. Any mismatch — including a final PASS that still carries
+failure reasons, a time assessment that claims to have evaluated a freshness policy, or a
+boolean-only `fresh_precheck_executed=True` with `None` machine-proof objects — fails closed to
+`INVALID` (RTM-7c.4n consistency + nested PASS semantic + fresh machine-proof binding closure).
+The wrapper returns a combined `FreshnessQualifiedEvidenceOutcome`: a
 qualified PASS is combined `PASS` only when evidence is `CREATED`; a qualified PASS whose
 evidence is not created is combined `NO_GO` with `candidate_evidence_generation_invalid` (no
 upstream rerun); a qualified `NO_GO`/`STALE` keeps its reasons and produces no digest. The CLI
