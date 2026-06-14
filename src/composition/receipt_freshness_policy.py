@@ -24,6 +24,7 @@ __all__ = [
     "ReceiptFreshnessOutcome",
     "ReceiptFreshnessPolicy",
     "ReceiptFreshnessEvaluation",
+    "receipt_freshness_policy_is_valid",
     "evaluate_receipt_freshness",
 ]
 
@@ -60,6 +61,23 @@ class ReceiptFreshnessEvaluation:
     runtime_activation_outcome: str
 
 
+def receipt_freshness_policy_is_valid(policy: object) -> bool:
+    """Exact ``ReceiptFreshnessPolicy`` with a valid max-age — shared with freshness preflight."""
+
+    return _validated_policy_max_age(policy) is not None
+
+
+def _validated_policy_max_age(policy: object) -> int | None:
+    """Policy type·max-age를 한 번만 읽어 검증한다. invalid면 ``None``."""
+
+    if type(policy) is not ReceiptFreshnessPolicy:
+        return None
+    max_age = policy.max_age_microseconds
+    if not _max_age_is_valid(max_age):
+        return None
+    return max_age
+
+
 def evaluate_receipt_freshness(
     *,
     time_assessment: ReceiptTimeAssessment,
@@ -70,7 +88,8 @@ def evaluate_receipt_freshness(
     Processing order: policy validation → time-assessment validity → age shape → inclusive
     max-age comparison. No new clock read and no receipt re-read."""
 
-    if not _max_age_is_valid(policy.max_age_microseconds):
+    max_age = _validated_policy_max_age(policy)
+    if max_age is None:
         return _no_go(
             reason="freshness_policy_invalid",
             receipt_age_microseconds=None,
@@ -78,9 +97,7 @@ def evaluate_receipt_freshness(
             freshness_policy_evaluated=False,
         )
 
-    max_age = policy.max_age_microseconds
-
-    if time_assessment.outcome is not ReceiptTimeAssessmentOutcome.VALID:
+    if type(time_assessment) is not ReceiptTimeAssessment:
         return _no_go(
             reason="freshness_time_assessment_invalid",
             receipt_age_microseconds=None,
@@ -88,15 +105,54 @@ def evaluate_receipt_freshness(
             freshness_policy_evaluated=False,
         )
 
-    if not time_assessment.receipt_age_evaluated:
-        return _no_go(
-            reason="freshness_time_assessment_invalid",
-            receipt_age_microseconds=None,
-            max_age_microseconds=max_age,
-            freshness_policy_evaluated=False,
-        )
-
+    # 단일 읽기: validation 이후 comparison·result 구성은 이 local만 사용한다.
+    assessment_outcome = time_assessment.outcome
+    assessment_reasons = time_assessment.reasons
+    age_evaluated = time_assessment.receipt_age_evaluated
     age = time_assessment.receipt_age_microseconds
+    policy_already_evaluated = time_assessment.freshness_policy_evaluated
+    checked_at = time_assessment.receipt_checked_at
+
+    if assessment_outcome is not ReceiptTimeAssessmentOutcome.VALID:
+        return _no_go(
+            reason="freshness_time_assessment_invalid",
+            receipt_age_microseconds=None,
+            max_age_microseconds=max_age,
+            freshness_policy_evaluated=False,
+        )
+
+    if assessment_reasons != ():
+        return _no_go(
+            reason="freshness_time_assessment_invalid",
+            receipt_age_microseconds=None,
+            max_age_microseconds=max_age,
+            freshness_policy_evaluated=False,
+        )
+
+    if policy_already_evaluated is not False:
+        return _no_go(
+            reason="freshness_time_assessment_invalid",
+            receipt_age_microseconds=None,
+            max_age_microseconds=max_age,
+            freshness_policy_evaluated=False,
+        )
+
+    if not age_evaluated:
+        return _no_go(
+            reason="freshness_time_assessment_invalid",
+            receipt_age_microseconds=None,
+            max_age_microseconds=max_age,
+            freshness_policy_evaluated=False,
+        )
+
+    if type(checked_at) is not str:
+        return _no_go(
+            reason="freshness_time_assessment_invalid",
+            receipt_age_microseconds=None,
+            max_age_microseconds=max_age,
+            freshness_policy_evaluated=False,
+        )
+
     if not _receipt_age_is_valid(age):
         return _no_go(
             reason="freshness_time_assessment_invalid",

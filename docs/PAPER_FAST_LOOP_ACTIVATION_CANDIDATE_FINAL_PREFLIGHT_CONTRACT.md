@@ -16,6 +16,7 @@ freshness evaluation, or activation authorization. Computing `receipt_age_micros
 is an **observation**, not a threshold verdict.
 
 Code: `composition.activation_candidate_final_preflight.final_preflight_activation_candidate`
+Verified core: `composition.activation_candidate_final_preflight.final_preflight_verified_activation_candidate`
 CLI: `ops/run_paper_fast_loop.py --final-preflight-activation-candidate`
 
 ## What this lane evaluates
@@ -119,6 +120,10 @@ Two **per-call** fields:
   against `now` (RTM-7c.4i), with `receipt_age_microseconds` the exact `now − checked_at`
   integer microseconds (`>= 0`), or `null` for a future receipt / pre-comparison
   short-circuit.
+- `receipt_time_assessment` — the `ReceiptTimeAssessment` produced on the receipt-time step
+  when that comparison ran; `null` on every short-circuit before receipt-time (invalid `now`,
+  invalid snapshot, 4g NO_GO). RTM-7c.4l reuses this object for explicit freshness evaluation
+  without re-observing age. The CLI does not emit raw `receipt_checked_at`.
 
 | path | `fresh_precheck_executed` | `receipt_age_evaluated` | `receipt_age_microseconds` |
 |------|:---:|:---:|:---:|
@@ -218,7 +223,8 @@ cannot mix observations (hash from one read, age from another). See
 - `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — single immutable snapshot all stages read
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md` — composed 4g byte-state lane
 - `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — composed 4i receipt time observation
-- `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — explicit max-age evaluation (RTM-7c.4k; **not** composed here)
+- `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — explicit max-age evaluation (RTM-7c.4k; **not** composed in wrapper)
+- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` — API-only qualified preflight (RTM-7c.4l; uses verified core)
 - `PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md` — composed fresh-precheck semantics
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` — verifier semantics
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model

@@ -1,0 +1,126 @@
+# Activation Candidate Freshness Preflight Contract (RTM-7c.4l)
+
+Read-only **explicit freshness-qualified** activation candidate preflight for the paper
+fast-loop. Composes verified final preflight (RTM-7c.4h core) with an explicit caller-supplied
+`ReceiptFreshnessPolicy`.
+
+**Runtime activation: NO-GO.** A freshness-qualified mechanical PASS is **not** Operator
+approval, writer-stop proof, receipt authenticity, or activation authorization.
+
+Code: `composition.activation_candidate_freshness_preflight.freshness_qualify_activation_candidate`
+
+## What this lane evaluates
+
+> **Final preflight mechanical PASS AND explicit freshness policy FRESH** →
+> freshness-qualified mechanical PASS.
+
+Processing requires:
+
+1. Valid explicit policy (`ReceiptFreshnessPolicy` exact type, valid max-age)
+2. Valid receipt snapshot (one verifier call)
+3. Verified final-preflight mechanical PASS (4g + 4i + fresh precheck + drift)
+4. Explicit freshness evaluation on the **same** `ReceiptTimeAssessment` object from final
+   preflight (`age <= max_age` inclusive → FRESH)
+
+## What this lane does **not** mean
+
+- Max-age **value selection** or operational calibration (OPEN)
+- Config/env/CLI threshold binding (OPEN)
+- Automatic integration into `--final-preflight-activation-candidate` (existing final
+  preflight stays policy-neutral; `freshness_policy_evaluated=false` there)
+- Operator approval input or consumption
+- Writer-stop machine assertion
+- Receipt authenticity / signing / HMAC
+- Runtime activation authorization
+
+## Core invariant: explicit policy argument only
+
+```text
+policy는 required argument다. optional/default/config fallback 없음.
+```
+
+## Public API
+
+```python
+freshness_qualify_activation_candidate(
+    *,
+    settings: RuntimePaperFastLoopSettings,
+    receipt_payload: object,
+    now: datetime,
+    policy: ReceiptFreshnessPolicy,   # required — no default
+    base_dir: str | Path | None = None,
+) -> ActivationCandidateFreshnessPreflightResult
+```
+
+## Processing order
+
+1. **Policy strict validation** (`receipt_freshness_policy_is_valid`, shared with 4k) —
+   invalid → `NO_GO` / `candidate_freshness_policy_invalid`,
+   `freshness_policy_evaluated=false`; no snapshot, verifier, filesystem, or SQLite
+2. **Snapshot once** — `verify_and_snapshot_precheck_receipt`; INVALID →
+   `candidate_receipt_invalid`
+3. **Verified final preflight core** — `final_preflight_verified_activation_candidate` on the
+   frozen snapshot (verifier 0, raw payload 0); any `NO_GO` preserves existing final-preflight
+   reasons verbatim; freshness evaluator **not** called; `freshness_policy_evaluated=false`
+4. **Explicit freshness evaluation** — only on final PASS:
+   `evaluate_receipt_freshness(time_assessment=final_result.receipt_time_assessment, policy)`
+   - FRESH → qualified PASS, `freshness_policy_evaluated=true`
+   - STALE → `candidate_receipt_stale`, `freshness_policy_evaluated=true`
+   - evaluator defensive NO_GO → `candidate_freshness_evaluation_invalid`,
+     `freshness_policy_evaluated=false` (raw evaluator reason not duplicated)
+
+## Stable reason codes (this lane)
+
+| reason | meaning |
+|--------|---------|
+| `candidate_freshness_policy_invalid` | policy not exact `ReceiptFreshnessPolicy` or invalid max-age |
+| `candidate_receipt_invalid` | snapshot build INVALID |
+| *(final-preflight reasons preserved)* | e.g. `candidate_receipt_time_in_future`, `candidate_current_precheck:*`, `candidate_post_revalidation_artifact_drift:*` |
+| `candidate_receipt_stale` | final PASS but age strictly greater than max |
+| `candidate_freshness_evaluation_invalid` | evaluator defensive NO_GO after final PASS |
+
+## Single-observation invariants
+
+Per `freshness_qualify_activation_candidate` call:
+
+```text
+receipt verifier calls = 1
+snapshot builds = 1
+verified final-preflight core verifier calls = 0
+freshness evaluator verifier calls = 0
+```
+
+Raw receipt is not re-read after snapshot. `ReceiptTimeAssessment` object identity from final
+preflight equals evaluator input.
+
+## Activation posture (every path)
+
+```text
+activation_authorized = false
+runtime_activation_outcome = "no_go"
+explicit_operator_approval_required = true
+writers_stopped_manual_confirmation_required = true
+```
+
+## Out of scope (this lane)
+
+- Max-age value selection / TTL calibration
+- Config/env/CLI threshold binding
+- New CLI mode
+- Policy persistence
+- Operator approval input/storage/consumption
+- Receipt signing / HMAC
+- Activation token / activation caller / `--run`
+- KIS / network / broker dispatch / orders
+- Operational SQLite write
+- Daemon / scheduler
+
+## Related contracts
+
+- `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — pure evaluator + shared policy validation
+- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — verified core reused here
+- `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — age observation reused via final preflight
+- `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — single snapshot build
+- `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
+- `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes
+- `docs/TECH_DEBT.md` (OPEN items)

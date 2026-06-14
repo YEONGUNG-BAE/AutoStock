@@ -47,11 +47,13 @@ from composition.paper_fast_loop import (
     precheck_runtime,
 )
 from composition.receipt_time_assessment import (
+    ReceiptTimeAssessment,
     ReceiptTimeAssessmentOutcome,
     assess_verified_receipt_time,
 )
 from composition.sqlite_inspector import ArtifactFingerprint
 from composition.verified_precheck_receipt import (
+    VerifiedPrecheckReceipt,
     VerifiedReceiptSnapshotOutcome,
     verify_and_snapshot_precheck_receipt,
 )
@@ -61,6 +63,7 @@ __all__ = [
     "ActivationCandidateFinalPreflightOutcome",
     "ActivationCandidateFinalPreflightResult",
     "final_preflight_activation_candidate",
+    "final_preflight_verified_activation_candidate",
 ]
 
 def _posture(*, fresh_precheck_executed: bool, receipt_age_evaluated: bool = False) -> dict[str, object]:
@@ -116,6 +119,7 @@ class ActivationCandidateFinalPreflightResult:
     fresh_precheck_executed: bool
     receipt_age_evaluated: bool
     receipt_age_microseconds: int | None
+    receipt_time_assessment: ReceiptTimeAssessment | None
     freshness_policy_evaluated: bool
     activation_authorized: bool
     runtime_activation_outcome: str
@@ -148,6 +152,7 @@ def final_preflight_activation_candidate(
             revalidation=None,
             precheck=None,
             fresh_precheck_executed=False,
+            receipt_time_assessment=None,
         )
 
     # Step 1 — raw payload을 immutable verified snapshot으로 한 번만 동결 (RTM-7c.4j).
@@ -163,9 +168,29 @@ def final_preflight_activation_candidate(
             revalidation=None,
             precheck=None,
             fresh_precheck_executed=False,
+            receipt_time_assessment=None,
         )
     assert snapshot_result.receipt is not None
-    receipt = snapshot_result.receipt
+
+    return final_preflight_verified_activation_candidate(
+        settings=settings,
+        receipt=snapshot_result.receipt,
+        now=now,
+        base_dir=base_dir,
+    )
+
+
+def final_preflight_verified_activation_candidate(
+    *,
+    settings: RuntimePaperFastLoopSettings,
+    receipt: VerifiedPrecheckReceipt,
+    now: datetime,
+    base_dir: str | Path | None = None,
+) -> ActivationCandidateFinalPreflightResult:
+    """Verified snapshot 기반 final preflight core — verifier/raw payload 접근 0.
+
+    RTM-7c.4g revalidation, receipt-time observation, fresh precheck, post-revalidation
+    drift를 동일 immutable snapshot 위에서 실행한다. freshness policy는 평가하지 않는다."""
 
     # Step 2 — snapshot-based 4g byte-state revalidation. NO_GO면 즉시 종결, 기존 stable reason 보존.
     revalidation = revalidate_verified_activation_candidate(
@@ -180,6 +205,7 @@ def final_preflight_activation_candidate(
             revalidation=revalidation,
             precheck=None,
             fresh_precheck_executed=False,
+            receipt_time_assessment=None,
         )
 
     # Step 3 — snapshot-based policy-neutral receipt time observation (RTM-7c.4i). 4g PASS는
@@ -202,6 +228,7 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=False,
             receipt_age_evaluated=time_assessment.receipt_age_evaluated,
             receipt_age_microseconds=time_assessment.receipt_age_microseconds,
+            receipt_time_assessment=time_assessment,
         )
     receipt_age_microseconds = time_assessment.receipt_age_microseconds
 
@@ -221,6 +248,7 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=True,
             receipt_age_evaluated=True,
             receipt_age_microseconds=receipt_age_microseconds,
+            receipt_time_assessment=time_assessment,
         )
 
     # Step 6 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
@@ -240,6 +268,7 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=True,
             receipt_age_evaluated=True,
             receipt_age_microseconds=receipt_age_microseconds,
+            receipt_time_assessment=time_assessment,
         )
 
     # Step 7 — mechanical PASS. activation은 여전히 false.
@@ -252,6 +281,7 @@ def final_preflight_activation_candidate(
         revalidation_result=revalidation,
         current_precheck_result=precheck,
         receipt_age_microseconds=receipt_age_microseconds,
+        receipt_time_assessment=time_assessment,
         **_posture(fresh_precheck_executed=True, receipt_age_evaluated=True),  # type: ignore[arg-type]
     )
 
@@ -303,6 +333,7 @@ def _no_go(
     fresh_precheck_executed: bool,
     receipt_age_evaluated: bool = False,
     receipt_age_microseconds: int | None = None,
+    receipt_time_assessment: ReceiptTimeAssessment | None = None,
 ) -> ActivationCandidateFinalPreflightResult:
     return ActivationCandidateFinalPreflightResult(
         outcome=ActivationCandidateFinalPreflightOutcome.NO_GO,
@@ -313,6 +344,7 @@ def _no_go(
         revalidation_result=revalidation,
         current_precheck_result=precheck,
         receipt_age_microseconds=receipt_age_microseconds,
+        receipt_time_assessment=receipt_time_assessment,
         **_posture(  # type: ignore[arg-type]
             fresh_precheck_executed=fresh_precheck_executed,
             receipt_age_evaluated=receipt_age_evaluated,

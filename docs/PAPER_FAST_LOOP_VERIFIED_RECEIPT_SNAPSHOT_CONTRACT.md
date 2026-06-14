@@ -114,6 +114,7 @@ never call the verifier or read the raw payload:
 
 - `revalidate_verified_activation_candidate(*, settings, receipt, base_dir=None)`
 - `assess_verified_receipt_time(*, receipt, now)`
+- `final_preflight_verified_activation_candidate(*, settings, receipt, now, base_dir=None)` (RTM-7c.4l reuses via freshness-qualified preflight)
 
 The raw-payload public wrappers (`revalidate_activation_candidate`, `assess_receipt_time`)
 remain for backward compatibility: each builds a snapshot once and delegates to its core.

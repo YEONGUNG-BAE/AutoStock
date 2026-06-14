@@ -79,13 +79,19 @@ observation (`FRESH` or `STALE`). Invalid policy or invalid time assessment → 
 
 ## Processing order (pure API)
 
-1. **Policy validation** — invalid `max_age_microseconds` → `NO_GO` /
+1. **Policy strict validation** — exact `type(policy) is ReceiptFreshnessPolicy` and valid
+   `max_age_microseconds` via shared `receipt_freshness_policy_is_valid` / `_validated_policy_max_age`
+   (single field read per validation path); invalid → `NO_GO` /
    `freshness_policy_invalid` (`freshness_policy_evaluated=false`)
-2. **Time assessment validity** — not `VALID`, or `receipt_age_evaluated=false`, or age not
-   an exact non-negative int → `NO_GO` / `freshness_time_assessment_invalid`
-   (`freshness_policy_evaluated=false`)
+2. **Time assessment strict validation** — exact `type(time_assessment) is ReceiptTimeAssessment`;
+   `VALID` with empty `reasons`, `freshness_policy_evaluated=false`, `receipt_age_evaluated=true`,
+   exact non-negative int age, exact `str` `receipt_checked_at`; otherwise → `NO_GO` /
+   `freshness_time_assessment_invalid` (`freshness_policy_evaluated=false`)
 3. **Inclusive comparison** — `age <= max_age` → `FRESH`; else → `STALE` /
    `receipt_age_exceeds_policy` (`freshness_policy_evaluated=true`)
+
+Wrong-object inputs (including `None`, arbitrary objects, subclasses) fail closed with stable
+reasons — no `AttributeError` escape, no raw type/repr/traceback in reasons.
 
 ## Stable reason codes
 
@@ -103,8 +109,11 @@ RTM-7c.4i (`receipt_time_assessment`) **observes** exact integer age and fail-cl
 receipts — it selects no threshold (`freshness_policy_evaluated=false` there).
 
 RTM-7c.4k **verdicts** against an explicit max-age when a caller supplies a policy. The two
-stages are separate; final preflight (4h) still does not compose freshness evaluation in this
-lane.
+stages are separate; final preflight (4h) still does not compose freshness evaluation.
+
+RTM-7c.4l (`freshness_qualify_activation_candidate`) is the **API-only** composition lane:
+explicit `policy` argument required, no default threshold, no CLI integration. It reuses the
+4h verified core and passes the same `ReceiptTimeAssessment` object to this evaluator.
 
 ## Activation posture (every path)
 
@@ -131,7 +140,8 @@ runtime_activation_outcome = "no_go"
 
 - `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — age observation consumed here
 - `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — immutable snapshot upstream
-- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — not integrated (yet)
+- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — verified core; wrapper stays policy-neutral
+- `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` — API-only qualified preflight (4l)
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes
 - `docs/TECH_DEBT.md` (OPEN items)

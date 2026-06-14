@@ -310,3 +310,132 @@ def test_final_preflight_freshness_policy_evaluated_stays_false(tmp_path: Path) 
         base_dir=tmp_path,
     )
     assert result.freshness_policy_evaluated is False
+
+
+# --- carry-over hardening H1: wrong-object fail-closed ---
+
+
+@pytest.mark.parametrize(
+    "bad_policy",
+    [None, object(), "100", 100],
+    ids=["none", "object", "str", "int"],
+)
+def test_wrong_policy_object_is_no_go(bad_policy: object) -> None:
+    result = evaluate_receipt_freshness(
+        time_assessment=_valid_assessment(),
+        policy=bad_policy,  # type: ignore[arg-type]
+    )
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_policy_invalid",)
+    assert result.freshness_policy_evaluated is False
+
+
+def test_policy_subclass_is_no_go() -> None:
+    class SubPolicy(ReceiptFreshnessPolicy):
+        pass
+
+    result = evaluate_receipt_freshness(
+        time_assessment=_valid_assessment(),
+        policy=SubPolicy(max_age_microseconds=100),
+    )
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_policy_invalid",)
+
+
+@pytest.mark.parametrize(
+    "bad_assessment",
+    [None, object(), "assessment"],
+    ids=["none", "object", "str"],
+)
+def test_wrong_assessment_object_is_no_go(bad_assessment: object) -> None:
+    result = evaluate_receipt_freshness(
+        time_assessment=bad_assessment,  # type: ignore[arg-type]
+        policy=_policy(100),
+    )
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_time_assessment_invalid",)
+    assert result.max_age_microseconds == 100
+    assert result.freshness_policy_evaluated is False
+
+
+def test_assessment_subclass_is_no_go() -> None:
+    class SubAssessment(ReceiptTimeAssessment):
+        pass
+
+    base = _valid_assessment()
+    fields = {f.name: getattr(base, f.name) for f in dataclasses.fields(ReceiptTimeAssessment)}
+    assessment = SubAssessment(**fields)
+    result = evaluate_receipt_freshness(time_assessment=assessment, policy=_policy(100))
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_time_assessment_invalid",)
+
+
+def test_none_policy_and_assessment_do_not_escape_attribute_error() -> None:
+    result = evaluate_receipt_freshness(
+        time_assessment=None,  # type: ignore[arg-type]
+        policy=None,  # type: ignore[arg-type]
+    )
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_policy_invalid",)
+
+
+# --- carry-over hardening H2: single-read observation ---
+
+
+def test_evaluate_uses_single_read_locals_for_assessment_fields() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "composition"
+        / "receipt_freshness_policy.py"
+    ).read_text(encoding="utf-8")
+    for field in (
+        "assessment_outcome = time_assessment.outcome",
+        "assessment_reasons = time_assessment.reasons",
+        "age_evaluated = time_assessment.receipt_age_evaluated",
+        "age = time_assessment.receipt_age_microseconds",
+        "policy_already_evaluated = time_assessment.freshness_policy_evaluated",
+        "checked_at = time_assessment.receipt_checked_at",
+    ):
+        assert field in source
+
+
+# --- carry-over hardening H3: contradictory VALID assessment ---
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"reasons": ("unexpected",)},
+        {"freshness_policy_evaluated": True},
+        {"receipt_checked_at": None},
+        {"receipt_checked_at": 123},
+        {"receipt_age_evaluated": False},
+        {"receipt_age_microseconds": None},
+        {"receipt_age_microseconds": -1},
+        {"outcome": ReceiptTimeAssessmentOutcome.NO_GO, "reasons": ("receipt_time_in_future",)},
+    ],
+    ids=[
+        "nonempty_reasons",
+        "policy_already_evaluated",
+        "missing_checked_at",
+        "non_string_checked_at",
+        "age_not_evaluated",
+        "missing_age",
+        "negative_age",
+        "no_go_assessment",
+    ],
+)
+def test_contradictory_valid_assessment_is_no_go(overrides: dict[str, Any]) -> None:
+    assessment = _synthetic_assessment(**overrides)
+    result = evaluate_receipt_freshness(time_assessment=assessment, policy=_policy(100))
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_time_assessment_invalid",)
+    assert result.freshness_policy_evaluated is False
+
+
+def test_legitimate_4i_assessment_still_passes_freshness() -> None:
+    assessment = assess_receipt_time(receipt_payload=_receipt(), now=_CHECKED)
+    result = evaluate_receipt_freshness(time_assessment=assessment, policy=_policy(1_000_000))
+    assert result.outcome is ReceiptFreshnessOutcome.FRESH
+    assert result.freshness_policy_evaluated is True

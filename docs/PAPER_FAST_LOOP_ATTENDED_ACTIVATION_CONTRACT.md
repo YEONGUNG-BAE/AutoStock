@@ -101,9 +101,11 @@ per-call `receipt_age_evaluated` flag flips `true` once that comparison runs. It
 **not** apply any receipt-age threshold, TTL, or freshness policy
 (`freshness_policy_evaluated=false`) — age is observed, never thresholded. RTM-7c.4k adds a
 **separate pure evaluator** (`evaluate_receipt_freshness`) that verdicts against an explicit
-caller-supplied max-age when invoked — it is **not** wired into this final preflight lane.
-Receipt freshness threshold selection, authenticity, and Operator approval binding remain
-**OPEN**.
+caller-supplied max-age when invoked — it is **not** wired into the final-preflight wrapper.
+RTM-7c.4l adds API-only freshness-qualified preflight (`freshness_qualify_activation_candidate`)
+with a required explicit `policy` argument — still not approval or activation. Receipt
+freshness threshold selection, config/CLI binding, authenticity, and Operator approval binding
+remain **OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -209,5 +211,6 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md`
 - `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`
 - `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`
-- `docs/PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` (RTM-7c.4k — explicit policy only; not composed into final preflight)
+- `docs/PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` (RTM-7c.4k — explicit policy only; not composed into final-preflight wrapper)
+- `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` (RTM-7c.4l — API-only qualified preflight)
 - `docs/TECH_DEBT.md` (OPEN items)
