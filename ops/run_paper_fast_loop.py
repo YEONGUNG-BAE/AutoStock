@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Five mutually-exclusive modes:
+Six mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -11,6 +11,8 @@ Five mutually-exclusive modes:
   fingerprints every artifact before/after to prove read-only. Config is loaded with an EMPTY
   environ so no credential/env var is read (a ``${ENV}`` reference fails closed). Machine PASS
   is NOT an activation authorization (``activation_authorized`` stays false).
+* ``--verify-precheck-receipt``: stdin-only strict receipt schema + hash verification; no
+  config, no env, no DB, no filesystem write, no network (RTM-7c.4e).
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -44,11 +46,17 @@ from composition.paper_fast_loop import (
     precheck_runtime,
     replay_offline,
 )
+from composition.precheck_receipt_verifier import (
+    ReceiptVerificationOutcome,
+    RuntimePrecheckReceiptVerification,
+    verify_runtime_precheck_receipt_payload,
+)
 from config.settings import AppSettings, SettingsError, load_settings
 
 DEFAULT_CONFIG_PATH = "config/config.toml.example"
 _KST = ZoneInfo("Asia/Seoul")
 _RUN_REFUSED_REASON = "live_run_not_implemented"
+_VERIFY_RECEIPT_STDIN_LIMIT = 1 << 20  # 1 MiB — untrusted stdin bound
 
 
 class CliInputError(Exception):
@@ -89,6 +97,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--verify-precheck-receipt",
+        action="store_true",
+        help=(
+            "stdin-only strict precheck receipt verification (schema + hash); no config, "
+            "no env, no DB, no filesystem write, no network; VALID is NOT activation "
+            "authorization"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -110,6 +127,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("run", args.run),
             ("inspect-existing", args.inspect_existing),
             ("precheck-runtime", args.precheck_runtime),
+            ("verify-precheck-receipt", args.verify_precheck_receipt),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -117,8 +135,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
     ]
     if len(selected) > 1:
         raise CliInputError(
-            "modes --validate-only / --inspect-existing / --precheck-runtime / --replay / "
-            "--run are mutually exclusive."
+            "modes --validate-only / --inspect-existing / --precheck-runtime / "
+            "--verify-precheck-receipt / --replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -262,6 +280,53 @@ def _precheck_summary(result: Any, *, config_path: str, enabled: bool) -> dict[s
     }
 
 
+def _verify_receipt_summary(result: Any) -> dict[str, Any]:
+    valid = result.outcome is ReceiptVerificationOutcome.VALID
+    return {
+        "outcome": "VALID" if valid else "INVALID",
+        "mode": "verify-precheck-receipt",
+        "schema_version": result.schema_version,
+        "receipt_sha256": result.receipt_sha256,
+        "reason_codes": list(result.reason_codes),
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "credential_read": False,
+        "network_called": False,
+        "database_opened": False,
+        "filesystem_written": False,
+    }
+
+
+def _verify_receipt_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> int:
+    summary = _verify_receipt_summary(
+        RuntimePrecheckReceiptVerification(
+            outcome=ReceiptVerificationOutcome.INVALID,
+            schema_version=None,
+            receipt_sha256=None,
+            reason_codes=(reason_code,),
+        )
+    )
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
+def _read_verify_stdin_payload() -> tuple[object | None, str | None]:
+    """stdin에서 최대 ``_VERIFY_RECEIPT_STDIN_LIMIT + 1`` byte만 읽는다."""
+    data = sys.stdin.buffer.read(_VERIFY_RECEIPT_STDIN_LIMIT + 1)
+    if not data:
+        return None, "receipt_input_empty"
+    if len(data) > _VERIFY_RECEIPT_STDIN_LIMIT:
+        return None, "receipt_input_too_large"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "receipt_input_not_utf8"
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        return None, "receipt_input_not_json"
+
+
 def _journal_to_dict(journal: Any) -> dict[str, Any] | None:
     if journal is None:
         return None
@@ -313,6 +378,21 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "run":
         _emit(_run_refused_summary(), as_json=as_json, out=out)
         return 2
+
+    # verify-precheck-receipt: stdin-only — config/env/DB/fs write/network/clock read 없음.
+    if mode == "verify-precheck-receipt":
+        payload, input_error = _read_verify_stdin_payload()
+        if input_error is not None:
+            return _verify_receipt_input_fail(input_error, as_json=as_json, out=out)
+        try:
+            result = verify_runtime_precheck_receipt_payload(payload)
+        except Exception as exc:
+            return _verify_receipt_input_fail(
+                f"verify error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        summary = _verify_receipt_summary(result)
+        _emit(summary, as_json=as_json, out=out)
+        return 0 if summary["outcome"] == "VALID" else 1
 
     # precheck-runtime은 credential/env read 0을 주장하므로 config 로딩에서도 os.environ을
     # 절대 읽지 않는다: 빈 environ을 주입해 ${ENV} 치환과 live-confirmation/credential

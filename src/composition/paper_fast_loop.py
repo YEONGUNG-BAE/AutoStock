@@ -1,16 +1,19 @@
-"""Offline paper fast-loop composition root (RTM-7c.4a).
+"""Offline paper fast-loop composition root (RTM-7c.4a+).
 
-Three operator capabilities, all offline:
+Four offline operator capabilities — no live runtime, no KIS, no daemon, no orders:
 
 * ``build_paper_fast_loop_plan`` — validate-only. Loads + validates the on-disk
-  execution-inputs snapshot and runs single-symbol (KR / 6-digit / PAPER / KRW)
-  preflight against any existing ledger positions. No execution, no DB writes,
-  no network, no runtime directory creation.
+  execution-inputs snapshot. Opens no database; no execution, no network.
 * ``inspect_paper_fast_loop`` — read-only inspection of the configured ledger /
   journal / active-decision-store via ``composition.sqlite_inspector``.
+* ``precheck_runtime`` — attended bounded runtime precheck (read-only); emits an
+  ephemeral stdout-only ``RuntimePrecheckReceipt`` (RTM-7c.4d). Machine PASS is
+  **never** runtime activation authorization.
 * ``replay_offline`` — deterministic offline replay of the fast-loop execution
   stack against normalized-event fixtures, using caller-provided temp paths
   (never the configured ``runtime/`` paths). No KIS frames, no network.
+
+Receipt verification lives in ``composition.precheck_receipt_verifier`` (RTM-7c.4e).
 
 This module is the *only* place allowed to wire broker / ledger / coordinator
 together; ``src/orchestration`` purity is preserved. It reads no credentials and
@@ -103,6 +106,8 @@ __all__ = [
     "RuntimePrecheckResult",
     "RuntimePrecheckReceipt",
     "PRECHECK_RECEIPT_SCHEMA_VERSION",
+    "PRECHECK_RECEIPT_ARTIFACT_NAMES",
+    "PrecheckReceiptError",
     "build_runtime_precheck_receipt",
     "OfflineReplayResult",
     "PaperFastLoopStack",
@@ -491,6 +496,61 @@ _IRREGULAR_ARTIFACT_OWNED_INSPECTION_REASONS: dict[str, tuple[str, ...]] = {
 
 PRECHECK_RECEIPT_SCHEMA_VERSION = 1
 
+PRECHECK_RECEIPT_ARTIFACT_NAMES: tuple[str, ...] = tuple(
+    name for name, _, _ in _PRECHECK_ARTIFACTS
+)
+
+
+class PrecheckReceiptError(ValueError):
+    """Receipt builder 입력 검증 실패 — ``reason_code``만 carry; raw 값/path 미포함."""
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+def _validate_receipt_checked_at(checked_at: str) -> None:
+    if type(checked_at) is not str or not checked_at.strip():
+        raise PrecheckReceiptError("receipt_invalid_checked_at")
+    try:
+        parsed = datetime.fromisoformat(checked_at)
+    except ValueError as exc:
+        raise PrecheckReceiptError("receipt_invalid_checked_at") from exc
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        raise PrecheckReceiptError("receipt_invalid_checked_at")
+
+
+def _validate_builder_fingerprint_sequence(
+    fingerprints: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+) -> None:
+    if len(fingerprints) != len(PRECHECK_RECEIPT_ARTIFACT_NAMES):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint_count")
+    names = [fp.name for fp in fingerprints]
+    if len(set(names)) != len(names):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
+    if any(name not in PRECHECK_RECEIPT_ARTIFACT_NAMES for name in names):
+        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
+    if tuple(names) != PRECHECK_RECEIPT_ARTIFACT_NAMES:
+        raise PrecheckReceiptError("receipt_invalid_fingerprint_order")
+
+
+def _validate_builder_receipt_fingerprints(
+    fingerprints_before: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+    fingerprints_after: tuple[sqlite_inspector.ArtifactFingerprint, ...],
+) -> None:
+    _validate_builder_fingerprint_sequence(fingerprints_before)
+    _validate_builder_fingerprint_sequence(fingerprints_after)
+    before_names = tuple(fp.name for fp in fingerprints_before)
+    after_names = tuple(fp.name for fp in fingerprints_after)
+    if before_names != after_names:
+        raise PrecheckReceiptError("receipt_fingerprint_identity_mismatch")
+
+
+def _validate_builder_receipt_reasons(reasons: tuple[str, ...]) -> None:
+    for reason in reasons:
+        if type(reason) is not str or not reason.strip():
+            raise PrecheckReceiptError("receipt_invalid_reason")
+
 
 def _precheck_activation_posture() -> dict[str, bool | str]:
     """단일 출처: precheck/receipt/CLI activation 필드 — drift 방지."""
@@ -568,6 +628,9 @@ def build_runtime_precheck_receipt(
     ``checked_at``은 ``precheck_runtime``에 전달된 timezone-aware ``now``의 ISO 문자열이어야
     한다(별도 clock read 없음). ``receipt_sha256``은 canonical observation identifier이며
     전자서명·승인·runtime authorization이 아니다."""
+    _validate_receipt_checked_at(checked_at)
+    _validate_builder_receipt_fingerprints(fingerprints_before, fingerprints_after)
+    _validate_builder_receipt_reasons(reasons)
     posture = _precheck_activation_posture()
     hash_payload = _build_receipt_hash_payload(
         schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,

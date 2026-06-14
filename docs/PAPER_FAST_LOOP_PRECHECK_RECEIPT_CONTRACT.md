@@ -114,10 +114,13 @@ trust-anchor or identity authentication.
 
 - signing key / HMAC / public-key signature
 - receipt file persistence
-- receipt verification CLI
 - approval input flags / activation flags
 - TTL / expiry thresholds
 - persisted activation epoch
+
+Verification (RTM-7c.4e): ``composition.precheck_receipt_verifier`` or CLI
+``--verify-precheck-receipt`` (stdin-only receipt object). See
+``docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md``.
 
 ## CLI (`--precheck-runtime --json`)
 

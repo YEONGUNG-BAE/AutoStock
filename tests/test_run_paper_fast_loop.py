@@ -7,6 +7,7 @@ side effect. ``--replay`` uses an OS temp dir, never the configured runtime/ pat
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import config.settings as _settings_mod
 from composition.paper_fast_loop import PaperFastLoopPaths
 from config.settings import RuntimePaperFastLoopSettings
+from decision.canonical_json import payload_sha256
 
 # ops/ is not a package; load the CLI module by path.
 _CLI_PATH = Path(__file__).resolve().parents[1] / "ops" / "run_paper_fast_loop.py"
@@ -467,3 +469,202 @@ def test_precheck_runtime_live_config_fails_closed_without_environ_access(
     assert "RuntimeGateError(" not in combined
     assert str(config_path) not in json.dumps(payload)
     assert "allow_live_trading" not in json.dumps(payload)
+
+
+# --- RTM-7c.4e verify-precheck-receipt CLI ---
+
+
+def _stdin_bytes(data: bytes) -> object:
+    class _Stdin:
+        buffer = io.BytesIO(data)
+
+    return _Stdin()
+
+
+def _run_verify(data: bytes, capsys: pytest.CaptureFixture[str]) -> tuple[int, dict]:
+    sys.stdin = _stdin_bytes(data)  # type: ignore[assignment]
+    code = cli.main(["--verify-precheck-receipt", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    return code, payload
+
+
+def _assert_emitted_receipt_hash_matches_nested(receipt: dict[str, object]) -> None:
+    stored = receipt["receipt_sha256"]
+    assert isinstance(stored, str)
+    body = dict(receipt)
+    del body["receipt_sha256"]
+    assert payload_sha256(body) == stored
+
+
+def test_emitted_precheck_receipt_hash_recomputes_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 0
+    receipt = payload["precheck_receipt"]
+    _assert_emitted_receipt_hash_matches_nested(receipt)
+    serialized = json.dumps(receipt)
+    repo = str(Path(__file__).resolve().parents[1])
+    assert repo not in serialized
+    assert "KIS_" not in serialized
+    assert "APP_KEY" not in serialized
+    assert "APP_SECRET" not in serialized
+    assert "Traceback" not in serialized
+
+
+def test_emitted_precheck_receipt_hash_recomputes_no_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = _write_config(tmp_path)
+    code, payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    assert code == 1
+    receipt = payload["precheck_receipt"]
+    _assert_emitted_receipt_hash_matches_nested(receipt)
+
+
+def test_verify_cli_accepts_emitted_pass_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = RuntimePaperFastLoopSettings(enabled=True, symbol="005930")
+    _seed_valid_via_helper(tmp_path, settings)
+    _, precheck_payload = _run(["--config", str(config_path), "--precheck-runtime", "--json"], capsys)
+    receipt = precheck_payload["precheck_receipt"]
+    code, verify_payload = _run_verify(json.dumps(receipt).encode("utf-8"), capsys)
+    assert code == 0
+    assert verify_payload["outcome"] == "VALID"
+    assert verify_payload["mode"] == "verify-precheck-receipt"
+    assert verify_payload["activation_authorized"] is False
+    assert verify_payload["receipt_sha256"] == receipt["receipt_sha256"]
+
+
+def test_verify_cli_accepts_emitted_no_go_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _, precheck_payload = _run(
+        ["--config", str(_write_config(tmp_path)), "--precheck-runtime", "--json"], capsys
+    )
+    receipt = precheck_payload["precheck_receipt"]
+    code, verify_payload = _run_verify(json.dumps(receipt).encode("utf-8"), capsys)
+    assert code == 0
+    assert verify_payload["outcome"] == "VALID"
+
+
+def test_verify_cli_rejects_tampered_receipt(capsys: pytest.CaptureFixture[str]) -> None:
+    import test_precheck_receipt_verifier as vrf_helper
+
+    receipt = vrf_helper._valid_receipt()
+    receipt["checked_at"] = "2026-06-16T01:00:00+00:00"
+    code, payload = _run_verify(json.dumps(receipt).encode("utf-8"), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["receipt_hash_mismatch"]
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        (b"", "receipt_input_empty"),
+        (b"\xff\xfe", "receipt_input_not_utf8"),
+        (b"{not json", "receipt_input_not_json"),
+    ],
+)
+def test_verify_cli_input_failures(data: bytes, reason: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_verify(data, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == [reason]
+    assert payload["activation_authorized"] is False
+
+
+def test_verify_cli_rejects_oversized_stdin(capsys: pytest.CaptureFixture[str]) -> None:
+    limit = cli._VERIFY_RECEIPT_STDIN_LIMIT
+    code, payload = _run_verify(b"x" * (limit + 1), capsys)
+    assert code == 1
+    assert payload["reason_codes"] == ["receipt_input_too_large"]
+
+
+def test_verify_cli_accepts_stdin_at_exact_limit(capsys: pytest.CaptureFixture[str]) -> None:
+    import test_precheck_receipt_verifier as vrf_helper
+
+    receipt = vrf_helper._valid_receipt()
+    data = json.dumps(receipt).encode("utf-8")
+    limit = cli._VERIFY_RECEIPT_STDIN_LIMIT
+    assert len(data) <= limit
+    code, payload = _run_verify(data, capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+
+
+def test_verify_cli_mutually_exclusive_with_precheck(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run(["--verify-precheck-receipt", "--precheck-runtime", "--json"], capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert "mutually exclusive" in payload["reason_code"]
+
+
+def test_verify_cli_makes_zero_load_settings_calls(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import test_precheck_receipt_verifier as vrf_helper
+
+    calls: list[str] = []
+
+    def _spy(*_a: object, **_k: object) -> object:
+        calls.append("load_settings")
+        raise AssertionError("verify must not load settings")
+
+    monkeypatch.setattr(cli, "load_settings", _spy)
+    _run_verify(json.dumps(vrf_helper._valid_receipt()).encode("utf-8"), capsys)
+    assert calls == []
+
+
+def test_verify_cli_makes_zero_environ_access(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import test_precheck_receipt_verifier as vrf_helper
+
+    _patch_settings_environ_spy(monkeypatch)
+    _run_verify(json.dumps(vrf_helper._valid_receipt()).encode("utf-8"), capsys)
+
+
+def test_verify_cli_sanitizes_poison_input(capsys: pytest.CaptureFixture[str]) -> None:
+    poison = {
+        "schema_version": 1,
+        "checked_at": "2026-06-16T00:30:00+00:00",
+        "market": "KR",
+        "symbol": "005930",
+        "enabled": True,
+        "machine_outcome": "pass",
+        "inspection_outcome": "ok",
+        "reasons": [],
+        "fingerprints_before": [],
+        "fingerprints_after": [],
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+        "receipt_sha256": "ab" * 32,
+        "KIS_LIVE_APP_KEY": "/home/secret",
+    }
+    code, payload = _run_verify(json.dumps(poison).encode("utf-8"), capsys)
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert "KIS_" not in combined
+    assert "/home/" not in combined
+    assert "APP_SECRET" not in combined
+    assert "Traceback" not in combined
