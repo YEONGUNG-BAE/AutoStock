@@ -142,7 +142,7 @@ No secret/config/raw DB values listed.
 
 | location | symbol / mode | notes |
 |----------|---------------|-------|
-| `ops/run_paper_fast_loop.py` | `--validate-only`, `--inspect-existing`, `--precheck-runtime`, `--verify-precheck-receipt`, `--revalidate-activation-candidate`, `--final-preflight-activation-candidate`, `--replay` | operator CLI; no live runtime |
+| `ops/run_paper_fast_loop.py` | `--validate-only`, `--inspect-existing`, `--precheck-runtime`, `--verify-precheck-receipt`, `--revalidate-activation-candidate`, `--final-preflight-activation-candidate`, `--freshness-preflight-activation-candidate`, `--replay` | operator CLI; no live runtime |
 | `src/composition/paper_fast_loop.py` | `build_paper_fast_loop_plan`, `inspect_paper_fast_loop`, `precheck_runtime`, `replay_offline` | composition root; replay uses temp dir |
 | `src/composition/precheck_receipt_verifier.py` | `verify_runtime_precheck_receipt_payload` | stdin/API verification only |
 | `tests/test_full_day_two_loop_rehearsal.py` | full-day rehearsal | fake clock; temp paths |

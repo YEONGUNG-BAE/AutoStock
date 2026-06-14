@@ -785,3 +785,432 @@ def test_reason_precedence_matrix_early_short_circuits(
         base_dir=tmp_path,
     )
     assert result.reasons == (expected_reason,)
+
+
+# --- RTM-7c.4m CLI: explicit freshness-qualified preflight ---
+
+
+import importlib.util
+import io
+import json
+
+import config.settings as _settings_mod
+
+_CLI_PATH = Path(__file__).resolve().parents[1] / "ops" / "run_paper_fast_loop.py"
+_spec = importlib.util.spec_from_file_location("run_paper_fast_loop", _CLI_PATH)
+assert _spec is not None and _spec.loader is not None
+cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cli)
+
+_KST = cli._KST
+_SYMBOL = pfl_helper._SYMBOL
+
+
+def _stdin_bytes(data: bytes) -> object:
+    class _Stdin:
+        buffer = io.BytesIO(data)
+
+    return _Stdin()
+
+
+def _write_config(tmp_path: Path, *, enabled: bool = True, symbol: str = _SYMBOL) -> Path:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[runtime.paper_fast_loop]
+enabled = {str(enabled).lower()}
+market = "KR"
+symbol = "{symbol}"
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+class _FixedClock:
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        return _NOW.astimezone(_KST) if tz is not None else _NOW
+
+
+class _AgedClock:
+    """Pins CLI clock to receipt checked_at + ``offset_us`` microseconds."""
+
+    def __init__(self, offset_us: int) -> None:
+        self._offset_us = offset_us
+
+    def now(self, tz: object = None) -> datetime:
+        instant = _NOW + timedelta(microseconds=self._offset_us)
+        return instant.astimezone(_KST) if tz is not None else instant
+
+
+class _FutureClock:
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        return _FUTURE.astimezone(_KST) if tz is not None else _FUTURE
+
+
+class _PastClock:
+    @staticmethod
+    def now(tz: object = None) -> datetime:
+        return _PAST.astimezone(_KST) if tz is not None else _PAST
+
+
+def _freshness_argv(config_path: Path, max_age: str | None = None) -> list[str]:
+    argv = [
+        "--config",
+        str(config_path),
+        "--freshness-preflight-activation-candidate",
+        "--json",
+    ]
+    if max_age is not None:
+        argv.extend(["--max-age-microseconds", max_age])
+    return argv
+
+
+def _run_freshness_cli(
+    argv: list[str], receipt: dict[str, Any] | None, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, dict[str, Any]]:
+    if receipt is not None:
+        sys.stdin = _stdin_bytes(json.dumps(receipt).encode("utf-8"))  # type: ignore[assignment]
+    code = cli.main(argv)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    return code, payload
+
+
+def _assert_freshness_posture(payload: dict[str, Any], *, policy_evaluated: bool) -> None:
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert payload["explicit_operator_approval_required"] is True
+    assert payload["writers_stopped_manual_confirmation_required"] is True
+    assert payload["freshness_policy_evaluated"] is policy_evaluated
+    assert payload["credential_read"] is False
+    assert payload["network_called"] is False
+    assert payload["broker_called"] is False
+    assert payload["operational_db_written"] is False
+    assert payload["filesystem_written"] is False
+    assert payload["runtime_file_created"] is False
+    assert payload["mode"] == "freshness_preflight_activation_candidate"
+    assert "config" not in payload
+
+
+def test_freshness_cli_pass_at_age_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+    assert payload["reasons"] == []
+    assert payload["receipt_age_microseconds"] == 0
+    assert payload["max_age_microseconds"] == 100
+    assert payload["final_preflight_outcome"] == "pass"
+    _assert_freshness_posture(payload, policy_evaluated=True)
+
+
+@pytest.mark.parametrize(
+    ("offset_us", "max_age", "expect_pass"),
+    [
+        (100, 100, True),
+        (99, 100, True),
+        (101, 100, False),
+        (0, 0, True),
+        (1, 0, False),
+    ],
+)
+def test_freshness_cli_age_boundary_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    offset_us: int,
+    max_age: int,
+    expect_pass: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _AgedClock(offset_us))
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, str(max_age)), receipt, capsys
+    )
+    assert code == (0 if expect_pass else 1)
+    assert payload["outcome"] == ("PASS" if expect_pass else "NO_GO")
+    assert payload["receipt_age_microseconds"] == offset_us
+    assert payload["max_age_microseconds"] == max_age
+    if expect_pass:
+        assert payload["reasons"] == []
+        _assert_freshness_posture(payload, policy_evaluated=True)
+    else:
+        assert payload["reasons"] == ["candidate_receipt_stale"]
+        _assert_freshness_posture(payload, policy_evaluated=True)
+
+
+def test_freshness_cli_missing_max_age(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_freshness_cli(
+        ["--freshness-preflight-activation-candidate", "--json"],
+        None,
+        capsys,
+    )
+    assert code == 1
+    assert payload["reasons"] == ["freshness_policy_input_missing"]
+    assert payload["max_age_microseconds"] is None
+    _assert_freshness_posture(payload, policy_evaluated=False)
+
+
+def test_freshness_cli_invalid_max_age_no_side_effects(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stdin_reads: list[int] = []
+
+    def _spy_read(size: int = -1) -> bytes:
+        stdin_reads.append(size)
+        return b""
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    load_calls: list[str] = []
+
+    def _spy_load(*_a: object, **_k: object) -> object:
+        load_calls.append("load")
+        raise AssertionError("config must not load on invalid max-age")
+
+    monkeypatch.setattr(cli, "load_settings", _spy_load)
+
+    class _RaisingDatetime:
+        @staticmethod
+        def now(tz: object = None) -> datetime:
+            raise AssertionError("clock must not read on invalid max-age")
+
+    monkeypatch.setattr(cli, "datetime", _RaisingDatetime)
+    monkeypatch.setattr(_settings_mod, "os", type("_Os", (), {"environ": {}})())
+
+    code, payload = _run_freshness_cli(
+        ["--freshness-preflight-activation-candidate", "--max-age-microseconds", "-1", "--json"],
+        None,
+        capsys,
+    )
+    assert code == 1
+    assert payload["reasons"] == ["freshness_policy_input_invalid"]
+    assert stdin_reads == []
+    assert load_calls == []
+
+
+def test_freshness_cli_max_age_not_applicable_on_final_preflight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload = _run_freshness_cli(
+        [
+            "--final-preflight-activation-candidate",
+            "--max-age-microseconds",
+            "100",
+            "--json",
+        ],
+        None,
+        capsys,
+    )
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["reason_code"] == "freshness_policy_argument_not_applicable"
+
+
+def test_freshness_cli_run_with_max_age_still_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_freshness_cli(
+        ["--run", "--max-age-microseconds", "100", "--json"], None, capsys
+    )
+    assert code == 2
+    assert payload["reason_code"] == "live_run_not_implemented"
+
+
+def test_freshness_cli_mutually_exclusive(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_freshness_cli(
+        [
+            "--freshness-preflight-activation-candidate",
+            "--final-preflight-activation-candidate",
+            "--max-age-microseconds",
+            "100",
+            "--json",
+        ],
+        vrf_helper._valid_receipt(),
+        capsys,
+    )
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert "mutually exclusive" in payload["reason_code"]
+
+
+@pytest.mark.parametrize(
+    ("clock", "expected_reason"),
+    [
+        (_PastClock, "candidate_receipt_time_in_future"),
+        (_FutureClock, "candidate_current_precheck:execution_inputs_expired"),
+    ],
+    ids=["future_receipt", "expired_snapshot"],
+)
+def test_freshness_cli_final_preflight_no_go_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    clock: type,
+    expected_reason: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", clock)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+
+    def _fail_eval(*_a: object, **_k: object) -> object:
+        raise AssertionError("freshness evaluator must not run on final NO_GO")
+
+    monkeypatch.setattr(freshness_mod, "evaluate_receipt_freshness", _fail_eval)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "999999999999"), receipt, capsys
+    )
+    assert code == 1
+    assert payload["freshness_policy_evaluated"] is False
+    if expected_reason.startswith("candidate_current_precheck:"):
+        assert any(r.startswith("candidate_current_precheck:") for r in payload["reasons"])
+    else:
+        assert payload["reasons"] == [expected_reason]
+
+
+def test_freshness_cli_config_mismatch_no_evaluator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    receipt = vrf_helper._valid_receipt(symbol="000660")
+
+    def _fail_eval(*_a: object, **_k: object) -> object:
+        raise AssertionError("evaluator must not run on config mismatch")
+
+    monkeypatch.setattr(freshness_mod, "evaluate_receipt_freshness", _fail_eval)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 1
+    assert payload["reasons"] == ["candidate_symbol_mismatch"]
+    assert payload["freshness_policy_evaluated"] is False
+    assert payload["max_age_microseconds"] == 100
+
+
+class _NoEnvironAccess:
+    _MSG = "freshness preflight must not read os.environ"
+
+    def __getitem__(self, key: object) -> str:
+        raise AssertionError(f"{self._MSG} (__getitem__ {key!r})")
+
+    def __contains__(self, key: object) -> bool:
+        raise AssertionError(f"{self._MSG} (__contains__ {key!r})")
+
+    def get(self, key: object, default: object = None) -> object:
+        raise AssertionError(f"{self._MSG} (get {key!r})")
+
+    def __iter__(self):
+        raise AssertionError(f"{self._MSG} (__iter__)")
+
+    def keys(self):
+        raise AssertionError(f"{self._MSG} (keys)")
+
+    def copy(self):
+        raise AssertionError(f"{self._MSG} (copy)")
+
+
+import os as _real_os  # noqa: E402
+
+
+class _OsShim:
+    environ = _NoEnvironAccess()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(_real_os, name)
+
+
+def test_freshness_cli_zero_environ_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    monkeypatch.setattr(_settings_mod, "os", _OsShim())
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 0
+    assert payload["outcome"] == "PASS"
+
+
+def test_freshness_cli_env_substitution_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_settings_mod, "os", _OsShim())
+    config_path = tmp_path / "config_env.toml"
+    config_path.write_text(
+        """
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "005930"
+ledger_path = "${LEDGER_PATH}/ledger.sqlite3"
+""",
+        encoding="utf-8",
+    )
+    receipt = vrf_helper._valid_receipt()
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 1
+    assert payload["reasons"] == ["config error: ConfigEnvironmentError"]
+
+
+def test_freshness_cli_sanitizes_poison_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    poison_path = tmp_path / "poison_config.toml"
+    poison_path.write_text(
+        """
+[runtime.paper_fast_loop]
+enabled = true
+market = "KR"
+symbol = "005930"
+""",
+        encoding="utf-8",
+    )
+    receipt = vrf_helper._valid_receipt()
+    receipt["reasons"] = ["/home/user/KIS_LIVE_APP_KEY/secret"]
+    code, payload = _run_freshness_cli(
+        _freshness_argv(poison_path.resolve(), "100"), receipt, capsys
+    )
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert code == 1
+    assert "KIS_" not in combined
+    assert "APP_SECRET" not in combined
+    assert "/home/" not in combined
+    assert str(poison_path) not in combined
+    assert "Traceback" not in combined
+    assert "ValueError(" not in combined
+    assert json.dumps(receipt) not in combined
+
+
+def test_freshness_cli_module_import_guard() -> None:
+    source = _CLI_PATH.read_text(encoding="utf-8")
+    for forbidden in ("socket", "websocket", "websockets", "http", "httpx", "urllib", "requests"):
+        assert f"import {forbidden}" not in source
+        assert f"from {forbidden}" not in source

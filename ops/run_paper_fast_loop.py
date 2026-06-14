@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Eight mutually-exclusive modes:
+Nine mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -23,6 +23,10 @@ Eight mutually-exclusive modes:
   with empty ``environ``; current-time validity IS evaluated, receipt age and freshness policy
   are NOT; the composed precheck opens the configured DBs read-only (no write). Mechanical PASS
   is NOT activation authorization.
+* ``--freshness-preflight-activation-candidate``: stdin receipt + config + required explicit
+  ``--max-age-microseconds``; composes verified final preflight with explicit freshness policy
+  (RTM-7c.4l). Config loads with empty ``environ``; ``now=datetime.now(tz=KST)``; no default
+  threshold; mechanical FRESH PASS is NOT activation authorization.
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -65,6 +69,12 @@ from composition.activation_candidate_final_preflight import (
     ActivationCandidateFinalPreflightOutcome,
     final_preflight_activation_candidate,
 )
+from composition.activation_candidate_freshness_preflight import (
+    ActivationCandidateFreshnessPreflightOutcome,
+    freshness_qualify_activation_candidate,
+)
+from composition.freshness_policy_cli_input import parse_max_age_microseconds_cli_input
+from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
     RuntimePrecheckReceiptVerification,
@@ -146,6 +156,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--freshness-preflight-activation-candidate",
+        action="store_true",
+        help=(
+            "stdin receipt + config + required --max-age-microseconds: verified final preflight "
+            "with explicit freshness policy evaluation; config loads with empty environ; no "
+            "default threshold; mechanical FRESH PASS is NOT activation authorization"
+        ),
+    )
+    parser.add_argument(
+        "--max-age-microseconds",
+        default=None,
+        metavar="MICROSECONDS",
+        help=(
+            "required explicit ASCII decimal max receipt age in microseconds; only valid with "
+            "--freshness-preflight-activation-candidate"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -170,6 +198,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("verify-precheck-receipt", args.verify_precheck_receipt),
             ("revalidate-activation-candidate", args.revalidate_activation_candidate),
             ("final-preflight-activation-candidate", args.final_preflight_activation_candidate),
+            ("freshness-preflight-activation-candidate", args.freshness_preflight_activation_candidate),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -179,7 +208,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
         raise CliInputError(
             "modes --validate-only / --inspect-existing / --precheck-runtime / "
             "--verify-precheck-receipt / --revalidate-activation-candidate / "
-            "--final-preflight-activation-candidate / --replay / --run are mutually exclusive."
+            "--final-preflight-activation-candidate / "
+            "--freshness-preflight-activation-candidate / --replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -437,6 +467,88 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
     return 1
 
 
+def _freshness_preflight_summary(
+    result: Any, *, parsed_max_age: int | None
+) -> dict[str, Any]:
+    passed = result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    final_result = result.final_preflight_result
+    freshness_eval = result.freshness_evaluation
+
+    if freshness_eval is not None:
+        receipt_age = freshness_eval.receipt_age_microseconds
+        max_age = freshness_eval.max_age_microseconds
+    elif final_result is not None:
+        receipt_age = (
+            final_result.receipt_age_microseconds
+            if final_result.receipt_age_evaluated
+            else None
+        )
+        max_age = parsed_max_age
+    else:
+        receipt_age = None
+        max_age = parsed_max_age
+
+    final_outcome: str | None = None
+    final_reasons: list[str] = []
+    if final_result is not None:
+        final_outcome = final_result.outcome.value
+        final_reasons = list(final_result.reasons)
+
+    return {
+        "outcome": "PASS" if passed else "NO_GO",
+        "mode": "freshness_preflight_activation_candidate",
+        "receipt_sha256": result.receipt_sha256,
+        "market": result.market,
+        "symbol": result.symbol,
+        "reasons": list(result.reasons),
+        "freshness_policy_evaluated": result.freshness_policy_evaluated,
+        "receipt_age_microseconds": receipt_age,
+        "max_age_microseconds": max_age,
+        "final_preflight_outcome": final_outcome,
+        "final_preflight_reasons": final_reasons,
+        "activation_authorized": result.activation_authorized,
+        "runtime_activation_outcome": result.runtime_activation_outcome,
+        "explicit_operator_approval_required": result.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            result.writers_stopped_manual_confirmation_required
+        ),
+        "credential_read": False,
+        "network_called": False,
+        "broker_called": False,
+        "operational_db_written": False,
+        "filesystem_written": False,
+        "runtime_file_created": False,
+    }
+
+
+def _freshness_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO) -> int:
+    summary = {
+        "outcome": "NO_GO",
+        "mode": "freshness_preflight_activation_candidate",
+        "receipt_sha256": None,
+        "market": None,
+        "symbol": None,
+        "reasons": [reason_code],
+        "freshness_policy_evaluated": False,
+        "receipt_age_microseconds": None,
+        "max_age_microseconds": None,
+        "final_preflight_outcome": None,
+        "final_preflight_reasons": [],
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "explicit_operator_approval_required": True,
+        "writers_stopped_manual_confirmation_required": True,
+        "credential_read": False,
+        "network_called": False,
+        "broker_called": False,
+        "operational_db_written": False,
+        "filesystem_written": False,
+        "runtime_file_created": False,
+    }
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
 def _verify_receipt_summary(result: Any) -> dict[str, Any]:
     valid = result.outcome is ReceiptVerificationOutcome.VALID
     return {
@@ -540,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
         _emit(_run_refused_summary(), as_json=as_json, out=out)
         return 2
 
+    # --max-age-microseconds는 freshness-qualified mode에서만 허용한다.
+    if args.max_age_microseconds is not None and mode != "freshness-preflight-activation-candidate":
+        return _fail("freshness_policy_argument_not_applicable", as_json=as_json, out=out)
+
     # verify-precheck-receipt: stdin-only — config/env/DB/fs write/network/clock read 없음.
     if mode == "verify-precheck-receipt":
         payload, input_error = _read_verify_stdin_payload()
@@ -604,6 +720,40 @@ def main(argv: list[str] | None = None) -> int:
                 f"final-preflight error: {type(exc).__name__}", as_json=as_json, out=out
             )
         summary = _final_preflight_summary(result)
+        _emit(summary, as_json=as_json, out=out)
+        return 0 if summary["outcome"] == "PASS" else 1
+
+    # freshness-preflight-activation-candidate: max-age parse → stdin → config(environ={}) → KST now.
+    if mode == "freshness-preflight-activation-candidate":
+        parsed_max_age, max_age_error = parse_max_age_microseconds_cli_input(
+            args.max_age_microseconds
+        )
+        if max_age_error is not None:
+            return _freshness_preflight_input_fail(max_age_error, as_json=as_json, out=out)
+        assert parsed_max_age is not None
+        payload, input_error = _read_verify_stdin_payload()
+        if input_error is not None:
+            return _freshness_preflight_input_fail(input_error, as_json=as_json, out=out)
+        try:
+            settings: AppSettings = load_settings(args.config, environ={})
+        except (SettingsError, OSError) as exc:
+            return _freshness_preflight_input_fail(
+                f"config error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        fast_loop = settings.runtime.paper_fast_loop
+        policy = ReceiptFreshnessPolicy(max_age_microseconds=parsed_max_age)
+        try:
+            result = freshness_qualify_activation_candidate(
+                settings=fast_loop,
+                receipt_payload=payload,
+                now=datetime.now(tz=_KST),
+                policy=policy,
+            )
+        except Exception as exc:
+            return _freshness_preflight_input_fail(
+                f"freshness-preflight error: {type(exc).__name__}", as_json=as_json, out=out
+            )
+        summary = _freshness_preflight_summary(result, parsed_max_age=parsed_max_age)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

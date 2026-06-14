@@ -264,7 +264,7 @@ close-event log across all three handles (not merely a per-handle close count).
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 
-Eight mutually-exclusive modes (default `--validate-only`):
+Nine mutually-exclusive modes (default `--validate-only`):
 
 | mode | exit code | notes |
 |------|-----------|-------|
@@ -273,11 +273,17 @@ Eight mutually-exclusive modes (default `--validate-only`):
 | `--precheck-runtime` | 0 if machine `PASS`, else 1 (`NO_GO`) | read-only attended precheck; machine PASS is **not** an activation authorization; JSON includes nested `precheck_receipt` (RTM-7c.4d — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`) |
 | `--verify-precheck-receipt` | 0 if `VALID`, else 1 | stdin-only receipt schema + hash verification; no config/env/DB/fs write (RTM-7c.4e — see `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md`) |
 | `--revalidate-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); read-only approval-time state revalidation; mechanical PASS is **not** activation authorization (RTM-7c.4g — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md`) |
-| `--final-preflight-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); composes 4g revalidation + policy-neutral receipt time observation (exact `receipt_age_microseconds`; future `checked_at` fail-closed) + fresh current-time precheck (`now=datetime.now(tz=KST)`); catches byte-identical time-window expiry; the untrusted receipt is verified and frozen into one immutable snapshot **once** and both the revalidation and receipt-time stages read that same snapshot (RTM-7c.4j — receipt verifier called exactly once per preflight, no cross-stage mixed observation); path-free summary (no `config` field); `freshness_policy_evaluated=false` always — RTM-7c.4k/4l explicit max-age evaluation is separate API-only modules, not composed into this CLI mode; mechanical PASS is **not** activation authorization (RTM-7c.4h + 7c.4i + 7c.4j — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md`, `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`; freshness: `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md`, `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`) |
+| `--final-preflight-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); composes 4g revalidation + policy-neutral receipt time observation (exact `receipt_age_microseconds`; future `checked_at` fail-closed) + fresh current-time precheck (`now=datetime.now(tz=KST)`); catches byte-identical time-window expiry; the untrusted receipt is verified and frozen into one immutable snapshot **once** and both the revalidation and receipt-time stages read that same snapshot (RTM-7c.4j — receipt verifier called exactly once per preflight, no cross-stage mixed observation); path-free summary (no `config` field); `freshness_policy_evaluated=false` always — explicit max-age evaluation is **not** composed into this CLI mode; mechanical PASS is **not** activation authorization (RTM-7c.4h + 7c.4i + 7c.4j — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md`, `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`) |
+| `--freshness-preflight-activation-candidate` | 0 if freshness-qualified mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`) + **required** `--max-age-microseconds` (strict ASCII decimal parser; no default/config/env threshold); composes verified final preflight + explicit freshness policy (`now=datetime.now(tz=KST)`); path-free summary; mechanical FRESH PASS is **not** activation authorization (RTM-7c.4m — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 
 - Mode collisions → exit 1, `reason_code` containing `mutually exclusive`.
+- `--max-age-microseconds` is valid **only** with `--freshness-preflight-activation-candidate`;
+  on any other mode → exit 1, `reason_code=freshness_policy_argument_not_applicable`
+  (existing mode behavior unchanged). On the freshness mode without the argument → exit 1,
+  `freshness_policy_input_missing`. Invalid token → exit 1, `freshness_policy_input_invalid`
+  before stdin/config/clock/DB access.
 - `inspect-existing` / `replay` internal failures are caught in `main()` and
   emitted as a sanitized `outcome=FAIL` / `reason_code=<inspect|replay> error:
   <ExceptionType>` with exit 1 — never a traceback or raw sqlite text.
@@ -299,12 +305,15 @@ Eight mutually-exclusive modes (default `--validate-only`):
   `httpx`, `urllib`, `requests`, `data`, `llm` (network/transport/credential/
   live-data/LLM surfaces).
 
-### RTM-7c.4l — freshness-qualified preflight (API-only; not a CLI mode)
+### RTM-7c.4l / 4m — freshness-qualified preflight
 
-`freshness_qualify_activation_candidate` is **not** wired into `ops/run_paper_fast_loop.py`.
-Closure processing order: policy snapshot → shared `now` guard → receipt snapshot → verified
-final core → freshness evaluation (snapshot policy). `--final-preflight-activation-candidate`
-and the policy-neutral wrapper are unchanged (`freshness_policy_evaluated=false`). See
+API: `freshness_qualify_activation_candidate` (required explicit `ReceiptFreshnessPolicy`).
+CLI (RTM-7c.4m): `--freshness-preflight-activation-candidate` with required
+`--max-age-microseconds` (strict ASCII decimal; no default/config/env threshold).
+Closure processing order: max-age parse → policy snapshot → shared `now` guard → receipt
+snapshot → verified final core → freshness evaluation (snapshot policy).
+`--final-preflight-activation-candidate` and the policy-neutral wrapper remain unchanged
+(`freshness_policy_evaluated=false`). See
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`.
 
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,

@@ -63,7 +63,10 @@ class ReceiptFreshnessEvaluation:
 
 
 def receipt_freshness_policy_is_valid(policy: object) -> bool:
-    """Exact ``ReceiptFreshnessPolicy`` with a valid max-age — shared with freshness preflight."""
+    """Exact ``ReceiptFreshnessPolicy`` with a valid max-age — shared with freshness preflight.
+
+    Validation and immutable snapshot share one operation via
+    ``snapshot_receipt_freshness_policy`` — no duplicate validation path."""
 
     return snapshot_receipt_freshness_policy(policy) is not None
 
@@ -86,7 +89,11 @@ def _validated_policy_max_age(policy: object) -> int | None:
 
     if type(policy) is not ReceiptFreshnessPolicy:
         return None
-    max_age = policy.max_age_microseconds
+    try:
+        max_age = policy.max_age_microseconds
+    except AttributeError:
+        # malformed exact-type instance (e.g. field deleted) — fail-closed, no escape
+        return None
     if not _max_age_is_valid(max_age):
         return None
     return max_age

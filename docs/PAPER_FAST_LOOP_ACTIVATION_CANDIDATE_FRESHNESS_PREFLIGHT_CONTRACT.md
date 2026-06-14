@@ -28,7 +28,6 @@ Processing requires:
 - Config/env/CLI threshold binding (OPEN)
 - Automatic integration into `--final-preflight-activation-candidate` (existing final
   preflight stays policy-neutral; `freshness_policy_evaluated=false` there)
-- Operator approval input or consumption
 - Writer-stop machine assertion
 - Receipt authenticity / signing / HMAC
 - Runtime activation authorization
@@ -128,15 +127,72 @@ explicit_operator_approval_required = true
 writers_stopped_manual_confirmation_required = true
 ```
 
-## Out of scope (this lane)
+## CLI mode (RTM-7c.4m)
 
+Operator CLI: `ops/run_paper_fast_loop.py --freshness-preflight-activation-candidate`
+
+9th mutually-exclusive mode. Requires stdin raw receipt object, `--config`, and **required**
+`--max-age-microseconds` (strict ASCII decimal `^[0-9]+$`; no default/config/env threshold).
+
+Recommended invocation:
+
+```bash
+PYTHONPATH=src uv run python ops/run_paper_fast_loop.py \
+  --freshness-preflight-activation-candidate \
+  --config path/to/config.toml \
+  --max-age-microseconds 300000000 \
+  --json
+```
+
+### CLI processing order
+
+1. Args parse / mode resolution
+2. `--run` early refusal (exit 2)
+3. `--max-age-microseconds` applicability (other modes → `freshness_policy_argument_not_applicable`)
+4. Max-age strict parse (`freshness_policy_input_missing` / `freshness_policy_input_invalid`)
+5. Stdin receipt read + strict JSON parse (reuse existing reader)
+6. `load_settings(config, environ={})`
+7. `now = datetime.now(tz=KST)` exactly once
+8. `freshness_qualify_activation_candidate(..., policy=ReceiptFreshnessPolicy(...))`
+9. Path-free sanitized JSON/text output
+
+Invalid max-age: stdin read 0, config load 0, env access 0, clock read 0, DB/filesystem 0.
+
+### CLI exit codes
+
+| outcome | exit |
+|---------|------|
+| freshness-qualified mechanical `PASS` | 0 |
+| `NO_GO` (incl. stale, final-preflight short-circuit, input/config failure) | 1 |
+| `--run` | 2 |
+
+Mechanical FRESH PASS is **not** activation authorization (`activation_authorized=false`,
+`runtime_activation_outcome="no_go"` always).
+
+### CLI JSON (path-free)
+
+Top-level fields include: `mode=freshness_preflight_activation_candidate`, `outcome`,
+`reasons`, `receipt_sha256`, `market`, `symbol`, `freshness_policy_evaluated`,
+`receipt_age_microseconds`, `max_age_microseconds`, `final_preflight_outcome`,
+`final_preflight_reasons`, constant NO-GO activation posture, and side-effect attestations
+(`credential_read`, `network_called`, `broker_called`, `operational_db_written`,
+`filesystem_written`, `runtime_file_created` all `false`). No config path, artifact path,
+raw receipt, raw `checked_at`, fingerprint payload, or secret/env identifier.
+
+`max_age_microseconds` is `null` when CLI input itself is missing/invalid; when a valid
+explicit policy was parsed and the API path ran, the parsed integer is emitted even on
+final-preflight `NO_GO` short-circuits.
+
+`--final-preflight-activation-candidate` remains policy-neutral and unchanged.
+
+## Out of scope (unchanged)
+
+- Default max-age / config/env max-age field
 - Max-age value selection / TTL calibration
-- Config/env/CLI threshold binding
-- New CLI mode
 - Policy persistence
 - Operator approval input/storage/consumption
 - Receipt signing / HMAC
-- Activation token / activation caller / `--run`
+- Activation token / activation caller / `--run` implementation
 - KIS / network / broker dispatch / orders
 - Operational SQLite write
 - Daemon / scheduler

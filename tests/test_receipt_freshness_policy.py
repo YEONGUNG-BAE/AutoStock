@@ -379,6 +379,27 @@ def test_none_policy_and_assessment_do_not_escape_attribute_error() -> None:
     assert result.reasons == ("freshness_policy_invalid",)
 
 
+def test_malformed_exact_policy_missing_field_fail_closed() -> None:
+    """H1 — exact-type instance with deleted field must not escape AttributeError."""
+
+    from composition.receipt_freshness_policy import (
+        receipt_freshness_policy_is_valid,
+        snapshot_receipt_freshness_policy,
+    )
+
+    policy = ReceiptFreshnessPolicy(max_age_microseconds=100)
+    object.__delattr__(policy, "max_age_microseconds")
+    assert snapshot_receipt_freshness_policy(policy) is None
+    assert receipt_freshness_policy_is_valid(policy) is False
+    result = evaluate_receipt_freshness(
+        time_assessment=_valid_assessment(),
+        policy=policy,
+    )
+    assert result.outcome is ReceiptFreshnessOutcome.NO_GO
+    assert result.reasons == ("freshness_policy_invalid",)
+    assert result.freshness_policy_evaluated is False
+
+
 # --- carry-over hardening H2: single-read observation ---
 
 
