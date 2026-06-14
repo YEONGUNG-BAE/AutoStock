@@ -360,6 +360,23 @@ and no extra clock is read. The digest is **not** authenticity, signing, approva
 activation token, or activation authorization, and is never persisted. See
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`.
 
+### RTM-7c.4o — canonical Operator approval intent (API-only)
+
+API: `build_operator_approval_intent(*, combined_result, declared_at,
+operator_approval_declared, writers_stopped_manually_confirmed,
+live_orders_forbidden_confirmed)`. Binds one combined `PASS` whose evidence is `CREATED`
+(schema v2, independent `evidence_sha256` recomputation match) plus three exact-`True` manual
+declarations and a timezone-aware caller `declared_at` (`declared_at >= evidence.evaluated_at`)
+into one immutable `OperatorApprovalIntent` (`approval_intent_sha256` via
+`decision.canonical_json.payload_sha256` over 12 non-digest fields; fixed
+`approval_scope="attended_paper_fast_loop_candidate"`). Combined `NO_GO` → `NOT_ELIGIBLE`; a
+contradictory combined `PASS`, malformed evidence, hash mismatch, non-exact declarations, or
+invalid `declared_at` → `INVALID`. Pure function: no clock read, no verifier/precheck/evaluator/
+evidence-builder re-invocation, no persistence. Intent is **not** identity, signature,
+writer-stop machine proof, approval consumption, replay prevention, or activation authorization.
+The existing CLI `--freshness-preflight-activation-candidate` is unchanged (evidence fields only).
+See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
+
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,
   `decision`, `analysis`, `config`, `composition`. Any first-party package

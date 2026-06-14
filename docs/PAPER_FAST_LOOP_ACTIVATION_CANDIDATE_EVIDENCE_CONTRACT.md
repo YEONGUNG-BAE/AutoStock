@@ -360,7 +360,7 @@ writers_stopped_manual_confirmation_required = true
 
 ## Out of scope (this lane)
 
-- Operator approval input/storage/consumption; approval-evidence binding
+- Operator approval input/storage/consumption (RTM-7c.4o defines approval-intent API-only binding; consumption remains OPEN)
 - Signing / HMAC
 - Evidence persistence / file output
 - Default/config/env max-age; threshold calibration
@@ -369,11 +369,20 @@ writers_stopped_manual_confirmation_required = true
 - Operational DB write; schema migration/reconcile
 - Daemon / scheduler / process lock; unattended pilot
 
+## Downstream: Operator approval intent (RTM-7c.4o)
+
+A future approval consumer may reference the `evidence_sha256` produced here. RTM-7c.4o adds
+`build_operator_approval_intent`, which binds one CREATED evidence digest (schema v2, hash
+recomputation match) plus three manual Operator declarations and a caller `declared_at`. Intent
+is **not** evidence, approval consumption, identity, or activation authorization. See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
+
 ## Related contracts
 
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` — qualified PASS source
 - `PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` — explicit FRESH/STALE evaluator
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — final-preflight PASS core
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — approval-intent digest (RTM-7c.4o)
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes
 - `docs/TECH_DEBT.md` (OPEN items)

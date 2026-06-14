@@ -133,8 +133,14 @@ The combined wrapper reports `PASS` only when evidence is `CREATED` — a qualif
 evidence is not created is combined `NO_GO` (`candidate_evidence_generation_invalid`), so a
 qualified PASS can never advance to approval/activation without a digest. `NO_GO`/`STALE` → no
 digest. Evidence is **not** authenticity, signing, approval, writer-stop, an activation token,
-or activation authorization, is never persisted, and the posture stays constant NO-GO. The
-binding of approval to this evidence remains **OPEN**.
+or activation authorization, is never persisted, and the posture stays constant NO-GO.
+**RTM-7c.4o** adds API-only **Operator approval intent**
+(`build_operator_approval_intent`): a combined PASS with CREATED evidence (schema v2, matching
+`evidence_sha256`) plus three manual Operator declarations and a caller `declared_at` freeze into
+one immutable `approval_intent_sha256`. Intent is **not** identity, signature, writer-stop machine
+proof, approval consumption, replay prevention, or activation authorization; it is never
+persisted and is not wired into CLI in this lane. Approval consumption and activation caller
+remain **OPEN**.
 
 ## Orphan sidecar observation limit
 
@@ -243,4 +249,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_RECEIPT_FRESHNESS_POLICY_CONTRACT.md` (RTM-7c.4k — explicit policy only; not composed into final-preflight wrapper)
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` (RTM-7c.4l — API-only qualified preflight)
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` (RTM-7c.4n — canonical evidence digest; not approval/activation)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4o — approval-intent digest; not consumption/activation)
 - `docs/TECH_DEBT.md` (OPEN items)
