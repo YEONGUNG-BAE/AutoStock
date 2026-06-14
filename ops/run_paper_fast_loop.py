@@ -71,10 +71,8 @@ from composition.activation_candidate_final_preflight import (
 )
 from composition.activation_candidate_evidence import (
     ActivationCandidateEvidenceOutcome,
+    FreshnessQualifiedEvidenceOutcome,
     freshness_qualify_and_build_candidate_evidence,
-)
-from composition.activation_candidate_freshness_preflight import (
-    ActivationCandidateFreshnessPreflightOutcome,
 )
 from composition.freshness_policy_cli_input import parse_max_age_microseconds_cli_input
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
@@ -471,18 +469,23 @@ def _final_preflight_input_fail(reason_code: str, *, as_json: bool, out: TextIO)
 
 
 def _freshness_preflight_summary(
-    result: Any, *, parsed_max_age: int | None, evidence_result: Any = None
+    combined: Any, *, parsed_max_age: int | None
 ) -> dict[str, Any]:
-    passed = result.outcome is ActivationCandidateFreshnessPreflightOutcome.PASS
+    # combined.outcome이 최종 PASS/NO_GO 판정이다. qualified PASS여도 evidence가 CREATED가
+    # 아니면 combined NO_GO(candidate_evidence_generation_invalid)로 fail-closed된다.
+    result = combined.qualified_result
+    evidence_result = combined.evidence_result
+    passed = combined.outcome is FreshnessQualifiedEvidenceOutcome.PASS
     final_result = result.final_preflight_result
     freshness_eval = result.freshness_evaluation
 
-    # canonical evidence digest는 PASS+FRESH(CREATED)에서만 노출한다. NO_GO/STALE/builder
-    # 미생성에서는 null — evidence digest는 approval/activation 인가가 아니다.
+    # canonical evidence digest는 combined PASS(=evidence CREATED)에서만 노출한다.
+    # NO_GO/STALE/builder 미생성에서는 null — evidence digest는 approval/activation 인가가 아니다.
     evidence_sha256: str | None = None
     evidence_schema_version: int | None = None
     if (
-        evidence_result is not None
+        passed
+        and evidence_result is not None
         and evidence_result.outcome is ActivationCandidateEvidenceOutcome.CREATED
         and evidence_result.evidence is not None
     ):
@@ -515,7 +518,7 @@ def _freshness_preflight_summary(
         "receipt_sha256": result.receipt_sha256,
         "market": result.market,
         "symbol": result.symbol,
-        "reasons": list(result.reasons),
+        "reasons": list(combined.reasons),
         "freshness_policy_evaluated": result.freshness_policy_evaluated,
         "receipt_age_microseconds": receipt_age,
         "max_age_microseconds": max_age,
@@ -774,11 +777,7 @@ def main(argv: list[str] | None = None) -> int:
             return _freshness_preflight_input_fail(
                 f"freshness-preflight error: {type(exc).__name__}", as_json=as_json, out=out
             )
-        summary = _freshness_preflight_summary(
-            combined.qualified_result,
-            parsed_max_age=parsed_max_age,
-            evidence_result=combined.evidence_result,
-        )
+        summary = _freshness_preflight_summary(combined, parsed_max_age=parsed_max_age)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
 

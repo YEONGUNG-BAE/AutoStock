@@ -328,12 +328,21 @@ API: `build_activation_candidate_evidence(*, qualified_result, evaluated_at)` an
 composition wrapper `freshness_qualify_and_build_candidate_evidence` (runs the qualified
 preflight once, then builds evidence on PASS only, reusing the same `now`). A qualified
 PASS/FRESH is frozen into one immutable `ActivationCandidateEvidence` (schema version 1;
-`evidence_sha256` via `decision.canonical_json.payload_sha256` over the 14 non-digest fields).
-`NO_GO`/`STALE` produce no digest. The CLI `--freshness-preflight-activation-candidate` PASS
+`evidence_sha256` via `decision.canonical_json.payload_sha256` over the 14 non-digest fields)
+**only** when the outer/final/freshness/time-assessment observations are mutually consistent —
+matching identity (sha/market/symbol), one agreed receipt age across all three stages, a
+policy-neutral final preflight + explicit FRESH freshness, a constant NO-GO posture on every
+nested stage, and an `evaluated_at` whose exact integer microseconds from the verified
+`checked_at` equal the observed age. Any mismatch fails closed to `INVALID` (RTM-7c.4n
+consistency closure). The wrapper returns a combined `FreshnessQualifiedEvidenceOutcome`: a
+qualified PASS is combined `PASS` only when evidence is `CREATED`; a qualified PASS whose
+evidence is not created is combined `NO_GO` with `candidate_evidence_generation_invalid` (no
+upstream rerun); a qualified `NO_GO`/`STALE` keeps its reasons and produces no digest. The CLI
+`--freshness-preflight-activation-candidate` `outcome`/exit follow the combined verdict: PASS
 JSON adds `candidate_evidence_sha256` / `candidate_evidence_schema_version` (both `null` on
-`NO_GO`/`STALE`/input failure); the qualified preflight is not re-run and no extra clock is
-read. The digest is **not** authenticity, signing, approval, an activation token, or activation
-authorization, and is never persisted. See
+combined `NO_GO`/`STALE`/evidence failure/input failure); the qualified preflight is not re-run
+and no extra clock is read. The digest is **not** authenticity, signing, approval, an
+activation token, or activation authorization, and is never persisted. See
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`.
 
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,

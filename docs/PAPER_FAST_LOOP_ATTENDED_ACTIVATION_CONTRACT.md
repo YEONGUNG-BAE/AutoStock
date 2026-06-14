@@ -112,9 +112,16 @@ authenticity, and Operator approval binding remain **OPEN**. RTM-7c.4n adds **ca
 freshness-qualified candidate evidence** (`build_activation_candidate_evidence`): a qualified
 PASS/FRESH is frozen into one immutable canonical payload (`evidence_sha256` over 14 fields,
 schema version 1) that a *future* approval stage can reference. Evidence is generated **only**
-for PASS/FRESH (`NO_GO`/`STALE` → no digest); it is **not** authenticity, signing, approval,
-writer-stop, an activation token, or activation authorization, is never persisted, and the
-posture stays constant NO-GO. The binding of approval to this evidence remains **OPEN**.
+for PASS/FRESH whose outer/final/freshness/time-assessment observations are mutually consistent
+(matching identity, one agreed receipt age across all stages, policy-neutral final + explicit
+FRESH, constant NO-GO posture on every nested stage, and an `evaluated_at` whose exact integer
+microseconds from the verified `checked_at` equal the observed age); any mismatch fails closed.
+The combined wrapper reports `PASS` only when evidence is `CREATED` — a qualified PASS whose
+evidence is not created is combined `NO_GO` (`candidate_evidence_generation_invalid`), so a
+qualified PASS can never advance to approval/activation without a digest. `NO_GO`/`STALE` → no
+digest. Evidence is **not** authenticity, signing, approval, writer-stop, an activation token,
+or activation authorization, is never persisted, and the posture stays constant NO-GO. The
+binding of approval to this evidence remains **OPEN**.
 
 ## Orphan sidecar observation limit
 

@@ -1007,6 +1007,39 @@ def test_freshness_cli_input_failure_null_evidence(
     assert payload["candidate_evidence_schema_version"] is None
 
 
+def test_freshness_cli_evidence_failure_fails_closed_to_no_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A qualified PASS whose evidence is not CREATED must be a CLI NO_GO (exit 1, null digest)."""
+    import composition.activation_candidate_evidence as evidence_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "datetime", _FixedClock)
+    config_path = _write_config(tmp_path)
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt(tmp_path, settings)
+
+    def _fake_builder(**kwargs: Any) -> Any:
+        return evidence_mod.ActivationCandidateEvidenceResult(
+            outcome=evidence_mod.ActivationCandidateEvidenceOutcome.INVALID,
+            reasons=("candidate_evidence_invalid_input",),
+            evidence=None,
+        )
+
+    monkeypatch.setattr(evidence_mod, "build_activation_candidate_evidence", _fake_builder)
+
+    code, payload = _run_freshness_cli(
+        _freshness_argv(config_path, "100"), receipt, capsys
+    )
+    assert code == 1
+    assert payload["outcome"] == "NO_GO"
+    assert payload["reasons"] == ["candidate_evidence_generation_invalid"]
+    assert payload["candidate_evidence_sha256"] is None
+    assert payload["candidate_evidence_schema_version"] is None
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+
+
 def test_freshness_cli_missing_max_age(capsys: pytest.CaptureFixture[str]) -> None:
     code, payload = _run_freshness_cli(
         ["--freshness-preflight-activation-candidate", "--json"],

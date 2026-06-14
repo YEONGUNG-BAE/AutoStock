@@ -206,9 +206,15 @@ candidate_evidence_sha256        # lowercase hex64 on CREATED PASS, else null
 candidate_evidence_schema_version # 1 on CREATED PASS, else null
 ```
 
-`NO_GO`/`STALE`/input-failure → both `null`. The CLI runs the qualified preflight once and
-reuses the same KST `now` as the evidence `evaluated_at` (no second qualified run, no extra
-clock read) via `freshness_qualify_and_build_candidate_evidence`. The digest is **not**
+The CLI `outcome`/exit are driven by the **combined** verdict (`FreshnessQualifiedEvidenceOutcome`):
+a qualified PASS surfaces as CLI `PASS` (exit 0) **only** when evidence is `CREATED`. A
+qualified PASS whose evidence is not created fails closed to `NO_GO` (exit 1) with
+`reasons=["candidate_evidence_generation_invalid"]` and both digest fields `null`; an existing
+qualified `NO_GO`/`STALE`/input-failure preserves its exact reasons (no
+`candidate_evidence_generation_invalid` appended) with both fields `null`. The CLI runs the
+qualified preflight once and reuses the same KST `now` as the evidence `evaluated_at` (no
+second qualified run, no extra clock read; an evidence-generation failure does not rerun any
+upstream stage) via `freshness_qualify_and_build_candidate_evidence`. The digest is **not**
 approval or activation authorization — see
 `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`.
 

@@ -121,18 +121,32 @@ ActivationCandidateEvidenceResult:
 Stable reasons: `candidate_evidence_not_eligible`, `candidate_evidence_invalid_input`. Raw
 object/type/value never appear in reasons.
 
-### Composition wrapper
+### Composition wrapper (combined fail-closed outcome — RTM-7c.4n closure)
 
 ```python
+class FreshnessQualifiedEvidenceOutcome(StrEnum):
+    PASS = "pass"
+    NO_GO = "no_go"
+
 freshness_qualify_and_build_candidate_evidence(
     *, settings, receipt_payload, now, policy, base_dir=None,
-) -> FreshnessQualifiedEvidenceResult   # { qualified_result, evidence_result }
+) -> FreshnessQualifiedEvidenceResult
+    # { outcome, reasons, qualified_result, evidence_result }
 ```
 
 Runs the existing `freshness_qualify_activation_candidate`, then invokes the builder **only**
-on a qualified PASS (`evaluated_at = now`). A qualified `NO_GO` returns `evidence_result =
-None` — the builder is not called. Per call: receipt verifier 1, receipt snapshot 1, fresh
-precheck 1, freshness evaluator 1, evidence builder 1, clock read 1. No extra observation.
+on a qualified PASS (`evaluated_at = now`). The combined `outcome` is `PASS` **only** when the
+qualified verdict is `PASS` *and* evidence was `CREATED`:
+
+| qualified | evidence | combined outcome | combined reasons | builder |
+|-----------|----------|------------------|------------------|---------|
+| `NO_GO` | (not built) | `NO_GO` | qualified reasons (verbatim) | 0 calls |
+| `PASS` | `CREATED` | `PASS` | `()` | 1 call |
+| `PASS` | `INVALID`/`NOT_ELIGIBLE`/`None` | `NO_GO` | `candidate_evidence_generation_invalid` | 1 call |
+
+A qualified PASS alone is **never** a combined PASS. An evidence-generation failure does **not**
+rerun any upstream stage — per call: receipt verifier 1, receipt snapshot 1, fresh precheck 1,
+freshness evaluator 1, evidence builder ≤1 (0 on qualified NO_GO), clock read 1.
 
 ## Processing order and strict eligibility
 
@@ -140,24 +154,49 @@ precheck 1, freshness evaluator 1, evidence builder 1, clock read 1. No extra ob
    (subclass/wrong object → `INVALID`)
 2. `evaluated_at` strict tz-aware guard (invalid → `INVALID`)
 3. Well-formed non-PASS verdict (`outcome != PASS`) → `NOT_ELIGIBLE`
-4. PASS invariants (any failure → `INVALID`, never a silent digest):
-   - `reasons == ()`
-   - `final_preflight_result` and `freshness_evaluation` not `None`
-   - `freshness_policy_evaluated is True`; `freshness_evaluation.freshness_policy_evaluated is
-     True`
-   - `final_preflight_result.outcome == PASS`; `fresh_precheck_executed is True`;
-     `receipt_age_evaluated is True`
-   - `freshness_evaluation.outcome == FRESH`
-   - `receipt_sha256` exact lowercase hex64
-   - `market` / `symbol` exact non-empty `str`
-   - `receipt_age_microseconds` / `max_age_microseconds` exact non-negative `int`;
-     `receipt_age <= max_age`
+4. Outer PASS posture/shape (any failure → `INVALID`):
+   - `reasons == ()`; `freshness_policy_evaluated is True`
    - `activation_authorized is False`; `runtime_activation_outcome == "no_go"`
-5. Build canonical digest → `CREATED`
+   - `explicit_operator_approval_required is True`;
+     `writers_stopped_manual_confirmation_required is True`
+5. **Nested exact types** (any other → `INVALID`):
+   - `type(final_preflight_result) is ActivationCandidateFinalPreflightResult`
+   - `type(freshness_evaluation) is ReceiptFreshnessEvaluation`
+   - `type(final_preflight_result.receipt_time_assessment) is ReceiptTimeAssessment`
+6. **Nested observation consistency** (any failure → `INVALID`, never a silent digest):
+   - **Identity** — `final.receipt_sha256 == outer.receipt_sha256`,
+     `final.market == outer.market`, `final.symbol == outer.symbol`
+   - **Final preflight is policy-neutral** — `final.freshness_policy_evaluated is False`;
+     `final.outcome == PASS`; `final.fresh_precheck_executed is True`;
+     `final.receipt_age_evaluated is True`
+   - **Freshness is the explicit FRESH verdict** — `freshness.freshness_policy_evaluated is
+     True`; `freshness.outcome == FRESH`; `freshness.reasons == ()`
+   - **Time assessment is a clean VALID observation** — `time_assessment.outcome == VALID`;
+     `time_assessment.reasons == ()`; `time_assessment.receipt_age_evaluated is True`
+   - **Nested posture** — `activation_authorized is False` and
+     `runtime_activation_outcome == "no_go"` on outer, final, *and* freshness;
+     `explicit_operator_approval_required is True` and
+     `writers_stopped_manual_confirmation_required is True` on outer *and* final
+   - **One agreed age** — `final.receipt_age_microseconds ==
+     freshness.receipt_age_microseconds == time_assessment.receipt_age_microseconds`
+     (each an exact non-negative `int`); `receipt_age <= max_age`
+   - `receipt_sha256` exact lowercase hex64; `market`/`symbol` exact non-empty `str`;
+     `max_age_microseconds` exact non-negative `int`
+7. **`evaluated_at` ↔ observed-age exact binding** (any failure → `INVALID`):
+   `time_assessment.receipt_checked_at` is parsed as a strict timezone-aware datetime
+   (malformed / naive / `None`-offset → `INVALID`), and the **exact integer** microseconds
+   `evaluated_at - receipt_checked_at` (computed from `timedelta.days/seconds/microseconds`,
+   never float `total_seconds`) must equal the agreed `receipt_age_microseconds`. An
+   `evaluated_at` before `receipt_checked_at` (negative age) or off by even one microsecond
+   fails closed. UTC/KST representations of the same instant are accepted.
+8. Build canonical digest → `CREATED`
 
 A malformed exact-type result (e.g. a deleted field) fails closed via `AttributeError` catch →
 `INVALID`. A contradictory synthetic PASS (e.g. `activation_authorized=True`, freshness STALE,
-or `age > max_age`) is `INVALID`, never `CREATED`.
+`age > max_age`, mismatched outer/final identity, mismatched final/freshness/time-assessment
+age, a nested GO posture, or an `evaluated_at` that does not match the observed age) is
+`INVALID`, never `CREATED`. Raw `checked_at`, datetime, type, or exception never appear in
+reasons.
 
 ## Single-observation principle
 
@@ -169,15 +208,32 @@ local for validation and the hash payload. It does not re-observe nested result 
 Existing mode `--freshness-preflight-activation-candidate` gains two optional PASS fields:
 
 ```text
-candidate_evidence_sha256        # lowercase hex64 on CREATED PASS, else null
-candidate_evidence_schema_version # 1 on CREATED PASS, else null
+candidate_evidence_sha256        # lowercase hex64 on combined PASS, else null
+candidate_evidence_schema_version # 1 on combined PASS, else null
 ```
 
-`NO_GO`/`STALE`/input-failure → both `null`. The CLI runs the qualified preflight **once**
-and reuses the same KST `now` for the evidence `evaluated_at` (no second qualified run, no
-extra clock read). Output stays path-free: no full evidence raw payload, config path, artifact
-path, fingerprint body, raw receipt, raw `checked_at`, or secret/env identifier. The evidence
-digest is documented as **not** approval.
+The CLI `outcome` and exit code are driven by the **combined** verdict, not the qualified
+verdict alone:
+
+- **Combined PASS** (qualified PASS + evidence `CREATED`): `outcome=PASS`, both digest fields
+  present (hex64 / `1`), exit 0.
+- **Evidence-generation failure** (qualified PASS but evidence not `CREATED`): `outcome=NO_GO`,
+  `reasons=["candidate_evidence_generation_invalid"]`, both digest fields `null`, exit 1,
+  `activation_authorized=false`, `runtime_activation_outcome="no_go"`. A qualified PASS must
+  never surface as a CLI PASS without a digest.
+- **Existing qualified NO_GO** (e.g. `candidate_receipt_stale`,
+  `candidate_receipt_time_in_future`, `candidate_current_precheck:*`,
+  `candidate_symbol_mismatch`): the exact qualified reasons are preserved verbatim and
+  `candidate_evidence_generation_invalid` is **not** appended; both digest fields `null`,
+  exit 1.
+- **Input failure** (missing/invalid max-age, etc.): both digest fields `null`, exit 1.
+
+The CLI runs the qualified preflight **once** and reuses the same KST `now` for the evidence
+`evaluated_at` (no second qualified run, no extra clock read). Output stays path-free: no full
+evidence raw payload, config path, artifact path, fingerprint body, raw receipt, raw
+`checked_at`, or secret/env identifier; the raw builder reason / exception / object repr /
+traceback never appear. The evidence digest is documented as **not** approval — an
+evidence-generation failure can never proceed to approval/activation.
 
 CLI exit codes are unchanged (PASS 0, NO_GO 1, `--run` 2). A digest on a PASS is still
 `activation_authorized=false`, `runtime_activation_outcome="no_go"`.
