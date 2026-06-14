@@ -93,9 +93,22 @@ appear in reasons.
 - Operational SQLite write
 - Daemon / scheduler / multi-symbol / production calendar
 
+## RTM-7c.4j — verified snapshot core
+
+`assess_verified_receipt_time(*, receipt, now)` is the snapshot-based core: it reads the
+already-aware `checked_at` off an immutable `VerifiedPrecheckReceipt` and performs **no**
+verifier call and **no** `checked_at` parse. The public `assess_receipt_time` is now a
+raw-payload wrapper that guards `now` first (preserving the 4i precedence — an invalid `now`
+fail-closes before the receipt is verified), then builds a snapshot once (non-VALID →
+`receipt_time_receipt_invalid`) and delegates to the core. Because the verifier already
+guarantees a parseable aware `checked_at`, the former `receipt_time_invalid_checked_at`
+reason is absorbed at snapshot-build time and no longer exists in this lane. See
+`PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
+
 ## Related contracts
 
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` — reused verifier semantics
+- `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — immutable snapshot consumed by the core
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md` — composes this lane
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes

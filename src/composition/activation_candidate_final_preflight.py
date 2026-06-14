@@ -1,4 +1,4 @@
-"""Time-aware final activation candidate preflight (RTM-7c.4h).
+"""Time-aware final activation candidate preflight (RTM-7c.4h, +7c.4i time, +7c.4j snapshot).
 
 Composes the RTM-7c.4g byte-state revalidation with a fresh, caller-supplied-time machine
 precheck so that — even when every artifact byte is identical to the candidate receipt's
@@ -16,6 +16,13 @@ max-age / TTL / freshness threshold (``freshness_policy_evaluated = False``), do
 authenticate the receipt, consume an Operator approval, assert writer-stop, or activate
 anything — the activation posture is a constant NO_GO.
 
+RTM-7c.4j: the untrusted ``receipt_payload`` is verified and frozen into a single immutable
+snapshot **once** (``verify_and_snapshot_precheck_receipt``); the byte-state revalidation and
+the receipt time observation then both read that *same* snapshot via their verified-core
+entrypoints. The raw receipt verifier is therefore called exactly once per preflight, and a
+cross-stage mutation of the raw payload cannot mix observations (hash from one read, age from
+another).
+
 ``now`` is supplied by the caller and must be timezone-aware; this module reads no clock of
 its own. It opens no operational (read-write) SQLite connection, performs no network/credential
 access, dispatches no broker order, and creates no runtime artifact. The composed
@@ -32,7 +39,7 @@ from pathlib import Path
 from composition.activation_candidate_revalidation import (
     ActivationCandidateRevalidationOutcome,
     ActivationCandidateRevalidationResult,
-    revalidate_activation_candidate,
+    revalidate_verified_activation_candidate,
 )
 from composition.paper_fast_loop import (
     MachineCheckOutcome,
@@ -41,9 +48,13 @@ from composition.paper_fast_loop import (
 )
 from composition.receipt_time_assessment import (
     ReceiptTimeAssessmentOutcome,
-    assess_receipt_time,
+    assess_verified_receipt_time,
 )
 from composition.sqlite_inspector import ArtifactFingerprint
+from composition.verified_precheck_receipt import (
+    VerifiedReceiptSnapshotOutcome,
+    verify_and_snapshot_precheck_receipt,
+)
 from config.settings import RuntimePaperFastLoopSettings
 
 __all__ = [
@@ -139,9 +150,26 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=False,
         )
 
-    # Step 1 — 4g byte-state revalidation. NO_GO면 즉시 종결, 기존 stable reason 보존.
-    revalidation = revalidate_activation_candidate(
-        settings=settings, receipt_payload=receipt_payload, base_dir=base_dir
+    # Step 1 — raw payload을 immutable verified snapshot으로 한 번만 동결 (RTM-7c.4j).
+    # 이후 모든 단계(revalidation, receipt time)는 이 snapshot만 사용한다 — verifier는
+    # 한 번만 호출되고, raw payload는 다시 접근하지 않는다(cross-stage mutation 차단).
+    snapshot_result = verify_and_snapshot_precheck_receipt(receipt_payload)
+    if snapshot_result.outcome is not VerifiedReceiptSnapshotOutcome.VALID:
+        return _no_go(
+            reasons=("candidate_receipt_invalid",),
+            receipt_sha256=None,
+            market=None,
+            symbol=None,
+            revalidation=None,
+            precheck=None,
+            fresh_precheck_executed=False,
+        )
+    assert snapshot_result.receipt is not None
+    receipt = snapshot_result.receipt
+
+    # Step 2 — snapshot-based 4g byte-state revalidation. NO_GO면 즉시 종결, 기존 stable reason 보존.
+    revalidation = revalidate_verified_activation_candidate(
+        settings=settings, receipt=receipt, base_dir=base_dir
     )
     if revalidation.outcome is not ActivationCandidateRevalidationOutcome.PASS:
         return _no_go(
@@ -154,10 +182,10 @@ def final_preflight_activation_candidate(
             fresh_precheck_executed=False,
         )
 
-    # Step 2 — policy-neutral receipt time observation (RTM-7c.4i). 4g PASS guarantees a VALID
-    # receipt with an aware checked_at, so the only reachable NO_GO here is a future checked_at.
-    # No TTL/max-age/freshness threshold is applied; only age computation + future fail-close.
-    time_assessment = assess_receipt_time(receipt_payload=receipt_payload, now=now)
+    # Step 3 — snapshot-based policy-neutral receipt time observation (RTM-7c.4i). 4g PASS는
+    # aware checked_at을 가진 VALID snapshot을 보장하므로, 여기서 도달 가능한 NO_GO는
+    # future checked_at 뿐이다. TTL/max-age/freshness threshold는 적용하지 않는다.
+    time_assessment = assess_verified_receipt_time(receipt=receipt, now=now)
     if time_assessment.outcome is not ReceiptTimeAssessmentOutcome.VALID:
         reason = (
             "candidate_receipt_time_in_future"
@@ -177,11 +205,11 @@ def final_preflight_activation_candidate(
         )
     receipt_age_microseconds = time_assessment.receipt_age_microseconds
 
-    # Step 3 — 현재 시각 기준 fresh machine precheck (snapshot/active-decision validity 포함).
+    # Step 4 — 현재 시각 기준 fresh machine precheck (snapshot/active-decision validity 포함).
     resolved_base = Path(".") if base_dir is None else Path(base_dir)
     precheck = precheck_runtime(settings=settings, now=now, base_dir=resolved_base)
 
-    # Step 4 — fresh precheck verdict. NO_GO면 기존 reason을 raw payload 없이 stable prefix로 전달.
+    # Step 5 — fresh precheck verdict. NO_GO면 기존 reason을 raw payload 없이 stable prefix로 전달.
     if precheck.machine_outcome is not MachineCheckOutcome.PASS:
         return _no_go(
             reasons=tuple(f"candidate_current_precheck:{reason}" for reason in precheck.reasons),
@@ -195,7 +223,7 @@ def final_preflight_activation_candidate(
             receipt_age_microseconds=receipt_age_microseconds,
         )
 
-    # Step 5 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
+    # Step 6 — revalidation 이후 fresh precheck 사이 state drift. revalidation PASS는
     # current-after == receipt fingerprints_after를 보장하므로 그 값을 비교 기준으로 쓴다.
     drift_reasons = _post_revalidation_drift_reasons(
         revalidation_after=revalidation.current_fingerprints_after,
@@ -214,7 +242,7 @@ def final_preflight_activation_candidate(
             receipt_age_microseconds=receipt_age_microseconds,
         )
 
-    # Step 6 — mechanical PASS. activation은 여전히 false.
+    # Step 7 — mechanical PASS. activation은 여전히 false.
     return ActivationCandidateFinalPreflightResult(
         outcome=ActivationCandidateFinalPreflightOutcome.PASS,
         receipt_sha256=revalidation.receipt_sha256,

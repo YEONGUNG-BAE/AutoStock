@@ -1,4 +1,4 @@
-# Activation Candidate Final Preflight Contract (RTM-7c.4h, +7c.4i receipt time)
+# Activation Candidate Final Preflight Contract (RTM-7c.4h, +7c.4i receipt time, +7c.4j snapshot)
 
 Read-only **time-aware final preflight** for the paper fast-loop activation
 candidate. Composes the RTM-7c.4g byte-state revalidation with a **fresh,
@@ -198,8 +198,20 @@ connection is ever opened and the DB bytes / `user_version` / sidecar set are un
 - Process scan / kill / OS lock
 - Daemon / scheduler / multi-symbol / production calendar
 
+## RTM-7c.4j — single verified snapshot
+
+The untrusted `receipt_payload` is verified and frozen into one immutable
+`VerifiedPrecheckReceipt` **once** (`verify_and_snapshot_precheck_receipt`) after the `now`
+guard; a non-VALID snapshot fails closed to `candidate_receipt_invalid` before any stage runs.
+The 4g byte-state revalidation (`revalidate_verified_activation_candidate`) and the 4i receipt
+time observation (`assess_verified_receipt_time`) then read that **same** snapshot. The raw
+receipt verifier is therefore called exactly once per preflight, and a cross-stage mutation of
+the raw payload cannot mix observations (hash from one read, age from another). See
+`PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
+
 ## Related contracts
 
+- `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — single immutable snapshot all stages read
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_REVALIDATION_CONTRACT.md` — composed 4g byte-state lane
 - `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md` — composed 4i receipt time observation
 - `PAPER_FAST_LOOP_RUNTIME_PRECHECK_CONTRACT.md` — composed fresh-precheck semantics

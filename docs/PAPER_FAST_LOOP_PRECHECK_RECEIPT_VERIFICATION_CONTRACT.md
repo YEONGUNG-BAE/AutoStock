@@ -206,4 +206,13 @@ match canonical order).
 Signing/HMAC, file input/persistence, envelope extraction, TTL/freshness, approval
 input, activation token, runtime activation.
 
+## RTM-7c.4j — single immutable snapshot reuse
+
+This verifier returns only `outcome` / `schema_version` / `receipt_sha256` / `reason_codes`
+— never the parsed fields. RTM-7c.4j adds `verify_and_snapshot_precheck_receipt`, which calls
+this verifier **once**, then re-reads the already-verified dict to freeze every retained field
+into an immutable `VerifiedPrecheckReceipt`. Downstream stages consume that snapshot instead
+of re-verifying the raw payload, so a final preflight calls this verifier exactly once. See
+`docs/PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
+
 See also `docs/PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md`.

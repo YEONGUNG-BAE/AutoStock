@@ -165,9 +165,20 @@ JSON fields include `credential_read`, `network_called`, `database_opened`,
 - Process scan / kill / OS lock
 - Daemon / scheduler / multi-symbol / production calendar
 
+## RTM-7c.4j — verified snapshot core
+
+`revalidate_verified_activation_candidate(*, settings, receipt, base_dir=None)` is the
+snapshot-based core: it takes an immutable `VerifiedPrecheckReceipt`, reads only frozen
+snapshot fields, and calls **no** verifier and never touches the raw payload dict. The
+public `revalidate_activation_candidate` is now a raw-payload wrapper that builds a snapshot
+once (`verify_and_snapshot_precheck_receipt`; non-VALID → `candidate_receipt_invalid`) and
+delegates to the core. `fingerprints_after` is read straight off the snapshot — no re-parse.
+See `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`.
+
 ## Related contracts
 
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_CONTRACT.md` — receipt observation binding
 - `PAPER_FAST_LOOP_PRECHECK_RECEIPT_VERIFICATION_CONTRACT.md` — verifier semantics
+- `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md` — immutable snapshot consumed by the core
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — activation stage model
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root + CLI modes

@@ -420,7 +420,8 @@ def test_final_preflight_invalid_now_is_strict_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_now: object
 ) -> None:
     """Any non-datetime / naive / malformed-tz now fails closed to candidate_invalid_now
-    with no precheck, no revalidation, and no raw exception/type/repr escaping."""
+    with no snapshot, no revalidation, no precheck, and no raw exception/type/repr escaping.
+    The now guard runs before the verify/snapshot step (RTM-7c.4j)."""
     settings = _settings(tmp_path)
     receipt = vrf_helper._valid_receipt()
 
@@ -428,10 +429,14 @@ def test_final_preflight_invalid_now_is_strict_fail_closed(
         raise AssertionError("precheck_runtime must not run for an invalid now")
 
     def _fail_reval(*_a: object, **_k: object) -> object:
-        raise AssertionError("revalidate_activation_candidate must not run for an invalid now")
+        raise AssertionError("revalidation must not run for an invalid now")
+
+    def _fail_snapshot(*_a: object, **_k: object) -> object:
+        raise AssertionError("verify/snapshot must not run for an invalid now")
 
     monkeypatch.setattr(final_mod, "precheck_runtime", _fail_precheck)
-    monkeypatch.setattr(final_mod, "revalidate_activation_candidate", _fail_reval)
+    monkeypatch.setattr(final_mod, "revalidate_verified_activation_candidate", _fail_reval)
+    monkeypatch.setattr(final_mod, "verify_and_snapshot_precheck_receipt", _fail_snapshot)
 
     result = final_preflight_activation_candidate(
         settings=settings, receipt_payload=receipt, now=bad_now, base_dir=tmp_path  # type: ignore[arg-type]
@@ -907,3 +912,66 @@ def test_final_preflight_cli_zero_environ_access(
     )
     assert code == 0
     assert payload["outcome"] == "PASS"
+
+
+# --- RTM-7c.4j single-observation invariant + cross-stage mutation isolation ---
+
+
+def test_final_preflight_verifies_receipt_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single final preflight call verifies the raw receipt exactly once.
+
+    The verifier is the only place the raw payload is read; revalidation and
+    receipt-time both consume the frozen snapshot, so one PASS run yields exactly one
+    ``verify_runtime_precheck_receipt_payload`` call (no per-stage re-verification)."""
+
+    import composition.verified_precheck_receipt as snap_mod
+
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    calls: list[int] = []
+    real = snap_mod.verify_runtime_precheck_receipt_payload
+
+    def _spy(payload: object) -> Any:
+        calls.append(1)
+        return real(payload)
+
+    monkeypatch.setattr(snap_mod, "verify_runtime_precheck_receipt_payload", _spy)
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
+    )
+    assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
+    assert len(calls) == 1
+
+
+def test_final_preflight_ignores_raw_payload_mutation_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cross-stage mutation of the raw payload cannot mix the observation.
+
+    After the snapshot is frozen, mutating the raw dict between revalidation and
+    receipt-time (hash/checked_at/market/reasons) must not leak into the verdict: the
+    PASS still reports the original hash and the original age-0 the snapshot captured."""
+
+    settings = _settings(tmp_path)
+    receipt = _pass_receipt_for_seeded_stack(tmp_path, settings)
+    original_hash = receipt["receipt_sha256"]
+    real_reval = final_mod.revalidate_verified_activation_candidate
+
+    def _mutating_reval(*args: Any, **kwargs: Any) -> Any:
+        result = real_reval(*args, **kwargs)
+        receipt["checked_at"] = "2099-01-01T00:00:00+00:00"
+        receipt["receipt_sha256"] = "ff" * 32
+        receipt["market"] = "US"
+        receipt["reasons"] = ["tampered"]
+        return result
+
+    monkeypatch.setattr(final_mod, "revalidate_verified_activation_candidate", _mutating_reval)
+    result = final_preflight_activation_candidate(
+        settings=settings, receipt_payload=receipt, now=_NOW, base_dir=tmp_path
+    )
+    assert result.outcome is ActivationCandidateFinalPreflightOutcome.PASS
+    assert result.receipt_sha256 == original_hash
+    assert result.receipt_age_microseconds == 0
+    _assert_posture(result, fresh_precheck_executed=True, receipt_age_evaluated=True)

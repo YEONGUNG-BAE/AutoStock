@@ -28,10 +28,22 @@ from composition.paper_fast_loop import (
     precheck_runtime,
 )
 from composition.sqlite_inspector import ArtifactFingerprint
+from composition.verified_precheck_receipt import (
+    VerifiedPrecheckReceipt,
+    VerifiedReceiptSnapshotOutcome,
+    verify_and_snapshot_precheck_receipt,
+)
 from config.settings import RuntimePaperFastLoopSettings
 
 import test_paper_fast_loop_composition as pfl_helper
 import test_precheck_receipt_verifier as vrf_helper
+
+
+def _snapshot(payload: object) -> VerifiedPrecheckReceipt:
+    result = verify_and_snapshot_precheck_receipt(payload)
+    assert result.outcome is VerifiedReceiptSnapshotOutcome.VALID
+    assert result.receipt is not None
+    return result.receipt
 
 _CLI_PATH = Path(__file__).resolve().parents[1] / "ops" / "run_paper_fast_loop.py"
 _spec = importlib.util.spec_from_file_location("run_paper_fast_loop", _CLI_PATH)
@@ -144,8 +156,11 @@ def test_revalidation_rejects_valid_no_go_receipt(tmp_path: Path) -> None:
 
 def test_config_binding_rejects_market_mismatch(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    payload: dict[str, object] = {"market": "US", "symbol": _SYMBOL, "enabled": True}
-    assert reval_mod._config_binding_reason(settings=settings, payload=payload) == (
+    object.__setattr__(settings, "market", "US")
+    # a verified snapshot always carries the canonical market "KR"; a settings.market drift
+    # is what the config binding catches.
+    receipt = _snapshot(vrf_helper._valid_receipt())
+    assert reval_mod._config_binding_reason(settings=settings, receipt=receipt) == (
         "candidate_market_mismatch"
     )
 
