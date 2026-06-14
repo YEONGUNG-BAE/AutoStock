@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Nine mutually-exclusive modes:
+Ten mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -27,6 +27,10 @@ Nine mutually-exclusive modes:
   ``--max-age-microseconds``; composes verified final preflight with explicit freshness policy
   (RTM-7c.4l). Config loads with empty ``environ``; ``now=datetime.now(tz=KST)``; no default
   threshold; mechanical FRESH PASS is NOT activation authorization.
+* ``--build-operator-approval-intent``: stdin receipt + config + required explicit
+  ``--max-age-microseconds`` + three required manual confirmation flags; composes
+  freshness-qualified evidence then builds an approval intent to stdout only — no persistence,
+  consumption, identity authentication, or activation authorization (RTM-7c.4p).
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -75,6 +79,10 @@ from composition.activation_candidate_evidence import (
     freshness_qualify_and_build_candidate_evidence,
 )
 from composition.freshness_policy_cli_input import parse_max_age_microseconds_cli_input
+from composition.operator_approval_intent import (
+    OperatorApprovalIntentOutcome,
+    build_operator_approval_intent,
+)
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
@@ -171,7 +179,41 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="MICROSECONDS",
         help=(
             "required explicit ASCII decimal max receipt age in microseconds; only valid with "
-            "--freshness-preflight-activation-candidate"
+            "--freshness-preflight-activation-candidate or --build-operator-approval-intent"
+        ),
+    )
+    parser.add_argument(
+        "--build-operator-approval-intent",
+        action="store_true",
+        help=(
+            "stdin receipt + config + required --max-age-microseconds + three explicit manual "
+            "confirmation flags; composes freshness-qualified evidence and builds approval "
+            "intent to stdout only — not identity, signature, consumption, persistence, or "
+            "activation authorization"
+        ),
+    )
+    parser.add_argument(
+        "--operator-approval-declared",
+        action="store_true",
+        help=(
+            "explicit manual Operator approval declaration; only valid with "
+            "--build-operator-approval-intent"
+        ),
+    )
+    parser.add_argument(
+        "--writers-stopped-manually-confirmed",
+        action="store_true",
+        help=(
+            "explicit manual writer-stop confirmation; only valid with "
+            "--build-operator-approval-intent"
+        ),
+    )
+    parser.add_argument(
+        "--live-orders-forbidden-confirmed",
+        action="store_true",
+        help=(
+            "explicit manual live-order prohibition confirmation; only valid with "
+            "--build-operator-approval-intent"
         ),
     )
     parser.add_argument(
@@ -200,6 +242,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("revalidate-activation-candidate", args.revalidate_activation_candidate),
             ("final-preflight-activation-candidate", args.final_preflight_activation_candidate),
             ("freshness-preflight-activation-candidate", args.freshness_preflight_activation_candidate),
+            ("build-operator-approval-intent", args.build_operator_approval_intent),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -210,7 +253,8 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             "modes --validate-only / --inspect-existing / --precheck-runtime / "
             "--verify-precheck-receipt / --revalidate-activation-candidate / "
             "--final-preflight-activation-candidate / "
-            "--freshness-preflight-activation-candidate / --replay / --run are mutually exclusive."
+            "--freshness-preflight-activation-candidate / --build-operator-approval-intent / "
+            "--replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
 
@@ -571,6 +615,80 @@ def _freshness_preflight_input_fail(reason_code: str, *, as_json: bool, out: Tex
     return 1
 
 
+def _approval_intent_cli_posture_fields() -> dict[str, Any]:
+    """Approval-intent CLI 출력에 공통으로 포함되는 constant NO-GO / unauthenticated posture."""
+
+    return {
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "approval_intent_authenticated": False,
+        "approval_intent_consumed": False,
+        "approval_intent_persisted": False,
+    }
+
+
+def _approval_intent_cli_null_digest_fields() -> dict[str, Any]:
+    """Intent digest가 생성되지 않은 경로에서 null로 두는 필드."""
+
+    return {
+        "approval_intent_schema_version": None,
+        "approval_intent_sha256": None,
+        "declared_at": None,
+        "candidate_evidence_sha256": None,
+        "candidate_evidence_schema_version": None,
+    }
+
+
+def _approval_intent_cli_input_fail(reason: str, *, as_json: bool, out: TextIO) -> int:
+    """CLI 입력 위반 — stdout JSON만, outcome FAIL, intent digest null."""
+
+    summary = {
+        "outcome": "FAIL",
+        "reasons": [reason],
+        **_approval_intent_cli_null_digest_fields(),
+        **_approval_intent_cli_posture_fields(),
+    }
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
+def _approval_intent_cli_no_go(reasons: list[str], *, as_json: bool, out: TextIO) -> int:
+    """Upstream mechanical NO_GO 또는 intent 생성 실패 — digest null, constant NO-GO posture."""
+
+    summary = {
+        "outcome": "NO_GO",
+        "reasons": reasons,
+        **_approval_intent_cli_null_digest_fields(),
+        **_approval_intent_cli_posture_fields(),
+    }
+    _emit(summary, as_json=as_json, out=out)
+    return 1
+
+
+def _approval_intent_cli_pass_summary(
+    combined: Any,
+    intent: Any,
+) -> dict[str, Any]:
+    """Combined PASS + CREATED intent → sanitized PASS JSON (path-free, digest-only)."""
+
+    evidence = combined.evidence_result.evidence
+    assert evidence is not None
+    return {
+        "outcome": "PASS",
+        "reasons": [],
+        "candidate_evidence_schema_version": evidence.schema_version,
+        "candidate_evidence_sha256": evidence.evidence_sha256,
+        "approval_intent_schema_version": intent.schema_version,
+        "approval_intent_sha256": intent.approval_intent_sha256,
+        "approval_scope": intent.approval_scope,
+        "declared_at": intent.declared_at,
+        "operator_approval_declared": True,
+        "writers_stopped_manually_confirmed": True,
+        "live_orders_forbidden_confirmed": True,
+        **_approval_intent_cli_posture_fields(),
+    }
+
+
 def _verify_receipt_summary(result: Any) -> dict[str, Any]:
     valid = result.outcome is ReceiptVerificationOutcome.VALID
     return {
@@ -674,8 +792,22 @@ def main(argv: list[str] | None = None) -> int:
         _emit(_run_refused_summary(), as_json=as_json, out=out)
         return 2
 
-    # --max-age-microseconds는 freshness-qualified mode에서만 허용한다.
-    if args.max_age_microseconds is not None and mode != "freshness-preflight-activation-candidate":
+    # approval-intent confirmation flags는 build mode에서만 허용한다.
+    if mode != "build-operator-approval-intent":
+        if (
+            args.operator_approval_declared
+            or args.writers_stopped_manually_confirmed
+            or args.live_orders_forbidden_confirmed
+        ):
+            return _fail(
+                "approval_intent_argument_not_applicable", as_json=as_json, out=out
+            )
+
+    # --max-age-microseconds는 freshness-qualified / approval-intent mode에서만 허용한다.
+    if args.max_age_microseconds is not None and mode not in (
+        "freshness-preflight-activation-candidate",
+        "build-operator-approval-intent",
+    ):
         return _fail("freshness_policy_argument_not_applicable", as_json=as_json, out=out)
 
     # verify-precheck-receipt: stdin-only — config/env/DB/fs write/network/clock read 없음.
@@ -780,6 +912,79 @@ def main(argv: list[str] | None = None) -> int:
         summary = _freshness_preflight_summary(combined, parsed_max_age=parsed_max_age)
         _emit(summary, as_json=as_json, out=out)
         return 0 if summary["outcome"] == "PASS" else 1
+
+    # build-operator-approval-intent: max-age parse → confirmation flags → stdin → config →
+    # KST now once → freshness-qualified evidence → approval-intent builder once.
+    if mode == "build-operator-approval-intent":
+        parsed_max_age, max_age_error = parse_max_age_microseconds_cli_input(
+            args.max_age_microseconds
+        )
+        if max_age_error is not None:
+            return _approval_intent_cli_input_fail(max_age_error, as_json=as_json, out=out)
+        assert parsed_max_age is not None
+        if not args.operator_approval_declared:
+            return _approval_intent_cli_input_fail(
+                "approval_intent_operator_declaration_missing", as_json=as_json, out=out
+            )
+        if not args.writers_stopped_manually_confirmed:
+            return _approval_intent_cli_input_fail(
+                "approval_intent_writer_stop_confirmation_missing", as_json=as_json, out=out
+            )
+        if not args.live_orders_forbidden_confirmed:
+            return _approval_intent_cli_input_fail(
+                "approval_intent_live_order_prohibition_confirmation_missing",
+                as_json=as_json,
+                out=out,
+            )
+        payload, input_error = _read_verify_stdin_payload()
+        if input_error is not None:
+            return _approval_intent_cli_no_go([input_error], as_json=as_json, out=out)
+        try:
+            settings: AppSettings = load_settings(args.config, environ={})
+        except (SettingsError, OSError) as exc:
+            return _approval_intent_cli_no_go(
+                [f"config error: {type(exc).__name__}"], as_json=as_json, out=out
+            )
+        fast_loop = settings.runtime.paper_fast_loop
+        policy = ReceiptFreshnessPolicy(max_age_microseconds=parsed_max_age)
+        now = datetime.now(tz=_KST)
+        try:
+            combined = freshness_qualify_and_build_candidate_evidence(
+                settings=fast_loop,
+                receipt_payload=payload,
+                now=now,
+                policy=policy,
+            )
+        except Exception:
+            return _approval_intent_cli_no_go(
+                ["approval_intent_upstream_error"], as_json=as_json, out=out
+            )
+        if combined.outcome is not FreshnessQualifiedEvidenceOutcome.PASS:
+            return _approval_intent_cli_no_go(
+                list(combined.reasons), as_json=as_json, out=out
+            )
+        try:
+            intent_result = build_operator_approval_intent(
+                combined_result=combined,
+                declared_at=now,
+                operator_approval_declared=True,
+                writers_stopped_manually_confirmed=True,
+                live_orders_forbidden_confirmed=True,
+            )
+        except Exception:
+            return _approval_intent_cli_no_go(
+                ["approval_intent_generation_invalid"], as_json=as_json, out=out
+            )
+        if (
+            intent_result.outcome is not OperatorApprovalIntentOutcome.CREATED
+            or intent_result.intent is None
+        ):
+            return _approval_intent_cli_no_go(
+                ["approval_intent_generation_invalid"], as_json=as_json, out=out
+            )
+        summary = _approval_intent_cli_pass_summary(combined, intent_result.intent)
+        _emit(summary, as_json=as_json, out=out)
+        return 0
 
     # precheck-runtime은 credential/env read 0을 주장하므로 config 로딩에서도 os.environ을
     # 절대 읽지 않는다: 빈 environ을 주입해 ${ENV} 치환과 live-confirmation/credential

@@ -150,7 +150,9 @@ closure:** PASS reasons require exact built-in empty tuple; qualified identity/r
 require exact built-in `str` before equality — caller `__eq__`/`__ne__` hooks are not invoked.
 Intent is **not** identity, signature,
 writer-stop machine proof, approval consumption, replay prevention, or activation authorization;
-it is never persisted and is not wired into CLI in this lane. Approval consumption and activation
+it is never persisted. **RTM-7c.4p** wires CLI mode `--build-operator-approval-intent` — explicit
+manual confirmation flags + freshness-qualified composition → stdout JSON intent only (no
+persistence/consumption/identity/signing/activation). Approval consumption and activation
 caller remain **OPEN**.
 
 ## Orphan sidecar observation limit
@@ -261,4 +263,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md` (RTM-7c.4l — API-only qualified preflight)
 - `docs/PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` (RTM-7c.4n — canonical evidence digest; not approval/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4o — approval-intent digest; not consumption/activation)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` (RTM-7c.4p — CLI stdout intent generation; not persistence/consumption/activation)
 - `docs/TECH_DEBT.md` (OPEN items)

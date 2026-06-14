@@ -251,11 +251,16 @@ Intent remains unauthenticated, unconsumed, unpersisted, and NO-GO.
 
 ## Integration scope (this lane)
 
+**RTM-7c.4p** adds CLI mode `--build-operator-approval-intent` — explicit manual confirmation
+flags + freshness-qualified composition → stdout JSON intent only (no persistence/consumption).
+See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md`.
+
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
-evidence digest fields only. Approval-intent CLI input is a separate future lane.
+evidence digest fields only.
 
 ## Related contracts
 
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` — CLI stdout intent generation (RTM-7c.4p)
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` — evidence schema v2 / hash binding
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition wiring root
@@ -263,6 +268,6 @@ evidence digest fields only. Approval-intent CLI input is a separate future lane
 ## Still OPEN (unchanged posture)
 
 Operator approval consumption, intent persistence/file output, signing/HMAC, Operator identity
-authentication, replay/nonce/idempotency, approval CLI input, activation token/caller, `--run`,
-KIS/network, broker/order, operational DB write, writer-stop machine proof, default runtime
-activation beyond constant NO-GO.
+authentication, replay/nonce/idempotency, approval pre-consumption revalidation, activation
+token/caller, `--run`, KIS/network, broker/order, operational DB write, writer-stop machine
+proof, default runtime activation beyond constant NO-GO.
