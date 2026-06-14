@@ -78,6 +78,8 @@ def test_run_is_refused_before_side_effects(capsys: pytest.CaptureFixture[str]) 
     assert code == 2
     assert payload["outcome"] == "NO_GO"
     assert payload["reason_code"] == "live_run_not_implemented"
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
     assert payload["credential_read"] is False
     assert payload["network_called"] is False
     assert payload["production_db_touched"] is False
@@ -767,6 +769,31 @@ def test_verify_cli_rejects_stdin_read_oserror(
     assert "Traceback" not in combined
     assert "OSError" not in combined
     assert "simulated" not in combined
+
+
+def test_verify_cli_rejects_stdin_read_valueerror(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _read_raises(_size: int = -1) -> bytes:
+        raise ValueError("read of closed file")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read_raises)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main(["--verify-precheck-receipt", "--json"])
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["receipt_input_read_error"]
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert "Traceback" not in combined
+    assert "ValueError" not in combined
+    assert "read of closed file" not in combined
+    assert "closed file" not in combined
 
 
 def test_verify_cli_subprocess_no_traceback_on_pathological_json() -> None:

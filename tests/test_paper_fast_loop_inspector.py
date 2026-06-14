@@ -503,7 +503,7 @@ def test_active_decision_malformed_validity_is_corrupt(
 
 import hashlib as _hashlib  # noqa: E402
 
-from composition.sqlite_inspector import fingerprint_artifact  # noqa: E402
+from composition.sqlite_inspector import fingerprint_artifact, sidecar_files  # noqa: E402
 
 
 def test_fingerprint_streams_and_does_not_load_whole_file(
@@ -569,3 +569,23 @@ def test_fingerprint_json_snapshot_user_version_is_none(tmp_path: Path) -> None:
     assert fp.is_regular_file is True
     assert fp.user_version is None
     assert fp.sha256 == _hashlib.sha256(snap.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("sidecar_suffix", ["-wal", "-shm", "-journal"])
+def test_fingerprint_absent_main_orphan_sidecar_not_bound(
+    tmp_path: Path, sidecar_suffix: str
+) -> None:
+    # RTM-7c.4f: main 파일 없이 sidecar만 존재하면 fingerprint는 absent canonical을 반환한다.
+    # sidecar suffix는 fingerprint에 포함되지 않음 — missing main은 machine NO_GO이므로 false PASS 없음.
+    main = tmp_path / "ledger.sqlite3"
+    orphan = main.with_name(main.name + sidecar_suffix)
+    orphan.write_bytes(b"orphan")
+    assert not main.exists()
+    assert sidecar_files(main) == (sidecar_suffix,)
+    fp = fingerprint_artifact(main, name="ledger", is_sqlite=True)
+    assert fp.present is False
+    assert fp.is_regular_file is False
+    assert fp.size is None
+    assert fp.sha256 is None
+    assert fp.user_version is None
+    assert fp.sidecar_suffixes == ()

@@ -163,6 +163,8 @@ def _run_refused_summary() -> dict[str, Any]:
         "outcome": "NO_GO",
         "mode": "run",
         "reason_code": _RUN_REFUSED_REASON,
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
         "credential_read": False,
         "network_called": False,
         "production_db_touched": False,
@@ -315,7 +317,8 @@ def _read_verify_stdin_payload() -> tuple[object | None, str | None]:
     """stdin에서 최대 ``_VERIFY_RECEIPT_STDIN_LIMIT + 1`` byte만 읽는다."""
     try:
         data = sys.stdin.buffer.read(_VERIFY_RECEIPT_STDIN_LIMIT + 1)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: closed stdin buffer ("read of closed file") 등 — traceback 없이 fail-closed.
         return None, "receipt_input_read_error"
     if not data:
         return None, "receipt_input_empty"

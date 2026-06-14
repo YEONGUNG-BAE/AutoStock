@@ -11,8 +11,9 @@ nothing.
 The result always carries `activation_authorized=false` /
 `runtime_activation_outcome="no_go"`, and both manual requirements
 (`explicit_operator_approval_required=true`,
-`writers_stopped_manual_confirmation_required=true`) always hold. Even when every
-gate is green, the change is left for the Operator to commit.
+`writers_stopped_manual_confirmation_required=true`) always hold. Neither manual
+gate is consumed or stored in this lane. See
+`docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md`.
 
 ## Four distinct gates — do not conflate
 
@@ -69,6 +70,13 @@ WAL-mode database, even read-only, can materialize a `-shm`/`-wal` sidecar;
 reading header bytes never does. A non-SQLite artifact (the JSON snapshot), an
 absent file, and a file too short or without the SQLite magic all yield
 `user_version = null` (Python `None`) and an empty sidecar set.
+
+**Absent-main / orphan-sidecar limit.** Sidecar suffixes are probed only when the
+main artifact path exists. If the main file is absent, `fingerprint_artifact`
+returns `present=false` and `sidecar_suffixes=[]` even when orphan
+`-wal`/`-shm`/`-journal` files remain on disk (`sidecar_files` observes them
+separately). Missing main already yields machine `NO_GO`; there is no false
+activation PASS. Orphan-sidecar binding improvement is **OPEN** (RTM-7c.4f).
 
 **Memory-bounded hashing.** The SHA-256 is computed by streaming the file in
 fixed-size (1 MiB) chunks; the file is never loaded into memory in full, so peak

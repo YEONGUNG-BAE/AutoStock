@@ -7,7 +7,7 @@ no DB access, no filesystem write, no network, no clock read.
 **Runtime activation: NO-GO.** `VALID` means only: supported schema, canonical field
 structure, semantic consistency, and `receipt_sha256` matches a payload recomputation.
 It is **not** author authentication, approval, freshness proof, writer-stop proof, or
-runtime authorization.
+runtime authorization. See `docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md`.
 
 ## API
 

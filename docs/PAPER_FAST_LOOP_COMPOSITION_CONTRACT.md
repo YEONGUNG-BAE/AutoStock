@@ -5,6 +5,9 @@ Offline composition root + operator verification tooling only.
 `reason_code=live_run_not_implemented`) before any credential read, network
 socket, production-DB write, or runtime-directory creation.
 
+Attended one-shot activation is **not implemented** — see
+`docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` (RTM-7c.4f).
+
 This lane builds the offline wiring and the operator's read-only/replay tools.
 It does NOT turn on a live runtime. Even when every gate is green, the change is
 left for the operator to commit.
@@ -277,8 +280,9 @@ Five mutually-exclusive modes (default `--validate-only`):
   emitted as a sanitized `outcome=FAIL` / `reason_code=<inspect|replay> error:
   <ExceptionType>` with exit 1 — never a traceback or raw sqlite text.
 - `--run` emits `outcome=NO_GO`, `reason_code=live_run_not_implemented`,
+  `activation_authorized=false`, `runtime_activation_outcome="no_go"`,
   `credential_read/network_called/production_db_touched/filesystem_written` all
-  `false`, and returns a non-zero exit **before** loading settings, reading any
+  `false`, and returns exit **2** **before** loading settings, reading any
   credential, opening any socket, touching the production DB, or creating any
   path.
 - `--json` emits a sanitized machine-readable summary. Credentials, raw frames,

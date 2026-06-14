@@ -296,8 +296,11 @@ def fingerprint_artifact(path: str | Path, *, name: str, is_sqlite: bool) -> Art
     Reads the main file's bytes directly for size + SHA-256 and parses ``user_version`` from
     the header bytes when ``is_sqlite``. An absent path yields an all-``None`` fingerprint; a
     present-but-irregular path (directory, socket, fifo) yields ``is_regular_file=False`` with
-    no hash. Sidecar suffixes are always probed so a writer that left a live WAL/shm/journal
-    shows up in the fingerprint (and thus in any before/after diff)."""
+    no hash. When the main file is **present**, sidecar suffixes are probed so a writer
+    that left a live WAL/shm/journal shows up in the fingerprint (and thus in any
+    before/after diff). When the main file is **absent**, the fingerprint returns early
+    with ``sidecar_suffixes=()`` — orphan sidecars alone are not bound (see
+    ``docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md``)."""
 
     resolved = Path(path)
     if not resolved.exists():

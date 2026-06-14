@@ -7,6 +7,8 @@ stdout / return objects — it is **never** written to disk.
 
 **Runtime activation: NO-GO.** A receipt on a machine `PASS` is **not** runtime
 authorization, **not** Operator approval, and **not** writer-stop confirmation.
+Receipt `VALID` (RTM-7c.4e) is likewise **not** authentication, freshness, or
+approval. See `docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md`.
 
 ## Receipt schema (`RuntimePrecheckReceipt`)
 
@@ -81,7 +83,8 @@ Artifact order follows `_PRECHECK_ARTIFACTS`:
 
 Strict types: `present`/`is_regular_file` require `type(x) is bool` (int-as-bool
 rejected). Absent canonical: `present=false`, `is_regular_file=false`, all other
-fields null/empty sidecar. Builder validation uses the same
+fields null/empty sidecar — including when orphan sidecars exist but the main file
+is absent (see attended activation contract). Builder validation uses the same
 `validate_fingerprint_semantics` as the verifier; builder success → verifier VALID
 after JSON dict conversion.
 
