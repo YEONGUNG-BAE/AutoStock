@@ -138,6 +138,9 @@ def validate_outcome_values(*, machine_outcome: str, inspection_outcome: str) ->
         raise PrecheckReceiptError("receipt_invalid_outcome")
 
 
+_PRECHECK_ARTIFACT_CHANGED_PREFIX = "precheck_artifact_changed:"
+
+
 def validate_outcome_semantics(
     *, machine_outcome: str, inspection_outcome: str, reasons: tuple[str, ...]
 ) -> None:
@@ -160,6 +163,112 @@ def outcome_semantics_valid(
     if inspection_outcome == "no_go" and machine_outcome != "no_go":
         return False
     if machine_outcome == "no_go" and not reasons:
+        return False
+    return True
+
+
+def _comparison_payload_from_dict(fp: dict[str, Any]) -> dict[str, object]:
+    """Verifier 경로 — parse된 fingerprint dict를 canonical 비교 payload로 정규화."""
+    sidecars = fp["sidecar_suffixes"]
+    return {
+        "name": fp["name"],
+        "present": fp["present"],
+        "is_regular_file": fp["is_regular_file"],
+        "size": fp["size"],
+        "sha256": fp["sha256"],
+        "user_version": fp["user_version"],
+        "sidecar_suffixes": list(sidecars),
+    }
+
+
+def _changed_artifacts_from_payloads(
+    before_payloads: list[dict[str, object]],
+    after_payloads: list[dict[str, object]],
+) -> set[str]:
+    changed: set[str] = set()
+    for before, after in zip(before_payloads, after_payloads):
+        if before != after:
+            changed.add(str(before["name"]))
+    return changed
+
+
+def _changed_artifacts_from_reasons(
+    reasons: tuple[str, ...] | list[str],
+) -> tuple[set[str], bool]:
+    """``precheck_artifact_changed:<artifact>`` reason 집합 — unknown/duplicate면 invalid."""
+    seen: set[str] = set()
+    artifacts: set[str] = set()
+    for reason in reasons:
+        if not reason.startswith(_PRECHECK_ARTIFACT_CHANGED_PREFIX):
+            continue
+        artifact = reason[len(_PRECHECK_ARTIFACT_CHANGED_PREFIX) :]
+        if artifact not in PRECHECK_RECEIPT_ARTIFACT_NAMES:
+            return set(), True
+        if artifact in seen:
+            return set(), True
+        seen.add(artifact)
+        artifacts.add(artifact)
+    return artifacts, False
+
+
+def _validate_observation_fingerprint_semantics(
+    *,
+    machine_outcome: str,
+    reasons: tuple[str, ...] | list[str],
+    before_payloads: list[dict[str, object]],
+    after_payloads: list[dict[str, object]],
+) -> None:
+    """PASS before/after equality + NO_GO drift↔changed-reason 일치 — builder·verifier 공통."""
+    if machine_outcome == "pass" and before_payloads != after_payloads:
+        raise PrecheckReceiptError("receipt_semantic_mismatch")
+    changed_fp = _changed_artifacts_from_payloads(before_payloads, after_payloads)
+    changed_reasons, invalid_reason = _changed_artifacts_from_reasons(reasons)
+    if invalid_reason or changed_fp != changed_reasons:
+        raise PrecheckReceiptError("receipt_semantic_mismatch")
+
+
+def validate_observation_semantics(
+    *,
+    machine_outcome: str,
+    inspection_outcome: str,
+    reasons: tuple[str, ...],
+    fingerprints_before: tuple[Any, ...],
+    fingerprints_after: tuple[Any, ...],
+) -> None:
+    """Builder object 경로 — outcome + fingerprint observation semantics."""
+    validate_outcome_semantics(
+        machine_outcome=machine_outcome,
+        inspection_outcome=inspection_outcome,
+        reasons=reasons,
+    )
+    before_payloads = [fingerprint_to_receipt_payload(fp) for fp in fingerprints_before]
+    after_payloads = [fingerprint_to_receipt_payload(fp) for fp in fingerprints_after]
+    _validate_observation_fingerprint_semantics(
+        machine_outcome=machine_outcome,
+        reasons=reasons,
+        before_payloads=before_payloads,
+        after_payloads=after_payloads,
+    )
+
+
+def observation_semantics_valid(
+    machine_outcome: str,
+    inspection_outcome: str,
+    reasons: list[str],
+    fingerprints_before: list[dict[str, Any]],
+    fingerprints_after: list[dict[str, Any]],
+) -> bool:
+    """Verifier dict 경로 — semantic mismatch면 False (raw payload 미포함)."""
+    if not outcome_semantics_valid(machine_outcome, inspection_outcome, reasons):
+        return False
+    try:
+        _validate_observation_fingerprint_semantics(
+            machine_outcome=machine_outcome,
+            reasons=reasons,
+            before_payloads=[_comparison_payload_from_dict(fp) for fp in fingerprints_before],
+            after_payloads=[_comparison_payload_from_dict(fp) for fp in fingerprints_after],
+        )
+    except PrecheckReceiptError:
         return False
     return True
 

@@ -63,7 +63,13 @@ There is **no** code path that sets `activation_authorized=true`.
 - Inspection outcome `OK`; aggregate `reasons` empty
 - Receipt verifier `VALID` on the operator-reviewed receipt object
 - Receipt `market` / `symbol` match current config
-- Artifact fingerprints at approval time match receipt fingerprints (no drift)
+- Approval-time fresh fingerprint comparison targets **`receipt.fingerprints_after`**
+  (the post-inspection observation bound into the receipt)
+- Machine `PASS` receipt requires **`fingerprints_before == fingerprints_after`**
+  (canonical normalized payload equality on all seven fingerprint fields per artifact)
+- Verifier `VALID` alone does **not** prove no-drift — only a receipt that also
+  satisfies the shared observation semantic rules (`validate_observation_semantics`)
+  carries that meaning
 - Nonterminal journal row count `0`
 - Database quiescence (no live `-wal`/`-shm`/`-journal` on configured DBs)
 
@@ -79,7 +85,8 @@ There is **no** code path that sets `activation_authorized=true`.
 - Calendar/session policy operational version (**OPEN**)
 
 Unset policy items stay **OPEN**. This lane does not pick TTL, signing, tokens, or
-persistence defaults.
+persistence defaults. Approval-time re-fingerprint policy and receipt freshness remain
+**OPEN**; receipt authenticity and Operator approval binding remain **OPEN**.
 
 ## Orphan sidecar observation limit
 

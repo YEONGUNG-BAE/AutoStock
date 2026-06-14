@@ -103,7 +103,7 @@ from composition.precheck_receipt_schema import (
     precheck_activation_posture,
     validate_checked_at,
     validate_market,
-    validate_outcome_semantics,
+    validate_observation_semantics,
     validate_reasons,
     validate_receipt_fingerprints,
     validate_symbol,
@@ -533,12 +533,14 @@ def build_runtime_precheck_receipt(
     if type(enabled) is not bool:
         raise PrecheckReceiptError("receipt_invalid_field")
     validate_reasons(reasons)
-    validate_outcome_semantics(
+    validate_receipt_fingerprints(fingerprints_before, fingerprints_after)
+    validate_observation_semantics(
         machine_outcome=machine_outcome.value,
         inspection_outcome=inspection_outcome.value,
         reasons=reasons,
+        fingerprints_before=fingerprints_before,
+        fingerprints_after=fingerprints_after,
     )
-    validate_receipt_fingerprints(fingerprints_before, fingerprints_after)
     posture = precheck_activation_posture()
     hash_payload = build_receipt_hash_payload(
         schema_version=PRECHECK_RECEIPT_SCHEMA_VERSION,

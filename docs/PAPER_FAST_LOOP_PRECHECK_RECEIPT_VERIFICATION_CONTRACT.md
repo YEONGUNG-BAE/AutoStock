@@ -65,9 +65,17 @@ Rules:
 
 Semantic consistency (fail-closed):
 
-- machine `pass` → inspection `ok` and empty `reasons`.
+- machine `pass` → inspection `ok`, empty `reasons`, and
+  `fingerprints_before == fingerprints_after` (canonical normalized payload per artifact).
 - inspection `no_go` → machine `no_go`.
 - machine `no_go` → at least one reason.
+- NO_GO drift ↔ changed-reason consistency: each before/after drift on a canonical
+  artifact requires exactly one matching `precheck_artifact_changed:<artifact>` reason;
+  spurious, duplicate, or unknown changed reasons fail closed.
+
+Shared helper: `composition.precheck_receipt_schema.validate_observation_semantics`
+(builder object path) / `observation_semantics_valid` (verifier dict path). Semantic
+mismatch is evaluated **before** hash recomputation.
 
 ## Fingerprint schema
 

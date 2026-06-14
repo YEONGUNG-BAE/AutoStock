@@ -627,3 +627,227 @@ def test_verifier_rejects_unicode_symbol() -> None:
     payload["symbol"] = "１２３４５６"
     result = verify_runtime_precheck_receipt_payload(payload)
     assert result.reason_codes == ("receipt_invalid_symbol",)
+
+
+# --- RTM-7c.4f observation semantics closure ---
+
+
+def _after_with_ledger_drift(before: tuple[ArtifactFingerprint, ...]) -> tuple[ArtifactFingerprint, ...]:
+    return tuple(
+        _fp("ledger", sha256="cd" * 32) if fp.name == "ledger" else fp for fp in before
+    )
+
+
+def test_pass_receipt_fingerprint_drift_rejected_by_builder_and_verifier() -> None:
+    """P1 재현 — PASS + ledger SHA drift는 builder·verifier 모두 거부."""
+    before = _four_fps()
+    after = _after_with_ledger_drift(before)
+    with pytest.raises(PrecheckReceiptError) as exc:
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.PASS,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=(),
+            fingerprints_before=before,
+            fingerprints_after=after,
+        )
+    assert exc.value.reason_code == "receipt_semantic_mismatch"
+    assert str(exc.value) == "receipt_semantic_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("after_override",),
+    [
+        (_fp("ledger", sidecar_suffixes=("-wal",)),),
+        (_fp("ledger", size=8192),),
+        (_fp("ledger", user_version=2),),
+    ],
+    ids=["sidecar", "size", "user_version"],
+)
+def test_builder_rejects_pass_with_fingerprint_field_drift(
+    after_override: ArtifactFingerprint,
+) -> None:
+    before = _four_fps()
+    after = tuple(after_override if fp.name == "ledger" else fp for fp in before)
+    with pytest.raises(PrecheckReceiptError, match="receipt_semantic_mismatch"):
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.PASS,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=(),
+            fingerprints_before=before,
+            fingerprints_after=after,
+        )
+
+
+@pytest.mark.parametrize(
+    ("reasons", "after_factory"),
+    [
+        (("missing_database:ledger",), _after_with_ledger_drift),
+        (("precheck_artifact_changed:ledger",), lambda b: b),
+        (
+            ("precheck_artifact_changed:ledger", "precheck_artifact_changed:ledger"),
+            _after_with_ledger_drift,
+        ),
+        (("precheck_artifact_changed:unknown",), _after_with_ledger_drift),
+    ],
+    ids=["missing_changed_reason", "spurious_changed_reason", "duplicate_changed_reason", "unknown_artifact"],
+)
+def test_builder_rejects_no_go_drift_reason_inconsistency(
+    reasons: tuple[str, ...],
+    after_factory: Callable[[tuple[ArtifactFingerprint, ...]], tuple[ArtifactFingerprint, ...]],
+) -> None:
+    before = _four_fps()
+    after = after_factory(before)
+    with pytest.raises(PrecheckReceiptError, match="receipt_semantic_mismatch"):
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.NO_GO,
+            inspection_outcome=InspectionOutcome.NO_GO,
+            reasons=reasons,
+            fingerprints_before=before,
+            fingerprints_after=after,
+        )
+
+
+def test_builder_accepts_no_go_non_drift_reason() -> None:
+    fps = _four_fps()
+    receipt = build_runtime_precheck_receipt(
+        checked_at=_CHECKED_AT,
+        market="KR",
+        symbol="005930",
+        enabled=True,
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=InspectionOutcome.NO_GO,
+        reasons=("missing_database:ledger",),
+        fingerprints_before=fps,
+        fingerprints_after=fps,
+    )
+    result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert result.outcome is ReceiptVerificationOutcome.VALID
+
+
+def test_builder_accepts_no_go_single_artifact_drift() -> None:
+    before = _four_fps()
+    after = _after_with_ledger_drift(before)
+    receipt = build_runtime_precheck_receipt(
+        checked_at=_CHECKED_AT,
+        market="KR",
+        symbol="005930",
+        enabled=True,
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=InspectionOutcome.OK,
+        reasons=("precheck_artifact_changed:ledger",),
+        fingerprints_before=before,
+        fingerprints_after=after,
+    )
+    result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert result.outcome is ReceiptVerificationOutcome.VALID
+
+
+def test_builder_accepts_no_go_multiple_artifact_drift() -> None:
+    before = _four_fps()
+    after = (
+        before[0],
+        _fp("ledger", sha256="cd" * 32),
+        before[2],
+        _fp("active_decision_store", sha256="ef" * 32),
+    )
+    receipt = build_runtime_precheck_receipt(
+        checked_at=_CHECKED_AT,
+        market="KR",
+        symbol="005930",
+        enabled=True,
+        machine_outcome=MachineCheckOutcome.NO_GO,
+        inspection_outcome=InspectionOutcome.OK,
+        reasons=(
+            "precheck_artifact_changed:ledger",
+            "precheck_artifact_changed:active_decision_store",
+        ),
+        fingerprints_before=before,
+        fingerprints_after=after,
+    )
+    result = verify_runtime_precheck_receipt_payload(_receipt_to_dict(receipt))
+    assert result.outcome is ReceiptVerificationOutcome.VALID
+
+
+def test_verifier_semantic_mismatch_precedes_hash_mismatch_on_pass_drift() -> None:
+    payload = _valid_receipt()
+    payload["fingerprints_after"][1]["sha256"] = "cd" * 32
+    result = verify_runtime_precheck_receipt_payload(payload)
+    assert result.reason_codes == ("receipt_semantic_mismatch",)
+
+
+def test_verifier_rejects_pass_drift_even_with_recomputed_hash() -> None:
+    before = _four_fps()
+    after = _after_with_ledger_drift(before)
+    no_go_payload = _receipt_to_dict(
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.NO_GO,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=("precheck_artifact_changed:ledger",),
+            fingerprints_before=before,
+            fingerprints_after=after,
+        )
+    )
+    payload = dict(no_go_payload)
+    payload["machine_outcome"] = "pass"
+    payload["inspection_outcome"] = "ok"
+    payload["reasons"] = []
+    from composition.precheck_receipt_schema import (
+        build_receipt_hash_payload_from_fingerprint_dicts,
+        compute_receipt_sha256,
+    )
+
+    hash_payload = build_receipt_hash_payload_from_fingerprint_dicts(
+        schema_version=payload["schema_version"],
+        checked_at=payload["checked_at"],
+        market=payload["market"],
+        symbol=payload["symbol"],
+        enabled=payload["enabled"],
+        machine_outcome="pass",
+        inspection_outcome="ok",
+        reasons=[],
+        fingerprints_before=payload["fingerprints_before"],
+        fingerprints_after=payload["fingerprints_after"],
+    )
+    payload["receipt_sha256"] = compute_receipt_sha256(hash_payload)
+    result = verify_runtime_precheck_receipt_payload(payload)
+    assert result.reason_codes == ("receipt_semantic_mismatch",)
+
+
+def test_semantic_mismatch_error_is_sanitized() -> None:
+    before = _four_fps()
+    after = _after_with_ledger_drift(before)
+    try:
+        build_runtime_precheck_receipt(
+            checked_at=_CHECKED_AT,
+            market="KR",
+            symbol="005930",
+            enabled=True,
+            machine_outcome=MachineCheckOutcome.PASS,
+            inspection_outcome=InspectionOutcome.OK,
+            reasons=(),
+            fingerprints_before=before,
+            fingerprints_after=after,
+        )
+    except PrecheckReceiptError as exc:
+        assert exc.reason_code == "receipt_semantic_mismatch"
+        assert "cd" not in str(exc)
+        assert "ledger" not in str(exc)
+        assert "ab" not in str(exc)
+    else:
+        pytest.fail("expected PrecheckReceiptError")

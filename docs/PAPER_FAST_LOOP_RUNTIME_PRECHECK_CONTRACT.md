@@ -50,6 +50,9 @@ timezone-aware; naive → `ValueError`):
    `reasons = inspection.reasons + precheck_reasons`.
 6. `machine_outcome = NO_GO` iff `inspection.outcome is NO_GO` **or** any precheck
    reason fired; else `PASS`.
+7. `build_runtime_precheck_receipt` enforces shared observation semantics (RTM-7c.4f):
+   PASS receipts require `fingerprints_before == fingerprints_after`; NO_GO receipts
+   with drift require matching `precheck_artifact_changed:<artifact>` reasons.
 
 ### Artifacts (4)
 

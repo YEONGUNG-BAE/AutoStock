@@ -88,6 +88,36 @@ is absent (see attended activation contract). Builder validation uses the same
 `validate_fingerprint_semantics` as the verifier; builder success → verifier VALID
 after JSON dict conversion.
 
+### Observation semantics (RTM-7c.4f — shared builder + verifier)
+
+`composition.precheck_receipt_schema.validate_observation_semantics` is the single
+source for outcome + fingerprint observation rules. Builder (object path) and verifier
+(dict path) both delegate here — no duplicated checks.
+
+**Machine `pass`:**
+
+- `inspection_outcome == "ok"`
+- `reasons == []`
+- `fingerprints_before == fingerprints_after` — canonical normalized payload equality
+  on every artifact (`name`, `present`, `is_regular_file`, `size`, `sha256`,
+  `user_version`, `sidecar_suffixes`). Any drift → `receipt_semantic_mismatch`.
+
+**Machine `no_go` drift ↔ changed-reason consistency:**
+
+- For each artifact whose before/after normalized payloads differ, a
+  `precheck_artifact_changed:<artifact>` reason must appear exactly once.
+- Conversely, every `precheck_artifact_changed:<artifact>` reason must correspond to
+  an actual before/after drift on that artifact.
+- Unknown artifact name, duplicate changed reason, drift without changed reason, or
+  spurious changed reason → `receipt_semantic_mismatch`.
+- Other NO_GO reasons (e.g. `missing_database:ledger`) remain valid when before/after
+  are equal.
+
+**Not implied by `receipt_sha256` or verifier `VALID`:** author authentication,
+Operator approval, writer-stop proof, approval-time freshness, or runtime activation.
+Future approval must compare a fresh fingerprint against **`fingerprints_after`**, not
+assume `VALID` alone proves no drift.
+
 ## Explicit exclusions from receipt payload
 
 Never included in the hash or CLI JSON receipt:

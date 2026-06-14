@@ -21,7 +21,7 @@ from composition.precheck_receipt_schema import (
     compute_receipt_sha256,
     is_hex64,
     market_valid,
-    outcome_semantics_valid,
+    observation_semantics_valid,
     parse_fingerprint_list,
     receipt_top_level_fields,
     strict_bool,
@@ -105,15 +105,17 @@ def verify_runtime_precheck_receipt_payload(payload: object) -> RuntimePrecheckR
     if not activation_posture_valid(payload):
         return _invalid("receipt_invalid_activation_posture")
 
-    if not outcome_semantics_valid(machine_outcome, inspection_outcome, reasons):
-        return _invalid("receipt_semantic_mismatch")
-
     before, err = parse_fingerprint_list(payload["fingerprints_before"])
     if err is not None:
         return _invalid(err)
     after, err = parse_fingerprint_list(payload["fingerprints_after"])
     if err is not None:
         return _invalid(err)
+
+    if not observation_semantics_valid(
+        machine_outcome, inspection_outcome, reasons, before, after
+    ):
+        return _invalid("receipt_semantic_mismatch")
 
     stored_hash = payload["receipt_sha256"]
     if not is_hex64(stored_hash):

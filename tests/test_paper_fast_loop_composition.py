@@ -1164,3 +1164,74 @@ def test_precheck_no_go_receipt_binds_exact_reasons(tmp_path: Path) -> None:
     pass_result = precheck_runtime(settings=pass_settings, now=_NOW, base_dir=pass_dir)
     assert pass_result.machine_outcome is MachineCheckOutcome.PASS
     assert no_go_result.receipt.receipt_sha256 != pass_result.receipt.receipt_sha256
+
+
+def _receipt_payload_from_result(receipt: RuntimePrecheckReceipt) -> dict[str, Any]:
+    return {
+        "schema_version": receipt.schema_version,
+        "checked_at": receipt.checked_at,
+        "market": receipt.market,
+        "symbol": receipt.symbol,
+        "enabled": receipt.enabled,
+        "machine_outcome": receipt.machine_outcome,
+        "inspection_outcome": receipt.inspection_outcome,
+        "reasons": list(receipt.reasons),
+        "fingerprints_before": [
+            {
+                "name": fp.name,
+                "present": fp.present,
+                "is_regular_file": fp.is_regular_file,
+                "size": fp.size,
+                "sha256": fp.sha256,
+                "user_version": fp.user_version,
+                "sidecar_suffixes": list(fp.sidecar_suffixes),
+            }
+            for fp in receipt.fingerprints_before
+        ],
+        "fingerprints_after": [
+            {
+                "name": fp.name,
+                "present": fp.present,
+                "is_regular_file": fp.is_regular_file,
+                "size": fp.size,
+                "sha256": fp.sha256,
+                "user_version": fp.user_version,
+                "sidecar_suffixes": list(fp.sidecar_suffixes),
+            }
+            for fp in receipt.fingerprints_after
+        ],
+        "activation_authorized": receipt.activation_authorized,
+        "runtime_activation_outcome": receipt.runtime_activation_outcome,
+        "explicit_operator_approval_required": receipt.explicit_operator_approval_required,
+        "writers_stopped_manual_confirmation_required": (
+            receipt.writers_stopped_manual_confirmation_required
+        ),
+        "receipt_sha256": receipt.receipt_sha256,
+    }
+
+
+def test_precheck_runtime_pass_and_no_go_receipts_verify_valid(tmp_path: Path) -> None:
+    from composition.precheck_receipt_verifier import (
+        ReceiptVerificationOutcome,
+        verify_runtime_precheck_receipt_payload,
+    )
+
+    pass_dir = tmp_path / "pass"
+    pass_settings = _settings(pass_dir)
+    _seed_valid_stack(pass_dir, pass_settings)
+    pass_result = precheck_runtime(settings=pass_settings, now=_NOW, base_dir=pass_dir)
+    assert pass_result.machine_outcome is MachineCheckOutcome.PASS
+    pass_verify = verify_runtime_precheck_receipt_payload(
+        _receipt_payload_from_result(pass_result.receipt)
+    )
+    assert pass_verify.outcome is ReceiptVerificationOutcome.VALID
+
+    no_go_dir = tmp_path / "no_go"
+    no_go_settings = _settings(no_go_dir)
+    _write_snapshot(no_go_dir, no_go_settings, _snapshot_payload())
+    no_go_result = precheck_runtime(settings=no_go_settings, now=_NOW, base_dir=no_go_dir)
+    assert no_go_result.machine_outcome is MachineCheckOutcome.NO_GO
+    no_go_verify = verify_runtime_precheck_receipt_payload(
+        _receipt_payload_from_result(no_go_result.receipt)
+    )
+    assert no_go_verify.outcome is ReceiptVerificationOutcome.VALID
