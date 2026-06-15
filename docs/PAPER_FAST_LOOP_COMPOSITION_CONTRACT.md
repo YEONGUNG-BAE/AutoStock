@@ -502,8 +502,11 @@ touch network/credentials/DB/clock and never activate runtime:
   persistence-payload `encode`/`decode` that fixes the byte format (the 13-field object →
   `canonical_json_dumps` → UTF-8, no trailing newline / BOM; no wrapper, no separate persistence
   hash) and the strict bounded decode/round-trip, reusing the existing artifact verifier exactly
-  once per call. **API-only — no file I/O.** Decode VALID = schema·semantic·hash consistency only;
-  payload created ≠ persisted, and VALID ≠ authenticity/provenance/consumption/activation. Also
-  carries the 4v verify-CLI hardening (malformed verifier result fails closed inside one defensive
-  boundary; early-failure call counts) — see
+  once per call. **API-only — no file I/O.** Decoder requires **exact canonical bytes** (noncanonical
+  equivalent JSON → `eligibility_persistence_payload_not_canonical`). Decode VALID = schema·semantic·hash
+  consistency only; payload created ≠ persisted, and VALID ≠ authenticity/provenance/consumption/activation.
+  Shared verifier/snapshot result invariant helpers are exported from the 4u verifier module and reused
+  by the persistence encoder, persistence decoder, and 4v verify CLI. Also carries the 4v verify-CLI
+  hardening (malformed verifier result fails closed inside one defensive boundary; early-failure call
+  counts) — see
   `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md`.

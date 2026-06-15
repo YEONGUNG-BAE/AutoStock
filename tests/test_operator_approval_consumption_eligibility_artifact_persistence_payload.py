@@ -25,7 +25,10 @@ from composition.operator_approval_consumption_eligibility_artifact import (
     operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars,
 )
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
+    OperatorApprovalConsumptionEligibilityArtifactVerification as _Verif,
+    OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome as _VerifOutcome,
     VerifiedOperatorApprovalConsumptionEligibilityArtifact,
+    VerifiedOperatorApprovalConsumptionEligibilityArtifactResult as _SnapResult,
     verify_and_snapshot_operator_approval_consumption_eligibility_artifact,
 )
 import composition.operator_approval_consumption_eligibility_artifact_persistence_payload as mod
@@ -453,3 +456,366 @@ def test_consistency_C_tampered_without_rehash_is_invalid() -> None:
     dec = decode(_canonical_bytes(d))
     assert dec.outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID
     assert dec.reason_codes == ("eligibility_artifact_hash_mismatch",)
+
+
+# --- encoder malformed verifier-result matrix (P1-A) ---
+
+
+def _verif(**kw: object) -> _Verif:
+    base: dict[str, object] = {
+        "outcome": _VerifOutcome.INVALID,
+        "schema_version": None,
+        "approval_intent_schema_version": None,
+        "approval_intent_sha256": None,
+        "candidate_evidence_schema_version": None,
+        "candidate_evidence_sha256": None,
+        "eligibility_artifact_sha256": None,
+        "reason_codes": ("eligibility_artifact_invalid_field",),
+    }
+    base.update(kw)
+    return _Verif(**base)  # type: ignore[arg-type]
+
+
+def _valid_verif(**kw: object) -> _Verif:
+    snap = _valid_snapshot()
+    valid: dict[str, object] = {
+        "outcome": _VerifOutcome.VALID,
+        "schema_version": snap.schema_version,
+        "approval_intent_schema_version": snap.approval_intent_schema_version,
+        "approval_intent_sha256": snap.approval_intent_sha256,
+        "candidate_evidence_schema_version": snap.candidate_evidence_schema_version,
+        "candidate_evidence_sha256": snap.candidate_evidence_sha256,
+        "eligibility_artifact_sha256": snap.eligibility_artifact_sha256,
+        "reason_codes": (),
+    }
+    valid.update(kw)
+    return _verif(**valid)
+
+
+class _BadOutcome:
+    pass
+
+
+class _PropBoom:
+    @property
+    def outcome(self) -> object:
+        raise RuntimeError("SECRET_LEAK_/home/user/APP_SECRET")
+
+
+class _SecretSentinel:
+    outcome = _VerifOutcome.VALID
+    reason_codes = ()
+    schema_version = 1
+    approval_intent_schema_version = 1
+    approval_intent_sha256 = _HEX64
+    candidate_evidence_schema_version = 1
+    candidate_evidence_sha256 = _HEX64
+    eligibility_artifact_sha256 = _HEX64
+    path = "/secret/config.toml"
+    secret = "APP_SECRET"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="object"),
+        pytest.param({"outcome": "VALID"}, id="dict"),
+        pytest.param(_BadOutcome(), id="wrong_outcome_object"),
+        pytest.param(_PropBoom(), id="property_raises"),
+        pytest.param(_SecretSentinel(), id="path_secret_sentinel"),
+        pytest.param(_valid_verif(reason_codes=("x",)), id="valid_nonempty_reasons"),
+        pytest.param(_valid_verif(schema_version=None), id="valid_null_schema"),
+        pytest.param(_valid_verif(schema_version=True), id="valid_bool_schema"),
+        pytest.param(_valid_verif(eligibility_artifact_sha256=None), id="valid_null_digest"),
+        pytest.param(_valid_verif(eligibility_artifact_sha256="ZZ"), id="valid_bad_digest"),
+        pytest.param(_verif(reason_codes=()), id="invalid_empty_reasons"),
+        pytest.param(_verif(reason_codes=("a", "b")), id="invalid_two_reasons"),
+    ],
+)
+def test_encode_malformed_verifier_result_is_invalid(
+    result: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mod, "verify_operator_approval_consumption_eligibility_artifact_payload", lambda _p: result
+    )
+    res = encode(_valid_snapshot())
+    assert res.outcome is EligibilityArtifactPersistencePayloadOutcome.INVALID
+    assert res.reason_codes == ("eligibility_persistence_payload_invalid_snapshot",)
+    assert res.payload_bytes is None
+    assert res.eligibility_artifact_sha256 is None
+    blob = json.dumps([res.reason_codes, res.eligibility_artifact_sha256])
+    assert "SECRET_LEAK" not in blob and "APP_SECRET" not in blob and "/home/" not in blob
+    assert "/secret/" not in blob
+
+
+def test_encode_verifier_subclass_result_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Sub(_Verif):
+        pass
+
+    sub = _Sub(**{f.name: getattr(_valid_verif(), f.name) for f in dataclasses.fields(_Verif)})
+    monkeypatch.setattr(
+        mod, "verify_operator_approval_consumption_eligibility_artifact_payload", lambda _p: sub
+    )
+    res = encode(_valid_snapshot())
+    assert res.outcome is EligibilityArtifactPersistencePayloadOutcome.INVALID
+    assert res.payload_bytes is None
+
+
+def test_encode_verifier_metadata_mismatch_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Verifier가 payload와 다른 valid-looking metadata를 반환하면 INVALID.
+    wrong_digest = "0000000000000000000000000000000000000000000000000000000000000001"
+    monkeypatch.setattr(
+        mod,
+        "verify_operator_approval_consumption_eligibility_artifact_payload",
+        lambda _p: _valid_verif(eligibility_artifact_sha256=wrong_digest),
+    )
+    res = encode(_valid_snapshot())
+    assert res.outcome is EligibilityArtifactPersistencePayloadOutcome.INVALID
+    assert res.payload_bytes is None
+
+
+def test_encode_malformed_verifier_result_skips_canonical_dumps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def _bad(_p: object) -> object:
+        calls.append("verify")
+        return None
+
+    def _dumps(_v: object) -> str:
+        calls.append("dumps")
+        return "{}"
+
+    monkeypatch.setattr(mod, "verify_operator_approval_consumption_eligibility_artifact_payload", _bad)
+    monkeypatch.setattr(mod, "canonical_json_dumps", _dumps)
+    encode(_valid_snapshot())
+    assert calls == ["verify"]
+
+
+# --- decoder malformed snapshot-result matrix (P1-A) ---
+
+
+def _snap_result(**kw: object) -> _SnapResult:
+    base: dict[str, object] = {
+        "outcome": _VerifOutcome.INVALID,
+        "reason_codes": ("eligibility_artifact_invalid_field",),
+        "snapshot": None,
+    }
+    base.update(kw)
+    return _SnapResult(**base)  # type: ignore[arg-type]
+
+
+def _valid_snap_result(**kw: object) -> _SnapResult:
+    snap = _valid_snapshot()
+    valid: dict[str, object] = {
+        "outcome": _VerifOutcome.VALID,
+        "reason_codes": (),
+        "snapshot": snap,
+    }
+    valid.update(kw)
+    return _snap_result(**valid)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="object"),
+        pytest.param({"outcome": "VALID"}, id="dict"),
+        pytest.param(_BadOutcome(), id="wrong_outcome_object"),
+        pytest.param(_PropBoom(), id="property_raises"),
+        pytest.param(_valid_snap_result(reason_codes=("x",)), id="valid_nonempty_reasons"),
+        pytest.param(_valid_snap_result(snapshot=None), id="valid_snapshot_none"),
+        pytest.param(_valid_snap_result(snapshot=object()), id="valid_snapshot_wrong"),
+        pytest.param(_snap_result(reason_codes=()), id="invalid_empty_reasons"),
+        pytest.param(_snap_result(reason_codes=("a", "b")), id="invalid_two_reasons"),
+        pytest.param(_snap_result(snapshot=_valid_snapshot()), id="invalid_snapshot_non_none"),
+    ],
+)
+def test_decode_malformed_snapshot_result_is_invalid(
+    result: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mod, "verify_and_snapshot_operator_approval_consumption_eligibility_artifact", lambda _p: result
+    )
+    dec = decode(encode(_valid_snapshot()).payload_bytes)
+    assert dec.outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID
+    assert dec.reason_codes == ("eligibility_persistence_payload_invalid_artifact",)
+    assert dec.snapshot is None
+    blob = json.dumps(list(dec.reason_codes))
+    assert "SECRET_LEAK" not in blob and "APP_SECRET" not in blob and "/home/" not in blob
+
+
+def test_decode_snapshot_result_subclass_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Sub(_SnapResult):
+        pass
+
+    sub = _Sub(**{f.name: getattr(_valid_snap_result(), f.name) for f in dataclasses.fields(_SnapResult)})
+    monkeypatch.setattr(
+        mod, "verify_and_snapshot_operator_approval_consumption_eligibility_artifact", lambda _p: sub
+    )
+    dec = decode(encode(_valid_snapshot()).payload_bytes)
+    assert dec.reason_codes == ("eligibility_persistence_payload_invalid_artifact",)
+
+
+def test_decode_snapshot_subclass_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Sub(VerifiedOperatorApprovalConsumptionEligibilityArtifact):
+        pass
+
+    base = _valid_snapshot()
+    sub = _Sub(**dataclasses.asdict(base))
+    monkeypatch.setattr(
+        mod,
+        "verify_and_snapshot_operator_approval_consumption_eligibility_artifact",
+        lambda _p: _valid_snap_result(snapshot=sub),
+    )
+    dec = decode(encode(_valid_snapshot()).payload_bytes)
+    assert dec.reason_codes == ("eligibility_persistence_payload_invalid_artifact",)
+
+
+def test_decode_malformed_snapshot_result_skips_canonical_dumps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload_bytes = _valid_canonical_bytes()
+    calls: list[str] = []
+
+    def _bad(_p: object) -> object:
+        calls.append("verify_and_snapshot")
+        return None
+
+    def _dumps(_v: object) -> str:
+        calls.append("dumps")
+        return "{}"
+
+    monkeypatch.setattr(
+        mod, "verify_and_snapshot_operator_approval_consumption_eligibility_artifact", _bad
+    )
+    monkeypatch.setattr(mod, "canonical_json_dumps", _dumps)
+    decode(payload_bytes)
+    assert calls == ["verify_and_snapshot"]
+
+
+# --- canonical representation matrix (P1-B) ---
+
+
+def _valid_canonical_bytes() -> bytes:
+    return encode(_valid_snapshot()).payload_bytes
+
+
+@pytest.mark.parametrize(
+    "mutator,reason",
+    [
+        pytest.param(lambda b: json.dumps(json.loads(b), indent=2).encode("utf-8"), "pretty", id="pretty"),
+        pytest.param(
+            lambda b: json.dumps(
+                {k: json.loads(b)[k] for k in reversed(list(json.loads(b)))},
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            "reordered",
+            id="reordered",
+        ),
+        pytest.param(lambda b: b" " + b, "leading", id="leading_whitespace"),
+        pytest.param(lambda b: b + b" ", "trailing_space", id="trailing_whitespace"),
+        pytest.param(lambda b: b + b"\n", "trailing_newline", id="trailing_newline"),
+    ],
+)
+def test_decode_noncanonical_semantic_valid_is_not_canonical(
+    mutator: object, reason: str
+) -> None:
+    canonical = _valid_canonical_bytes()
+    noncanonical = mutator(canonical)  # type: ignore[operator]
+    dec = decode(noncanonical)
+    assert dec.outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID
+    assert dec.reason_codes == ("eligibility_persistence_payload_not_canonical",)
+    assert dec.snapshot is None
+
+
+def test_decode_malformed_json_precedes_not_canonical() -> None:
+    dec = decode(b"not json")
+    assert dec.reason_codes == ("eligibility_persistence_payload_not_json",)
+
+
+def test_decode_semantic_invalid_precedes_not_canonical() -> None:
+    d = _valid_payload()
+    d["market"] = "US"
+    dec = decode(_canonical_bytes(d))
+    assert dec.reason_codes == ("eligibility_artifact_invalid_field",)
+
+
+def test_decode_hash_mismatch_precedes_not_canonical() -> None:
+    d = _valid_payload()
+    d["symbol"] = "000001" if d["symbol"] != "000001" else "000002"
+    dec = decode(_canonical_bytes(d))
+    assert dec.reason_codes == ("eligibility_artifact_hash_mismatch",)
+
+
+# --- exception taxonomy (P2) ---
+
+
+def test_decode_verify_and_snapshot_exception_is_invalid_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(_p: object) -> object:
+        raise ValueError("SECRET_LEAK_/home/user/APP_SECRET")
+
+    monkeypatch.setattr(
+        mod, "verify_and_snapshot_operator_approval_consumption_eligibility_artifact", _raise
+    )
+    dec = decode(encode(_valid_snapshot()).payload_bytes)
+    assert dec.reason_codes == ("eligibility_persistence_payload_invalid_artifact",)
+    assert "SECRET_LEAK" not in json.dumps(list(dec.reason_codes))
+
+
+def test_decode_canonical_reencode_exception_is_invalid_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload_bytes = _valid_canonical_bytes()
+
+    def _raise(_v: object) -> str:
+        raise ValueError("SECRET_LEAK_/home/user/APP_SECRET")
+
+    monkeypatch.setattr(mod, "canonical_json_dumps", _raise)
+    dec = decode(payload_bytes)
+    assert dec.reason_codes == ("eligibility_persistence_payload_invalid_artifact",)
+
+
+@pytest.mark.parametrize("exc", [MemoryError, KeyboardInterrupt, SystemExit])
+def test_decode_verify_and_snapshot_fatal_propagates(
+    monkeypatch: pytest.MonkeyPatch, exc: type[BaseException]
+) -> None:
+    def _raise(_p: object) -> object:
+        raise exc()
+
+    monkeypatch.setattr(
+        mod, "verify_and_snapshot_operator_approval_consumption_eligibility_artifact", _raise
+    )
+    with pytest.raises(exc):
+        decode(encode(_valid_snapshot()).payload_bytes)
+
+
+def test_round_trip_digest_equality() -> None:
+    snap = _valid_snapshot()
+    enc = encode(snap)
+    dec = decode(enc.payload_bytes)
+    assert dec.snapshot is not None
+    assert dec.snapshot.eligibility_artifact_sha256 == snap.eligibility_artifact_sha256
+    assert enc.eligibility_artifact_sha256 == snap.eligibility_artifact_sha256
+
+
+def test_round_trip_canonical_check_passes() -> None:
+    enc = encode(_valid_snapshot())
+    dec = decode(enc.payload_bytes)
+    assert dec.outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.VALID
+    re_enc = encode(dec.snapshot)
+    assert re_enc.payload_bytes == enc.payload_bytes

@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -100,6 +99,7 @@ from composition.operator_approval_intent_verifier import (
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
     OperatorApprovalConsumptionEligibilityArtifactVerification,
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
+    validate_operator_approval_consumption_eligibility_artifact_verification_invariants,
     verify_operator_approval_consumption_eligibility_artifact_payload,
 )
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
@@ -114,7 +114,6 @@ DEFAULT_CONFIG_PATH = "config/config.toml.example"
 _KST = ZoneInfo("Asia/Seoul")
 _RUN_REFUSED_REASON = "live_run_not_implemented"
 _VERIFY_RECEIPT_STDIN_LIMIT = 1 << 20  # 1 MiB — untrusted stdin bound
-_HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
 # receipt stdin parser reason → approval-intent verify CLI reason (외부 노출 분리).
 _RECEIPT_TO_APPROVAL_INTENT_INPUT_REASON: dict[str, str] = {
@@ -946,44 +945,24 @@ def _verify_eligibility_artifact_cli_envelope(
     }
 
 
-def _is_exact_int(value: object) -> bool:
-    return type(value) is int
-
-
-def _is_lower_hex64(value: object) -> bool:
-    return type(value) is str and _HEX64_RE.fullmatch(value) is not None
-
-
 def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any] | None:
     """Validate the verifier result against its exact type and outcome invariants *before*
     reading any metadata, then emit a sanitized CLI envelope. Returns ``None`` when the result
     is not the exact verification dataclass or violates its VALID/INVALID invariants, so the
     caller fails closed to a sanitized INVALID — no raw object/value/attribute/property leak.
 
-    The exact-type guard runs first; only an exact frozen verification instance has its
-    attributes read afterward, so a custom object's property getters are never invoked."""
+    Shared composition invariant helper를 사용해 CLI와 persistence encoder가 동일 규칙을 따른다."""
 
-    if type(result) is not OperatorApprovalConsumptionEligibilityArtifactVerification:
+    if not validate_operator_approval_consumption_eligibility_artifact_verification_invariants(
+        result
+    ):
         return None
 
+    assert type(result) is OperatorApprovalConsumptionEligibilityArtifactVerification
     outcome = result.outcome
     reason_codes = result.reason_codes
 
     if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID:
-        if type(reason_codes) is not tuple or reason_codes != ():
-            return None
-        if not (
-            _is_exact_int(result.schema_version)
-            and _is_exact_int(result.approval_intent_schema_version)
-            and _is_exact_int(result.candidate_evidence_schema_version)
-        ):
-            return None
-        if not (
-            _is_lower_hex64(result.approval_intent_sha256)
-            and _is_lower_hex64(result.candidate_evidence_sha256)
-            and _is_lower_hex64(result.eligibility_artifact_sha256)
-        ):
-            return None
         return _verify_eligibility_artifact_cli_envelope(
             outcome="VALID",
             reason_codes=[],
@@ -996,10 +975,6 @@ def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any] | None:
         )
 
     if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID:
-        if type(reason_codes) is not tuple or len(reason_codes) != 1:
-            return None
-        if type(reason_codes[0]) is not str:
-            return None
         return _verify_eligibility_artifact_cli_envelope(
             outcome="INVALID",
             reason_codes=[reason_codes[0]],

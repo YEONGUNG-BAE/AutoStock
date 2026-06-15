@@ -23,6 +23,9 @@ from enum import StrEnum
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
     VerifiedOperatorApprovalConsumptionEligibilityArtifact,
+    operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload,
+    validate_operator_approval_consumption_eligibility_artifact_verification_invariants,
+    validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants,
     verify_and_snapshot_operator_approval_consumption_eligibility_artifact,
     verify_operator_approval_consumption_eligibility_artifact_payload,
 )
@@ -53,6 +56,8 @@ _DECODE_NOT_UTF8 = "eligibility_persistence_payload_not_utf8"
 _DECODE_NOT_JSON = "eligibility_persistence_payload_not_json"
 _DECODE_TOO_DEEP = "eligibility_persistence_payload_too_deep"
 _DECODE_DUPLICATE_KEY = "eligibility_persistence_payload_duplicate_key"
+_DECODE_INVALID_ARTIFACT = "eligibility_persistence_payload_invalid_artifact"
+_DECODE_NOT_CANONICAL = "eligibility_persistence_payload_not_canonical"
 
 # Strict-parser reason → persistence decode reason (외부 노출 namespace 분리).
 _PARSER_TO_DECODE_REASON: dict[str, str] = {
@@ -121,21 +126,15 @@ def decode_operator_approval_consumption_eligibility_artifact_payload(
     Operator identity, signature, approval consumption, replay prevention, activation authorization이
     아니다. 파일 읽기/path 처리를 하지 않는다."""
 
-    try:
-        return _decode(payload_bytes)
-    except (MemoryError, KeyboardInterrupt, SystemExit):
-        raise
-    except Exception:
-        return _decode_invalid(_DECODE_NOT_JSON)
+    return _decode(payload_bytes)
 
 
-def _encode(snapshot: object) -> EligibilityArtifactPersistencePayloadResult:
-    if type(snapshot) is not VerifiedOperatorApprovalConsumptionEligibilityArtifact:
-        return _encode_invalid()
+def _artifact_payload_dict_from_snapshot(
+    snapshot: VerifiedOperatorApprovalConsumptionEligibilityArtifact,
+) -> dict[str, object]:
+    """Verified snapshot 13 scalar를 canonical emission source용 built-in dict로 변환한다."""
 
-    # 13 scalar fields는 각각 정확히 1회만 local로 읽는다(asdict 신뢰 금지). 이후 caller snapshot은
-    # 재접근하지 않는다.
-    payload = {
+    return {
         "schema_version": snapshot.schema_version,
         "checked_at": snapshot.checked_at,
         "approval_intent_schema_version": snapshot.approval_intent_schema_version,
@@ -151,18 +150,47 @@ def _encode(snapshot: object) -> EligibilityArtifactPersistencePayloadResult:
         "eligibility_artifact_sha256": snapshot.eligibility_artifact_sha256,
     }
 
-    verification = verify_operator_approval_consumption_eligibility_artifact_payload(payload)
+
+def _encode(snapshot: object) -> EligibilityArtifactPersistencePayloadResult:
+    if type(snapshot) is not VerifiedOperatorApprovalConsumptionEligibilityArtifact:
+        return _encode_invalid()
+
+    # 13 scalar fields는 각각 정확히 1회만 local로 읽는다(asdict 신뢰 금지). 이후 caller snapshot은
+    # 재접근하지 않는다.
+    payload = _artifact_payload_dict_from_snapshot(snapshot)
+
+    try:
+        verification = verify_operator_approval_consumption_eligibility_artifact_payload(payload)
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _encode_invalid()
+
+    if not validate_operator_approval_consumption_eligibility_artifact_verification_invariants(
+        verification
+    ):
+        return _encode_invalid()
     if (
         verification.outcome
         is not OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID
     ):
         return _encode_invalid()
+    if not operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload(
+        verification, payload
+    ):
+        return _encode_invalid()
 
-    payload_bytes = canonical_json_dumps(payload).encode("utf-8")
+    try:
+        encoded = canonical_json_dumps(payload).encode("utf-8")
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _encode_invalid()
+
     return EligibilityArtifactPersistencePayloadResult(
         outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
         reason_codes=(),
-        payload_bytes=payload_bytes,
+        payload_bytes=encoded,
         eligibility_artifact_sha256=verification.eligibility_artifact_sha256,
     )
 
@@ -184,21 +212,50 @@ def _decode(payload_bytes: object) -> EligibilityArtifactPersistencePayloadVerif
         parsed = parse_receipt_stdin_json(text)
     except ReceiptStdinJsonError as exc:
         return _decode_invalid(_PARSER_TO_DECODE_REASON.get(exc.reason_code, _DECODE_NOT_JSON))
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _decode_invalid(_DECODE_NOT_JSON)
 
-    result = verify_and_snapshot_operator_approval_consumption_eligibility_artifact(parsed)
+    try:
+        result = verify_and_snapshot_operator_approval_consumption_eligibility_artifact(parsed)
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _decode_invalid(_DECODE_INVALID_ARTIFACT)
+
+    if not validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants(
+        result
+    ):
+        return _decode_invalid(_DECODE_INVALID_ARTIFACT)
+
     if (
         result.outcome
         is not OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID
     ):
         # Artifact verifier reason(예: eligibility_artifact_not_object / missing_field /
         # invalid_field / hash_mismatch)을 그대로 보존한다.
-        reason = result.reason_codes[0] if result.reason_codes else "eligibility_artifact_invalid_field"
-        return _decode_invalid(reason)
+        return _decode_invalid(result.reason_codes[0])
+
+    snapshot = result.snapshot
+    assert snapshot is not None
+
+    try:
+        canonical_bytes = canonical_json_dumps(
+            _artifact_payload_dict_from_snapshot(snapshot)
+        ).encode("utf-8")
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        return _decode_invalid(_DECODE_INVALID_ARTIFACT)
+
+    if canonical_bytes != payload_bytes:
+        return _decode_invalid(_DECODE_NOT_CANONICAL)
 
     return EligibilityArtifactPersistencePayloadVerification(
         outcome=EligibilityArtifactPersistencePayloadVerificationOutcome.VALID,
         reason_codes=(),
-        snapshot=result.snapshot,
+        snapshot=snapshot,
     )
 
 

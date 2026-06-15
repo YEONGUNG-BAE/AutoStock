@@ -221,6 +221,6 @@ persistence.
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` — RTM-7c.4t builder + shared scalar/hash owners
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` — RTM-7c.4s eligibility preflight
 - `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — RTM-7c.4r verified intent snapshot (sibling verifier pattern)
-- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md` — RTM-7c.4w canonical persistence-payload encode/decode (consumes this verified snapshot; API-only, no file I/O)
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md` — RTM-7c.4w canonical persistence-payload encode/decode (consumes this verified snapshot; API-only, no file I/O; decoder requires exact canonical bytes; shared result-invariant helpers exported from this module)
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root

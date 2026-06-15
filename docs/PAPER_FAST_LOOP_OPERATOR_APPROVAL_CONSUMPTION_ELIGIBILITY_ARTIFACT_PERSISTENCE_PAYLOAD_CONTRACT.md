@@ -38,6 +38,11 @@ Encoding: `canonical_json_dumps` (sorted keys, `(",", ":")` separators) → UTF-
 newline, no BOM, no indentation**. An identical snapshot always produces byte-for-byte identical
 payload bytes.
 
+**Decoder also requires exact canonical bytes.** Semantically/hash-valid JSON that differs only in
+representation (pretty-print, key order, leading/trailing whitespace, trailing newline, alternate
+escaping) is `INVALID` / `eligibility_persistence_payload_not_canonical`. Encoder output always
+passes the same canonical check.
+
 ## Encoder contract
 
 `encode(snapshot) -> EligibilityArtifactPersistencePayloadResult`
@@ -57,7 +62,13 @@ eligibility_artifact_sha256: str | None
 Processing: exact `type(snapshot) is VerifiedOperatorApprovalConsumptionEligibilityArtifact`
 (subclass / `object.__setattr__`-corrupted / arbitrary object rejected — `asdict` is not trusted);
 each of the 13 scalars read once into a built-in dict; re-validated through the existing artifact
-verifier **exactly once**; `canonical_json_dumps` + UTF-8 only on VALID. The caller snapshot is
+verifier **exactly once**; the verifier return is validated with the shared composition helper
+`validate_operator_approval_consumption_eligibility_artifact_verification_invariants` (exact type,
+VALID/INVALID invariants) and `operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload`
+(six metadata fields must match the captured payload); `canonical_json_dumps` + UTF-8 only when all
+checks pass. A malformed verifier dependency result (None / object / dict / subclass / wrong outcome /
+property-raising / invariant violation / metadata mismatch) fails closed to `INVALID` /
+`eligibility_persistence_payload_invalid_snapshot` with `payload_bytes=None`. The caller snapshot is
 never re-accessed after capture, so post-call mutation cannot change the result.
 
 ## Decoder contract
@@ -70,10 +81,10 @@ reason_codes: tuple[str, ...]
 snapshot: VerifiedOperatorApprovalConsumptionEligibilityArtifact | None
 ```
 
-- `VALID`: `reason_codes == ()`, `snapshot is not None`.
+- `VALID`: `reason_codes == ()`, `type(snapshot) is VerifiedOperatorApprovalConsumptionEligibilityArtifact`.
 - `INVALID`: `len(reason_codes) == 1`, `snapshot is None`.
 
-Input reasons:
+Input reasons (precedence order):
 
 ```
 eligibility_persistence_payload_not_bytes   (bytearray/memoryview/bytes-subclass/str/...)
@@ -83,16 +94,25 @@ eligibility_persistence_payload_not_utf8
 eligibility_persistence_payload_not_json    (incl. NaN / Infinity / -Infinity)
 eligibility_persistence_payload_too_deep
 eligibility_persistence_payload_duplicate_key  (top-level or nested)
+eligibility_artifact_*                      (verifier semantic/hash reasons — verbatim)
+eligibility_persistence_payload_invalid_artifact  (malformed verify-and-snapshot result or verifier-boundary exception)
+eligibility_persistence_payload_not_canonical     (semantic/hash valid but byte representation noncanonical)
 ```
 
 When the artifact verifier rejects a syntactically valid payload, its reason is preserved verbatim
 (e.g. `eligibility_artifact_not_object` for a root list/string/null, `eligibility_artifact_missing_field`,
-`eligibility_artifact_invalid_field`, `eligibility_artifact_hash_mismatch`).
+`eligibility_artifact_invalid_field`, `eligibility_artifact_hash_mismatch`). Syntactically invalid
+input is classified by the parser (`_not_json` / `_too_deep` / `_duplicate_key`), not as a verifier
+failure. A semantic/hash-valid payload with noncanonical bytes is `_not_canonical`, not `_invalid_artifact`.
 
 Processing: exact `type(payload_bytes) is bytes`; empty / 1 MiB bound; UTF-8 decode; bounded strict
-JSON parse; `verify_and_snapshot_...` **exactly once**. Parser and verifier responsibilities are
-not mixed — the parser only requires syntactically valid bounded JSON; the verifier owns the exact
-object-root and 13-field requirement.
+JSON parse; `verify_and_snapshot_...` **exactly once**; shared
+`validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants` on the
+dependency result (malformed → `_invalid_artifact`); on VALID, rebuild canonical bytes from the
+verified snapshot and require **exact** equality with the input bytes. Parser and verifier
+responsibilities are not mixed — the parser only requires syntactically valid bounded JSON; the
+verifier owns the exact object-root and 13-field requirement; canonical enforcement is a separate
+post-verifier gate.
 
 ## Consistency semantics (A / B / C)
 
@@ -120,13 +140,36 @@ Operator identity, signature, consumption, replay, or activation.
 
 ## Isolation, call counts, exceptions
 
-- Encoder per call: artifact verify `1`, `canonical_json_dumps` `1`; filesystem/path/clock/
-  config/env/DB/network `0`; builder/eligibility/intent-verifier rerun `0`.
-- Decoder per call: UTF-8 decode `1`, JSON parse `1`, verify-and-snapshot `1`; filesystem/path/
-  clock/config/env/DB/network `0`.
+- Encoder per call: artifact verify `1`, `canonical_json_dumps` `1` (only on well-formed VALID
+  verifier result); filesystem/path/clock/config/env/DB/network `0`; builder/eligibility/intent-verifier
+  rerun `0`.
+- Decoder per call: UTF-8 decode `1`, JSON parse `1`, verify-and-snapshot `1`, canonical re-encode
+  `1` (only on well-formed VALID snapshot result); filesystem/path/clock/config/env/DB/network `0`.
 - Decoder retains no raw `payload_bytes` reference and no parser raw dict in the result/snapshot.
-- Ordinary `Exception` → sanitized `INVALID` (no raw field / hash / timestamp / path / exception);
-  `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised. Applies to both functions.
+- Exception taxonomy (ordinary → sanitized `INVALID`; fatal re-raised):
+  - decode UTF-8 / JSON parser → `eligibility_persistence_payload_not_json` (or mapped parser reason)
+  - verify-and-snapshot ordinary exception → `eligibility_persistence_payload_invalid_artifact`
+  - canonical re-encode ordinary exception → `eligibility_persistence_payload_invalid_artifact`
+  - encoder field capture / verifier / canonical encode → `eligibility_persistence_payload_invalid_snapshot`
+- Shared result validators exported from `composition.operator_approval_consumption_eligibility_artifact_verifier`
+  are reused by the persistence encoder, persistence decoder, and the 4v verify CLI (no duplicated rules;
+  `composition` does not import `ops`).
+
+## RTM-7c.4w closure — result-invariant and canonical-decode
+
+Closes independent-review findings without adding file I/O or new scope:
+
+- **Dependency result invariants:** encoder validates `type(result) is
+  OperatorApprovalConsumptionEligibilityArtifactVerification` plus VALID/INVALID invariants and
+  metadata binding before emitting bytes; decoder validates `type(result) is
+  VerifiedOperatorApprovalConsumptionEligibilityArtifactResult` plus VALID snapshot exact-type before
+  returning `VALID`.
+- **Canonical decode enforcement:** decoder requires input bytes to equal the canonical re-encode of
+  the verified snapshot; equivalent noncanonical JSON is rejected even when semantically/hash valid.
+- **Malformed dependency fail-closed:** None/object/dict/subclass/wrong-outcome/property-raising/
+  invariant-violating verifier or snapshot results never produce `CREATED`/`VALID` and never leak raw
+  dependency objects/paths/secrets.
+- **Activation:** still NO-GO; payload created ≠ persisted; VALID ≠ authenticity/provenance.
 
 ## Out of scope (deferred)
 

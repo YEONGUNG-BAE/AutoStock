@@ -210,8 +210,10 @@ The canonical **byte format** of this artifact (when serialized for persistence)
 decode/verify round-trip are fixed by
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md`
 (RTM-7c.4w). The payload **is** this 13-field object (no wrapper, no separate persistence hash);
-encoding is `canonical_json_dumps` → UTF-8 with no trailing newline / BOM. That lane is API-only —
-no file I/O — and decode `VALID` is consistency only, not persistence/authenticity/provenance.
+encoding is `canonical_json_dumps` → UTF-8 with no trailing newline / BOM. **Decoder requires exact
+canonical bytes** — equivalent noncanonical JSON is `eligibility_persistence_payload_not_canonical`.
+That lane is API-only — no file I/O — and decode `VALID` is consistency only, not
+persistence/authenticity/provenance.
 
 ## Still OPEN (unchanged posture)
 

@@ -171,13 +171,16 @@ verification, intent/evidence lookup, TTL/freshness re-evaluation, activation ca
 ## RTM-7c.4w carry-over hardening
 
 The verifier call and the result validation/summary now run inside one defensive boundary.
-`_verify_eligibility_artifact_summary` validates `type(result) is
-OperatorApprovalConsumptionEligibilityArtifactVerification` and the exact VALID/INVALID invariants
-(VALID: `reason_codes == ()`, three schema versions exact `int`, three digests lowercase hex64;
-INVALID: `reason_codes` a length-1 `str` tuple) **before** reading any metadata. A malformed
-verifier return (None / object / dict / subclass / wrong outcome / property-raising / invariant
-violation) fails closed to exit 1 / `INVALID` / `eligibility_artifact_invalid_field` / null
-metadata with no raw object/value/property leak; fatal `MemoryError`/`KeyboardInterrupt`/`SystemExit`
-re-raise. Early-failure call counts are asserted: applicability/mode FAIL reads stdin `0` and the
-verifier `0`; a stdin-boundary FAIL reads stdin `1` / verifier `0`; an artifact INVALID/VALID calls
-the verifier `1`.
+`_verify_eligibility_artifact_summary` delegates to the shared composition helper
+`validate_operator_approval_consumption_eligibility_artifact_verification_invariants` (same rules as
+the persistence encoder) **before** reading any metadata. A malformed verifier return (None / object
+/ dict / subclass / wrong outcome / property-raising / invariant violation) fails closed to exit 1 /
+`INVALID` / `eligibility_artifact_invalid_field` / null metadata with no raw object/value/property
+leak; fatal `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raise. Early-failure call counts are
+asserted: applicability/mode FAIL reads stdin `0` and the verifier `0`; a stdin-boundary FAIL reads
+stdin `1` / verifier `0`; an artifact INVALID/VALID calls the verifier `1`.
+
+**4w closure:** persistence encoder/decoder share the same invariant helpers; decoder additionally
+requires exact canonical input bytes (`eligibility_persistence_payload_not_canonical` when
+representation differs). Parser failures stay `eligibility_persistence_payload_not_json` (or mapped
+parser reason) — never misclassified as verifier failure.

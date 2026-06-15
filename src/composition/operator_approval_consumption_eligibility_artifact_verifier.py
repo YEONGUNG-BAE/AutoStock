@@ -16,6 +16,7 @@ change the verdict or the snapshot. This is not a point-in-time concurrent-atomi
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -32,9 +33,24 @@ __all__ = [
     "OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome",
     "VerifiedOperatorApprovalConsumptionEligibilityArtifact",
     "VerifiedOperatorApprovalConsumptionEligibilityArtifactResult",
+    "is_lower_hex64",
+    "operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload",
+    "validate_operator_approval_consumption_eligibility_artifact_verification_invariants",
+    "validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants",
     "verify_and_snapshot_operator_approval_consumption_eligibility_artifact",
     "verify_operator_approval_consumption_eligibility_artifact_payload",
 ]
+
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
+
+_VERIFICATION_METADATA_FIELD_NAMES = (
+    "schema_version",
+    "approval_intent_schema_version",
+    "approval_intent_sha256",
+    "candidate_evidence_schema_version",
+    "candidate_evidence_sha256",
+    "eligibility_artifact_sha256",
+)
 
 _VR_NOT_OBJECT = "eligibility_artifact_not_object"
 _VR_UNKNOWN_FIELD = "eligibility_artifact_unknown_field"
@@ -92,6 +108,89 @@ class VerifiedOperatorApprovalConsumptionEligibilityArtifactResult:
     outcome: OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome
     reason_codes: tuple[str, ...]
     snapshot: VerifiedOperatorApprovalConsumptionEligibilityArtifact | None
+
+
+def is_exact_int(value: object) -> bool:
+    """Exact built-in ``int`` 여부 — ``bool``/``Decimal``/subclass는 거부한다."""
+
+    return type(value) is int
+
+
+def is_lower_hex64(value: object) -> bool:
+    """Exact lowercase hex64 digest 여부."""
+
+    return type(value) is str and _HEX64_RE.fullmatch(value) is not None
+
+
+def validate_operator_approval_consumption_eligibility_artifact_verification_invariants(
+    result: object,
+) -> bool:
+    """Verifier 반환값이 exact type과 VALID/INVALID outcome invariant를 만족하는지 검사한다.
+
+    Custom object의 property getter는 호출하지 않는다 — exact-type guard가 먼저 실행된다."""
+
+    if type(result) is not OperatorApprovalConsumptionEligibilityArtifactVerification:
+        return False
+
+    outcome = result.outcome
+    reason_codes = result.reason_codes
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID:
+        if type(reason_codes) is not tuple or reason_codes != ():
+            return False
+        return (
+            is_exact_int(result.schema_version)
+            and is_exact_int(result.approval_intent_schema_version)
+            and is_exact_int(result.candidate_evidence_schema_version)
+            and is_lower_hex64(result.approval_intent_sha256)
+            and is_lower_hex64(result.candidate_evidence_sha256)
+            and is_lower_hex64(result.eligibility_artifact_sha256)
+        )
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID:
+        if type(reason_codes) is not tuple or len(reason_codes) != 1:
+            return False
+        return type(reason_codes[0]) is str
+
+    return False
+
+
+def operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload(
+    result: OperatorApprovalConsumptionEligibilityArtifactVerification,
+    payload: dict[str, object],
+) -> bool:
+    """VALID verification metadata가 capture된 payload metadata와 exact 일치하는지 검사한다."""
+
+    for field_name in _VERIFICATION_METADATA_FIELD_NAMES:
+        if getattr(result, field_name) != payload[field_name]:
+            return False
+    return True
+
+
+def validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants(
+    result: object,
+) -> bool:
+    """``verify_and_snapshot_...`` 반환값이 exact type과 VALID/INVALID invariant를 만족하는지 검사한다."""
+
+    if type(result) is not VerifiedOperatorApprovalConsumptionEligibilityArtifactResult:
+        return False
+
+    outcome = result.outcome
+    reason_codes = result.reason_codes
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID:
+        if type(reason_codes) is not tuple or reason_codes != ():
+            return False
+        return type(result.snapshot) is VerifiedOperatorApprovalConsumptionEligibilityArtifact
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID:
+        if type(reason_codes) is not tuple or len(reason_codes) != 1:
+            return False
+        if type(reason_codes[0]) is not str:
+            return False
+        return result.snapshot is None
+
+    return False
 
 
 def verify_operator_approval_consumption_eligibility_artifact_payload(
