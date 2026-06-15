@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -97,6 +98,7 @@ from composition.operator_approval_intent_verifier import (
     verify_operator_approval_intent_payload,
 )
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
+    OperatorApprovalConsumptionEligibilityArtifactVerification,
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
     verify_operator_approval_consumption_eligibility_artifact_payload,
 )
@@ -112,6 +114,7 @@ DEFAULT_CONFIG_PATH = "config/config.toml.example"
 _KST = ZoneInfo("Asia/Seoul")
 _RUN_REFUSED_REASON = "live_run_not_implemented"
 _VERIFY_RECEIPT_STDIN_LIMIT = 1 << 20  # 1 MiB — untrusted stdin bound
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
 # receipt stdin parser reason → approval-intent verify CLI reason (외부 노출 분리).
 _RECEIPT_TO_APPROVAL_INTENT_INPUT_REASON: dict[str, str] = {
@@ -943,21 +946,66 @@ def _verify_eligibility_artifact_cli_envelope(
     }
 
 
-def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any]:
-    valid = (
-        result.outcome
-        is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID
-    )
-    return _verify_eligibility_artifact_cli_envelope(
-        outcome="VALID" if valid else "INVALID",
-        reason_codes=list(result.reason_codes),
-        schema_version=result.schema_version,
-        approval_intent_schema_version=result.approval_intent_schema_version,
-        approval_intent_sha256=result.approval_intent_sha256,
-        candidate_evidence_schema_version=result.candidate_evidence_schema_version,
-        candidate_evidence_sha256=result.candidate_evidence_sha256,
-        eligibility_artifact_sha256=result.eligibility_artifact_sha256,
-    )
+def _is_exact_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _is_lower_hex64(value: object) -> bool:
+    return type(value) is str and _HEX64_RE.fullmatch(value) is not None
+
+
+def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any] | None:
+    """Validate the verifier result against its exact type and outcome invariants *before*
+    reading any metadata, then emit a sanitized CLI envelope. Returns ``None`` when the result
+    is not the exact verification dataclass or violates its VALID/INVALID invariants, so the
+    caller fails closed to a sanitized INVALID — no raw object/value/attribute/property leak.
+
+    The exact-type guard runs first; only an exact frozen verification instance has its
+    attributes read afterward, so a custom object's property getters are never invoked."""
+
+    if type(result) is not OperatorApprovalConsumptionEligibilityArtifactVerification:
+        return None
+
+    outcome = result.outcome
+    reason_codes = result.reason_codes
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID:
+        if type(reason_codes) is not tuple or reason_codes != ():
+            return None
+        if not (
+            _is_exact_int(result.schema_version)
+            and _is_exact_int(result.approval_intent_schema_version)
+            and _is_exact_int(result.candidate_evidence_schema_version)
+        ):
+            return None
+        if not (
+            _is_lower_hex64(result.approval_intent_sha256)
+            and _is_lower_hex64(result.candidate_evidence_sha256)
+            and _is_lower_hex64(result.eligibility_artifact_sha256)
+        ):
+            return None
+        return _verify_eligibility_artifact_cli_envelope(
+            outcome="VALID",
+            reason_codes=[],
+            schema_version=result.schema_version,
+            approval_intent_schema_version=result.approval_intent_schema_version,
+            approval_intent_sha256=result.approval_intent_sha256,
+            candidate_evidence_schema_version=result.candidate_evidence_schema_version,
+            candidate_evidence_sha256=result.candidate_evidence_sha256,
+            eligibility_artifact_sha256=result.eligibility_artifact_sha256,
+        )
+
+    if outcome is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID:
+        if type(reason_codes) is not tuple or len(reason_codes) != 1:
+            return None
+        if type(reason_codes[0]) is not str:
+            return None
+        return _verify_eligibility_artifact_cli_envelope(
+            outcome="INVALID",
+            reason_codes=[reason_codes[0]],
+        )
+
+    return None
 
 
 def _verify_eligibility_artifact_input_fail(reason_code: str, *, out: TextIO) -> int:
@@ -1173,15 +1221,22 @@ def main(argv: list[str] | None = None) -> int:
         payload, input_error = _read_eligibility_artifact_verify_stdin_payload()
         if input_error is not None:
             return _verify_eligibility_artifact_input_fail(input_error, out=out)
+        # Verifier call AND result validation/summary share one defensive boundary: a malformed
+        # verifier result (wrong type/outcome/invariant) or any ordinary exception fails closed to
+        # a sanitized INVALID — never an escaped exception or leaked raw object/metadata.
         try:
             result = verify_operator_approval_consumption_eligibility_artifact_payload(payload)
+            summary = _verify_eligibility_artifact_summary(result)
         except (MemoryError, KeyboardInterrupt, SystemExit):
             raise
         except Exception:
             return _verify_eligibility_artifact_verifier_fail(
                 "eligibility_artifact_invalid_field", out=out
             )
-        summary = _verify_eligibility_artifact_summary(result)
+        if summary is None:
+            return _verify_eligibility_artifact_verifier_fail(
+                "eligibility_artifact_invalid_field", out=out
+            )
         print(json.dumps(summary, ensure_ascii=False), file=out)
         return 0 if summary["outcome"] == "VALID" else 1
 

@@ -204,9 +204,19 @@ no config/env/clock/DB/filesystem write). Same consistency-not-authenticity sema
 NO-GO posture. See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`.
 
+## RTM-7c.4w persistence-payload lane
+
+The canonical **byte format** of this artifact (when serialized for persistence) and its strict
+decode/verify round-trip are fixed by
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md`
+(RTM-7c.4w). The payload **is** this 13-field object (no wrapper, no separate persistence hash);
+encoding is `canonical_json_dumps` → UTF-8 with no trailing newline / BOM. That lane is API-only —
+no file I/O — and decode `VALID` is consistency only, not persistence/authenticity/provenance.
+
 ## Still OPEN (unchanged posture)
 
 Approval consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity
-authentication, artifact persistence/file output, intent/evidence lookup, TTL/freshness
+authentication, **actual** artifact persistence/file output (the 4w payload format is API-only;
+the atomic writer/reader CLI is a follow-on lane), intent/evidence lookup, TTL/freshness
 re-evaluation, activation caller/token, `--run`, KIS/network, broker/order, operational DB write,
 daemon/scheduler, unattended pilot, default runtime activation beyond constant NO-GO observation.

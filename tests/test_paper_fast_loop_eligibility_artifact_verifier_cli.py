@@ -477,3 +477,191 @@ def test_invalid_digest_original_not_echoed(capsys: pytest.CaptureFixture[str]) 
     assert code == 1
     assert payload["outcome"] == "INVALID"
     assert "ZZZ_not_hex" not in json.dumps(payload)
+
+
+# --- carry-over H1: malformed verifier result fails closed ---
+
+from composition.operator_approval_consumption_eligibility_artifact_verifier import (  # noqa: E402
+    OperatorApprovalConsumptionEligibilityArtifactVerification as _Verif,
+    OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome as _Outcome,
+)
+
+_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+
+def _verif(**kw: Any) -> _Verif:
+    base: dict[str, Any] = {
+        "outcome": _Outcome.INVALID,
+        "schema_version": None,
+        "approval_intent_schema_version": None,
+        "approval_intent_sha256": None,
+        "candidate_evidence_schema_version": None,
+        "candidate_evidence_sha256": None,
+        "eligibility_artifact_sha256": None,
+        "reason_codes": ("eligibility_artifact_invalid_field",),
+    }
+    base.update(kw)
+    return _Verif(**base)
+
+
+def _valid_verif(**kw: Any) -> _Verif:
+    valid: dict[str, Any] = {
+        "outcome": _Outcome.VALID,
+        "schema_version": 1,
+        "approval_intent_schema_version": 1,
+        "approval_intent_sha256": _HEX,
+        "candidate_evidence_schema_version": 1,
+        "candidate_evidence_sha256": _HEX,
+        "eligibility_artifact_sha256": _HEX,
+        "reason_codes": (),
+    }
+    valid.update(kw)
+    return _verif(**valid)
+
+
+class _BadOutcome:
+    pass
+
+
+class _PropBoom:
+    @property
+    def outcome(self) -> Any:
+        raise RuntimeError("SECRET_LEAK_/home/user/APP_SECRET")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="object"),
+        pytest.param({"outcome": "VALID"}, id="dict"),
+        pytest.param(_BadOutcome(), id="wrong_outcome_object"),
+        pytest.param(_PropBoom(), id="property_raises"),
+        pytest.param(_valid_verif(reason_codes=("x",)), id="valid_nonempty_reasons"),
+        pytest.param(_verif(reason_codes=()), id="invalid_empty_reasons"),
+        pytest.param(_verif(reason_codes=("a", "b")), id="invalid_two_reasons"),
+        pytest.param(_valid_verif(schema_version=None), id="valid_null_schema"),
+        pytest.param(_valid_verif(eligibility_artifact_sha256=None), id="valid_null_digest"),
+        pytest.param(_valid_verif(eligibility_artifact_sha256="ZZ"), id="valid_bad_digest"),
+        pytest.param(_valid_verif(schema_version=True), id="valid_bool_schema"),
+    ],
+)
+def test_malformed_verifier_result_fails_closed(
+    result: object, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload",
+        lambda _p: result,
+    )
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_invalid_field"]
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_null_metadata(payload)
+    _assert_constant_posture(payload)
+    blob = json.dumps(payload)
+    assert "SECRET_LEAK" not in blob and "APP_SECRET" not in blob and "/home/" not in blob
+
+
+def test_subclass_verifier_result_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _Sub(_Verif):
+        pass
+
+    sub = _Sub(**{f.name: getattr(_valid_verif(), f.name) for f in dataclasses.fields(_Verif)})
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload",
+        lambda _p: sub,
+    )
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_invalid_field"]
+    _assert_null_metadata(payload)
+
+
+def test_wellformed_valid_verifier_result_passes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload",
+        lambda _p: _valid_verif(),
+    )
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+    assert payload["eligibility_artifact_sha256"] == _HEX
+
+
+# --- carry-over H2: early-failure call counts ---
+
+
+def _stdin_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    reads: list[str] = []
+
+    def _read(_size: int) -> bytes:
+        reads.append("stdin")
+        return b"{}"
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    return reads
+
+
+def _verifier_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real = cli.verify_operator_approval_consumption_eligibility_artifact_payload
+
+    def _spy(payload: object) -> object:
+        calls.append("verify")
+        return real(payload)
+
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload", _spy
+    )
+    return calls
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param([_FLAG, "--verify-operator-approval-intent", "--json"], id="mode_conflict"),
+        pytest.param([_FLAG], id="missing_json"),
+        pytest.param([_FLAG, "--json", "--config", "x"], id="forbidden_argument"),
+    ],
+)
+def test_early_failure_no_stdin_no_verifier(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads = _stdin_spy(monkeypatch)
+    calls = _verifier_spy(monkeypatch)
+    code = cli.main(argv)
+    capsys.readouterr()
+    assert code == 1
+    assert reads == []
+    assert calls == []
+
+
+def test_stdin_boundary_failure_no_verifier(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _verifier_spy(monkeypatch)
+    # Empty stdin → input-boundary FAIL after exactly one read, verifier never called.
+    code, payload = _run_cli([_FLAG, "--json"], b"", capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert calls == []
+
+
+def test_artifact_invalid_calls_verifier_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _verifier_spy(monkeypatch)
+    code, payload = _run_cli([_FLAG, "--json"], _payload_with(market="US"), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert calls == ["verify"]
