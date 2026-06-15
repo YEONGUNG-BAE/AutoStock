@@ -403,6 +403,16 @@ activation authorization. CLI verify mode carry-over H1: `MemoryError`/`Keyboard
 `SystemExit` not swallowed. No new CLI mode. See
 `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
+### RTM-7c.4s — Operator approval consumption eligibility preflight (API-only)
+
+`assess_operator_approval_consumption_eligibility(*, intent_payload, evidence, now)` — pure
+preflight over one verified intent snapshot + one validated `ActivationCandidateEvidence`. Judges
+digest/identity binding and time ordering only; **does not consume approval**. No consumed
+marker, replay protection, persistence, authentication, TTL/freshness re-evaluation, or activation
+authorization. Constant NO-GO posture on every path. Carry-over H1: intent semantic validation
+single owner (`validate_operator_approval_intent_scalars_detailed`). See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md`.
+
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,
   `decision`, `analysis`, `config`, `composition`. Any first-party package

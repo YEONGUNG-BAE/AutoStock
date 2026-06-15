@@ -80,6 +80,11 @@ caller payload
 → _verify_detached_operator_approval_intent (schema + semantic + hash, exactly once)
 ```
 
+**RTM-7c.4s carry-over H1:** `_verify_detached_operator_approval_intent` delegates all semantic
+field checks to `validate_operator_approval_intent_scalars_detailed` exactly once (no duplicate
+declared-at / evidence-binding / identity / declaration / posture helpers). Hash recomputation
+remains a separate single pass after scalar validation succeeds.
+
 | API | Returns |
 |-----|---------|
 | `verify_operator_approval_intent_payload` | verification verdict only |
@@ -95,11 +100,12 @@ Per normal call:
 
 ```text
 payload snapshot       = 1
-schema validation      = 1
-semantic validation    = 1
+schema/semantic validation = 1  (validate_operator_approval_intent_scalars_detailed)
 hash recomputation     = 1
 public verifier recall = 0   (snapshot API path)
 ```
+
+(Pre-4s duplicate per-field semantic helpers removed — single detailed owner.)
 
 ## Caller mutation isolation
 

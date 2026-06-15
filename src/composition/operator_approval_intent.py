@@ -34,7 +34,7 @@ from composition.activation_candidate_evidence import (
     FreshnessQualifiedEvidenceResult,
     validate_activation_candidate_evidence_scalars,
 )
-from composition.precheck_receipt_schema import is_hex64, market_valid, symbol_valid
+from composition.precheck_receipt_schema import checked_at_valid, is_hex64, market_valid, symbol_valid
 
 
 def _is_exact_hex64(value: object) -> bool:
@@ -54,11 +54,13 @@ __all__ = [
     "OperatorApprovalIntent",
     "OperatorApprovalIntentOutcome",
     "OperatorApprovalIntentResult",
+    "OperatorApprovalIntentScalarValidation",
     "ValidatedOperatorApprovalIntentScalars",
     "build_operator_approval_intent",
     "operator_approval_intent_hash_payload",
     "validate_operator_approval_intent_object",
     "validate_operator_approval_intent_scalars",
+    "validate_operator_approval_intent_scalars_detailed",
 ]
 
 _OPERATOR_APPROVAL_INTENT_FIELD_NAMES = frozenset(
@@ -121,6 +123,14 @@ class OperatorApprovalIntentResult:
     outcome: OperatorApprovalIntentOutcome
     reasons: tuple[str, ...]
     intent: OperatorApprovalIntent | None
+
+
+@dataclass(frozen=True)
+class OperatorApprovalIntentScalarValidation:
+    """단일 semantic validation owner 결과 — field별 stable reason + validated snapshot."""
+
+    validated: ValidatedOperatorApprovalIntentScalars | None
+    reason_code: str | None
 
 
 @dataclass(frozen=True)
@@ -355,6 +365,81 @@ def operator_approval_intent_hash_payload(
     }
 
 
+def validate_operator_approval_intent_scalars_detailed(
+    *,
+    schema_version: object,
+    declared_at: object,
+    evidence_schema_version: object,
+    evidence_sha256: object,
+    market: object,
+    symbol: object,
+    approval_scope: object,
+    operator_approval_declared: object,
+    writers_stopped_manually_confirmed: object,
+    live_orders_forbidden_confirmed: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    approval_intent_sha256: object,
+) -> OperatorApprovalIntentScalarValidation:
+    """Field별 stable reason 분류 + full semantic validation + validated scalar snapshot.
+
+    Verifier core는 이 helper를 정확히 1회 호출한다 — 별도 semantic helper 중복 호출 금지."""
+
+    if type(schema_version) is not int or isinstance(schema_version, bool):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_field")
+    if schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_unsupported_schema")
+
+    if not checked_at_valid(declared_at):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_declared_at")
+
+    if type(evidence_schema_version) is not int or isinstance(evidence_schema_version, bool):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_evidence_binding")
+    if evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_evidence_binding")
+    if not _is_exact_hex64(evidence_sha256):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_evidence_binding")
+
+    if type(approval_scope) is not str or approval_scope != APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE:
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_scope")
+    if not market_valid(market):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_field")
+    if not symbol_valid(symbol):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_field")
+
+    if not _declarations_semantically_valid(
+        operator_approval_declared,
+        writers_stopped_manually_confirmed,
+        live_orders_forbidden_confirmed,
+    ):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_declaration")
+
+    if not _activation_posture_semantically_valid(activation_authorized, runtime_activation_outcome):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_activation_posture")
+
+    if not _is_exact_hex64(approval_intent_sha256):
+        return OperatorApprovalIntentScalarValidation(None, "approval_intent_invalid_field")
+
+    return OperatorApprovalIntentScalarValidation(
+        ValidatedOperatorApprovalIntentScalars(
+            schema_version=schema_version,
+            declared_at=declared_at,
+            evidence_schema_version=evidence_schema_version,
+            evidence_sha256=evidence_sha256,
+            market=market,
+            symbol=symbol,
+            approval_scope=approval_scope,
+            operator_approval_declared=True,
+            writers_stopped_manually_confirmed=True,
+            live_orders_forbidden_confirmed=True,
+            activation_authorized=False,
+            runtime_activation_outcome="no_go",
+            approval_intent_sha256=approval_intent_sha256,
+        ),
+        None,
+    )
+
+
 def validate_operator_approval_intent_scalars(
     *,
     schema_version: object,
@@ -373,50 +458,7 @@ def validate_operator_approval_intent_scalars(
 ) -> ValidatedOperatorApprovalIntentScalars | None:
     """Shared scalar+semantic contract — builder output과 verifier 입력 모두 동일 규칙."""
 
-    if type(schema_version) is not int or isinstance(schema_version, bool):
-        return None
-    if schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
-        return None
-
-    if not _approval_intent_declared_at_valid(declared_at):
-        return None
-
-    if type(evidence_schema_version) is not int or isinstance(evidence_schema_version, bool):
-        return None
-    if evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
-        return None
-
-    if not _is_exact_hex64(evidence_sha256):
-        return None
-
-    if not market_valid(market):
-        return None
-    if not symbol_valid(symbol):
-        return None
-
-    if type(approval_scope) is not str:
-        return None
-    if approval_scope != APPROVAL_SCOPE_ATTENDED_PAPER_FAST_LOOP_CANDIDATE:
-        return None
-
-    if not _exact_true_bool(operator_approval_declared):
-        return None
-    if not _exact_true_bool(writers_stopped_manually_confirmed):
-        return None
-    if not _exact_true_bool(live_orders_forbidden_confirmed):
-        return None
-    if not _exact_false_bool(activation_authorized):
-        return None
-
-    if type(runtime_activation_outcome) is not str:
-        return None
-    if runtime_activation_outcome != "no_go":
-        return None
-
-    if not _is_exact_hex64(approval_intent_sha256):
-        return None
-
-    return ValidatedOperatorApprovalIntentScalars(
+    return validate_operator_approval_intent_scalars_detailed(
         schema_version=schema_version,
         declared_at=declared_at,
         evidence_schema_version=evidence_schema_version,
@@ -424,12 +466,35 @@ def validate_operator_approval_intent_scalars(
         market=market,
         symbol=symbol,
         approval_scope=approval_scope,
-        operator_approval_declared=True,
-        writers_stopped_manually_confirmed=True,
-        live_orders_forbidden_confirmed=True,
-        activation_authorized=False,
-        runtime_activation_outcome="no_go",
+        operator_approval_declared=operator_approval_declared,
+        writers_stopped_manually_confirmed=writers_stopped_manually_confirmed,
+        live_orders_forbidden_confirmed=live_orders_forbidden_confirmed,
+        activation_authorized=activation_authorized,
+        runtime_activation_outcome=runtime_activation_outcome,
         approval_intent_sha256=approval_intent_sha256,
+    ).validated
+
+
+def _declarations_semantically_valid(
+    operator_approval_declared: object,
+    writers_stopped_manually_confirmed: object,
+    live_orders_forbidden_confirmed: object,
+) -> bool:
+    return (
+        _exact_true_bool(operator_approval_declared)
+        and _exact_true_bool(writers_stopped_manually_confirmed)
+        and _exact_true_bool(live_orders_forbidden_confirmed)
+    )
+
+
+def _activation_posture_semantically_valid(
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+) -> bool:
+    return (
+        _exact_false_bool(activation_authorized)
+        and type(runtime_activation_outcome) is str
+        and runtime_activation_outcome == "no_go"
     )
 
 

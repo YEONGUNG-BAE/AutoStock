@@ -207,7 +207,7 @@ def test_snapshot_api_single_pass_invariants(monkeypatch: pytest.MonkeyPatch) ->
     public_verify_calls: list[str] = []
 
     real_snap = verifier_mod._snapshot_operator_approval_intent_payload
-    real_scalars = verifier_mod.validate_operator_approval_intent_scalars
+    real_scalars = verifier_mod.validate_operator_approval_intent_scalars_detailed
     real_hash_payload = verifier_mod.operator_approval_intent_hash_payload
     real_public = verifier_mod.verify_operator_approval_intent_payload
 
@@ -228,7 +228,9 @@ def test_snapshot_api_single_pass_invariants(monkeypatch: pytest.MonkeyPatch) ->
         return real_public(payload)
 
     monkeypatch.setattr(verifier_mod, "_snapshot_operator_approval_intent_payload", _spy_snap)
-    monkeypatch.setattr(verifier_mod, "validate_operator_approval_intent_scalars", _spy_scalars)
+    monkeypatch.setattr(
+        verifier_mod, "validate_operator_approval_intent_scalars_detailed", _spy_scalars
+    )
     monkeypatch.setattr(verifier_mod, "operator_approval_intent_hash_payload", _spy_hash)
     monkeypatch.setattr(verifier_mod, "verify_operator_approval_intent_payload", _spy_public)
 

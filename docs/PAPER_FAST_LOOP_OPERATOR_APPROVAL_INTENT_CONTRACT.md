@@ -275,6 +275,17 @@ VALID (raw payload not retained; caller mutation after snapshot has no effect). 
 `_verify_detached_operator_approval_intent` with the standalone verifier — one snapshot, one
 schema/semantic/hash pass per call. Not authentication, consumption, persistence, or activation.
 
+**RTM-7c.4s carry-over H1 — single semantic validation owner:** shared
+`validate_operator_approval_intent_scalars_detailed` owns field-level stable reason classification,
+full semantic validation, and validated scalar snapshot. Verifier core calls it exactly once —
+no duplicate declared-at / evidence-binding / identity / declaration / posture checks before
+scalar validation. `validate_operator_approval_intent_scalars` delegates to the detailed owner.
+
+**RTM-7c.4s consumption eligibility preflight (API-only):**
+`assess_operator_approval_consumption_eligibility` judges whether a verified intent + validated
+evidence **could** combine as consumption candidates — not actual consumption. See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md`.
+
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
 evidence digest fields only.
 

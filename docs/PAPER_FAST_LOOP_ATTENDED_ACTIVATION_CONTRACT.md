@@ -163,6 +163,11 @@ snapshot before schema/semantic/hash (caller mutation after snapshot cannot chan
 13 validated scalars without retaining raw payload; shared single-pass detached core with the
 standalone verifier; not authentication/consumption/persistence/activation. CLI carry-over H1:
 `MemoryError`/`KeyboardInterrupt`/`SystemExit` are not swallowed in verify mode.
+**RTM-7c.4s** adds consumption eligibility preflight
+(`assess_operator_approval_consumption_eligibility`) — judges whether verified intent + validated
+evidence could combine as consumption candidates; **not actual consumption** (no consumed marker,
+replay protection, persistence, authentication, TTL/freshness re-evaluation, or activation
+authorization). Intent semantic validation single owner (`validate_operator_approval_intent_scalars_detailed`).
 Approval consumption and activation caller remain **OPEN**.
 
 ## Orphan sidecar observation limit

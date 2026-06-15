@@ -107,7 +107,9 @@ into a detached built-in dict with exact built-in string keys only:
 Both `verify_operator_approval_intent_payload` and
 `verify_and_snapshot_operator_approval_intent` call `_verify_detached_operator_approval_intent`
 after a single `_snapshot_operator_approval_intent_payload`. The snapshot API does **not** call
-the public verifier or re-read caller payload. See
+the public verifier or re-read caller payload. **RTM-7c.4s carry-over H1:** semantic validation
+is owned by `validate_operator_approval_intent_scalars_detailed` (exactly one call per detached
+verify — no duplicate per-field semantic helpers). See
 `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
 ## Canonical hash verification
