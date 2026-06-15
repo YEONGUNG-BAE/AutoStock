@@ -100,6 +100,15 @@ into a detached built-in dict with exact built-in string keys only:
 - Malformed custom key objects fail closed — no raw exception escape; key `__hash__`/`__eq__`
   hooks are not invoked for non-exact keys (type guard precedes membership checks)
 - `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised; broad `BaseException` catch forbidden
+- CLI verify mode (RTM-7c.4r H1): same three exceptions re-raised — not swallowed by `except Exception`
+
+## Shared detached verification core (RTM-7c.4r)
+
+Both `verify_operator_approval_intent_payload` and
+`verify_and_snapshot_operator_approval_intent` call `_verify_detached_operator_approval_intent`
+after a single `_snapshot_operator_approval_intent_payload`. The snapshot API does **not** call
+the public verifier or re-read caller payload. See
+`PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
 ## Canonical hash verification
 
@@ -127,7 +136,8 @@ class OperatorApprovalIntentVerification:
 verify_operator_approval_intent_payload(payload: object) -> OperatorApprovalIntentVerification
 ```
 
-Public API never raises except `MemoryError`, `KeyboardInterrupt`, `SystemExit`.
+Public API never raises except `MemoryError`, `KeyboardInterrupt`, `SystemExit`. Other unexpected
+`Exception` → stable `INVALID` / `approval_intent_invalid_field`.
 
 ## Stable verifier reason codes
 
@@ -273,6 +283,7 @@ completed.
 ## Related contracts
 
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — builder + shared scalar/hash helpers
+- `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — immutable verified snapshot (RTM-7c.4r)
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` — build CLI (RTM-7c.4p)
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — CLI wiring root
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory

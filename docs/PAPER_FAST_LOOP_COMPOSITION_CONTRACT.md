@@ -276,7 +276,7 @@ Ten mutually-exclusive modes (default `--validate-only`):
 | `--final-preflight-activation-candidate` | 0 if mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`); composes 4g revalidation + policy-neutral receipt time observation (exact `receipt_age_microseconds`; future `checked_at` fail-closed) + fresh current-time precheck (`now=datetime.now(tz=KST)`); catches byte-identical time-window expiry; the untrusted receipt is verified and frozen into one immutable snapshot **once** and both the revalidation and receipt-time stages read that same snapshot (RTM-7c.4j — receipt verifier called exactly once per preflight, no cross-stage mixed observation); path-free summary (no `config` field); `freshness_policy_evaluated=false` always — explicit max-age evaluation is **not** composed into this CLI mode; mechanical PASS is **not** activation authorization (RTM-7c.4h + 7c.4i + 7c.4j — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FINAL_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_RECEIPT_TIME_ASSESSMENT_CONTRACT.md`, `PAPER_FAST_LOOP_VERIFIED_RECEIPT_SNAPSHOT_CONTRACT.md`) |
 | `--freshness-preflight-activation-candidate` | 0 if freshness-qualified mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`) + **required** `--max-age-microseconds` (strict entire-token ASCII decimal parser via `re.fullmatch` — rejects trailing newline / all whitespace / non-`str` / over-long-token `ValueError`; no default/config/env threshold); composes verified final preflight + explicit freshness policy (`now=datetime.now(tz=KST)`); path-free summary; on a freshness-qualified PASS emits optional `candidate_evidence_sha256` / `candidate_evidence_schema_version` (canonical digest, RTM-7c.4n; `null` on `NO_GO`/`STALE`/input failure; qualified preflight run once, same `now`); mechanical FRESH PASS is **not** activation authorization (RTM-7c.4m/4n — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`) |
 | `--build-operator-approval-intent` | 0 if combined PASS + intent CREATED, else 1 (`NO_GO`/`FAIL`) | stdin receipt + **explicit** `--config` (no default fallback) + **explicit** `--json` (stdout JSON only) + **required** `--max-age-microseconds` + three explicit manual confirmation flags; composes freshness-qualified evidence then `build_operator_approval_intent` once; stable envelope `mode=build-operator-approval-intent` with `reasons` list only; input/config failure → `FAIL`, mechanical rejection → `NO_GO` (RTM-7c.4p — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md`) |
-| `--verify-operator-approval-intent` | 0 if `VALID`, else 1 | stdin-only approval-intent schema + hash verification; **explicit** `--json`; no config/env/DB/fs write/clock read; detached payload snapshot + exact built-in hex64 digests (RTM-7c.4q — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md`) |
+| `--verify-operator-approval-intent` | 0 if `VALID`, else 1 | stdin-only approval-intent schema + hash verification; **explicit** `--json`; no config/env/DB/fs write/clock read; detached payload snapshot + exact built-in hex64 digests; `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raised (RTM-7c.4q + 7c.4r H1 — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect |
 
@@ -389,6 +389,19 @@ persistence. Intent is **not** identity, signature, writer-stop machine proof, a
 consumption, replay prevention, or activation authorization. The existing CLI
 `--freshness-preflight-activation-candidate` is unchanged (evidence fields only). See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
+
+### RTM-7c.4r — immutable verified Operator approval-intent snapshot (API-only)
+
+API: `verify_and_snapshot_operator_approval_intent(payload)` →
+`VerifiedOperatorApprovalIntentResult` with frozen 13-field `VerifiedOperatorApprovalIntent` on
+VALID. Shares `_verify_detached_operator_approval_intent` with
+`verify_operator_approval_intent_payload` — one detached payload snapshot, one
+schema/semantic/hash pass per call; snapshot API does not re-call the public verifier or
+re-read caller payload. Raw intent dict not retained; caller mutation after snapshot cannot
+change verdict or snapshot values. Not authentication, signature, consumption, persistence, or
+activation authorization. CLI verify mode carry-over H1: `MemoryError`/`KeyboardInterrupt`/
+`SystemExit` not swallowed. No new CLI mode. See
+`PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md`.
 
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,

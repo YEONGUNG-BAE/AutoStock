@@ -988,6 +988,8 @@ def main(argv: list[str] | None = None) -> int:
             return _verify_approval_intent_input_fail(input_error, out=out)
         try:
             result = verify_operator_approval_intent_payload(payload)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
         except Exception:
             return _verify_approval_intent_input_fail(
                 "approval_intent_invalid_field", out=out

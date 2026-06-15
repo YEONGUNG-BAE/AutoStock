@@ -158,6 +158,11 @@ FAIL vs NO_GO taxonomy; stdout intent only (no persistence/consumption/identity/
 schema/semantic/hash consistency only (not authentication/consumption/freshness/activation).
 **RTM-7c.4q closure:** exact built-in hex64 digests (str subclass rejected); detached payload
 snapshot before schema/semantic/hash (caller mutation after snapshot cannot change verdict).
+**RTM-7c.4r** adds immutable verified snapshot API
+(`verify_and_snapshot_operator_approval_intent` + `VerifiedOperatorApprovalIntent`) — freezes
+13 validated scalars without retaining raw payload; shared single-pass detached core with the
+standalone verifier; not authentication/consumption/persistence/activation. CLI carry-over H1:
+`MemoryError`/`KeyboardInterrupt`/`SystemExit` are not swallowed in verify mode.
 Approval consumption and activation caller remain **OPEN**.
 
 ## Orphan sidecar observation limit
@@ -270,4 +275,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4o — approval-intent digest; not consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` (RTM-7c.4p — CLI stdout intent generation; not persistence/consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` (RTM-7c.4q — stdin-only intent verification; VALID ≠ authentication/activation)
+- `docs/PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4r — immutable verified snapshot API; not authentication/consumption/persistence)
 - `docs/TECH_DEBT.md` (OPEN items)

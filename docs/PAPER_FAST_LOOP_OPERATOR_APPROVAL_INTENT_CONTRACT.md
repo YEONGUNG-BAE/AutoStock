@@ -269,6 +269,12 @@ subclass rejected). Verifier snapshots caller dict once via `tuple(items())` int
 built-in dict; exact built-in string keys only; caller mutation after snapshot cannot change
 verdict; malformed custom keys fail closed without exception escape.
 
+**RTM-7c.4r verified snapshot API:** `verify_and_snapshot_operator_approval_intent` returns
+`VerifiedOperatorApprovalIntentResult` with frozen 13-field `VerifiedOperatorApprovalIntent` on
+VALID (raw payload not retained; caller mutation after snapshot has no effect). Shares
+`_verify_detached_operator_approval_intent` with the standalone verifier — one snapshot, one
+schema/semantic/hash pass per call. Not authentication, consumption, persistence, or activation.
+
 The existing CLI mode `--freshness-preflight-activation-candidate` is unchanged — it still emits
 evidence digest fields only.
 
@@ -276,6 +282,7 @@ evidence digest fields only.
 
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` — CLI stdout intent generation (RTM-7c.4p)
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` — standalone intent verification (RTM-7c.4q)
+- `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — immutable verified snapshot (RTM-7c.4r)
 - `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md` — evidence schema v2 / hash binding
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition wiring root
