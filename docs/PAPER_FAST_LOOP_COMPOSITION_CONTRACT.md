@@ -427,3 +427,17 @@ layer. The repo already allowlists `execution` for
 real `PaperExecutionCoordinator`. Therefore `execution` is **allowed at the
 composition boundary by design, not oversight**. The network/credential roots
 above remain hard-forbidden regardless.
+
+### Downstream pure approval APIs (no runtime activation)
+
+The `composition` package also hosts pure, IO-free approval-pipeline APIs that never
+touch network/credentials/DB/clock and never activate runtime:
+
+- RTM-7c.4s `operator_approval_consumption_eligibility` — eligibility preflight
+  (`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md`).
+- RTM-7c.4t `operator_approval_consumption_eligibility_artifact` — freezes an `ELIGIBLE`
+  result into a canonical immutable observation artifact with a stable digest
+  (`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`).
+  The artifact is **not** consumption: no consumed marker, replay prevention, persistence,
+  authentication/signature, TTL/freshness re-evaluation, or activation authorization;
+  malformed `NO_GO` maps to `INVALID`. Runtime activation stays NO-GO.

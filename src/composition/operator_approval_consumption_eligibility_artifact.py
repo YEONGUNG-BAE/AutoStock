@@ -16,10 +16,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from composition.activation_candidate_evidence import (
+    ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+)
 from composition.operator_approval_consumption_eligibility import (
     OperatorApprovalConsumptionEligibility,
     OperatorApprovalConsumptionEligibilityOutcome,
     OperatorApprovalConsumptionEligibilityResult,
+)
+from composition.operator_approval_intent import (
+    OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
 )
 from decision.canonical_json import payload_sha256
 
@@ -34,8 +40,6 @@ __all__ = [
 
 OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION = 1
 
-_APPROVAL_INTENT_SCHEMA_VERSION = 1
-_CANDIDATE_EVIDENCE_SCHEMA_VERSION = 2
 _ARTIFACT_MARKET = "KR"
 _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME = "no_go"
 
@@ -106,7 +110,9 @@ def _build(
     eligibility = eligibility_result.eligibility
 
     if outcome is OperatorApprovalConsumptionEligibilityOutcome.NO_GO:
-        return _not_eligible()
+        if type(reasons) is tuple and len(reasons) >= 1 and eligibility is None:
+            return _not_eligible()
+        return _invalid()
     if outcome is not OperatorApprovalConsumptionEligibilityOutcome.ELIGIBLE:
         return _invalid()
 
@@ -163,9 +169,9 @@ def _build(
     artifact = OperatorApprovalConsumptionEligibilityArtifact(
         schema_version=OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
         checked_at=checked_at,
-        approval_intent_schema_version=_APPROVAL_INTENT_SCHEMA_VERSION,
+        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
         approval_intent_sha256=approval_intent_sha256,
-        candidate_evidence_schema_version=_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        candidate_evidence_schema_version=ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
         candidate_evidence_sha256=evidence_sha256,
         market=market,
         symbol=symbol,
@@ -197,9 +203,9 @@ def operator_approval_consumption_eligibility_artifact_hash_payload(
     return {
         "schema_version": OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
         "checked_at": checked_at,
-        "approval_intent_schema_version": _APPROVAL_INTENT_SCHEMA_VERSION,
+        "approval_intent_schema_version": OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
         "approval_intent_sha256": approval_intent_sha256,
-        "candidate_evidence_schema_version": _CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        "candidate_evidence_schema_version": ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
         "candidate_evidence_sha256": candidate_evidence_sha256,
         "market": market,
         "symbol": symbol,

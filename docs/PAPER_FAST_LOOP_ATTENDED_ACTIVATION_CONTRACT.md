@@ -281,4 +281,6 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` (RTM-7c.4p — CLI stdout intent generation; not persistence/consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md` (RTM-7c.4q — stdin-only intent verification; VALID ≠ authentication/activation)
 - `docs/PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4r — immutable verified snapshot API; not authentication/consumption/persistence)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` (RTM-7c.4s — consumption eligibility preflight; not consumption/activation)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` (RTM-7c.4t — canonical eligibility observation artifact; not consumption/persistence/activation)
 - `docs/TECH_DEBT.md` (OPEN items)

@@ -163,3 +163,5 @@ unattended pilot, writer-stop machine proof, default runtime activation beyond c
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md` — build CLI
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` — RTM-7c.4s eligibility preflight (consumes the verified snapshot)
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` — RTM-7c.4t canonical eligibility artifact (observation, not consumption)

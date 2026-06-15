@@ -142,6 +142,15 @@ receipt verifier/precheck/freshness pipeline, raw object re-read.
 Zero: clock read, config/env, filesystem read/write, SQLite, network, broker/order,
 thread/process, persistence, consumption marker.
 
+## Downstream artifact (RTM-7c.4t)
+
+A separate pure builder freezes an `ELIGIBLE` result into a canonical immutable artifact —
+see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`. The
+artifact is a canonical observation, **not** consumption: no consumed marker, replay prevention,
+persistence, authentication/signature, TTL/freshness re-evaluation, or activation authorization.
+Malformed `NO_GO` results map to `INVALID` (not `NOT_ELIGIBLE`). Runtime activation stays NO-GO.
+4s carry-over H1–H3 test precision is closed under 4t.
+
 ## Carry-over H1 — intent semantic validation single owner
 
 `validate_operator_approval_intent_scalars_detailed` owns field-level stable reason classification,

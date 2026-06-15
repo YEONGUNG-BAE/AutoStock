@@ -659,3 +659,169 @@ def test_regression_verified_snapshot_still_valid() -> None:
     snap = verify_and_snapshot_operator_approval_intent(payload)
     assert snap.outcome is OperatorApprovalIntentVerificationOutcome.VALID
     assert snap.snapshot is not None
+
+
+# --- carry-over H1: exact built-in datetime + stateful custom tzinfo ---
+
+
+class _StatefulNowTz(tzinfo):
+    """Custom tzinfo that raises after a configurable number of utcoffset reads."""
+
+    def __init__(self, *, fail_at: int) -> None:
+        self.calls = 0
+        self._fail_at = fail_at
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls >= self._fail_at:
+            raise RuntimeError("POISON_STATEFUL_NOW_TZ")
+        return timedelta(hours=9)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+
+def test_exact_datetime_stateful_tz_first_read_fails_invalid() -> None:
+    payload, ev, _ = _eligible_inputs()
+    tz = _StatefulNowTz(fail_at=1)
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=tz)
+    assert type(now) is datetime  # exact built-in, not a subclass
+    result = _assess(payload, ev, now)
+    assert result.outcome is OperatorApprovalConsumptionEligibilityOutcome.INVALID
+    assert result.reasons == ("approval_consumption_invalid_now",)
+    assert result.eligibility is None
+
+
+def test_exact_datetime_stateful_tz_detached_after_first_read() -> None:
+    payload, ev, _ = _eligible_inputs()
+    tz = _StatefulNowTz(fail_at=2)
+    now = datetime(2026, 6, 14, 12, 0, 0, tzinfo=tz)
+    assert type(now) is datetime
+    result = _assess(payload, ev, now)
+    # First isoformat() observation succeeds; detached parsed datetime is used afterward,
+    # so the caller tzinfo is never read a second time even though it would now raise.
+    assert result.outcome is OperatorApprovalConsumptionEligibilityOutcome.ELIGIBLE
+    assert tz.calls == 1
+
+
+# --- carry-over H2: _binding_matches single-field root-cause matrix ---
+
+
+def _validated_binding_pair() -> tuple[Any, Any]:
+    import composition.activation_candidate_evidence as evidence_mod
+
+    payload, ev, _ = _eligible_inputs()
+    snap = verify_and_snapshot_operator_approval_intent(payload)
+    assert snap.snapshot is not None
+    validated = evidence_mod.validate_activation_candidate_evidence_scalars(**asdict(ev))
+    assert validated is not None
+    return snap.snapshot, validated
+
+
+def test_binding_matches_valid_pair_true() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    assert elig_mod._binding_matches(intent, evidence) is True
+
+
+def test_binding_intent_evidence_schema_version_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(intent, evidence_schema_version=1)
+    assert elig_mod._binding_matches(tampered, evidence) is False
+
+
+def test_binding_evidence_schema_version_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(evidence, schema_version=1)
+    assert elig_mod._binding_matches(intent, tampered) is False
+
+
+def test_binding_evidence_digest_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(evidence, evidence_sha256="d" * 64)
+    assert elig_mod._binding_matches(intent, tampered) is False
+
+
+def test_binding_intent_market_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(intent, market="US")
+    assert elig_mod._binding_matches(tampered, evidence) is False
+
+
+def test_binding_evidence_market_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(evidence, market="US")
+    assert elig_mod._binding_matches(intent, tampered) is False
+
+
+def test_binding_intent_symbol_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(intent, symbol="000660")
+    assert elig_mod._binding_matches(tampered, evidence) is False
+
+
+def test_binding_evidence_symbol_mismatch() -> None:
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    intent, evidence = _validated_binding_pair()
+    tampered = replace(evidence, symbol="000660")
+    assert elig_mod._binding_matches(intent, tampered) is False
+
+
+# --- carry-over H3: evidence canonical hash call count on ELIGIBLE path ---
+
+
+def test_evidence_hash_call_count_single(monkeypatch: pytest.MonkeyPatch) -> None:
+    import composition.activation_candidate_evidence as evidence_mod
+    import composition.operator_approval_consumption_eligibility as elig_mod
+
+    payload, ev, now = _eligible_inputs()
+
+    evidence_validate_calls: list[str] = []
+    evidence_hash_payload_calls: list[str] = []
+    evidence_sha_calls: list[str] = []
+
+    real_validate = elig_mod.validate_activation_candidate_evidence_scalars
+    real_hash_payload = evidence_mod.activation_candidate_evidence_hash_payload
+    real_sha = evidence_mod.payload_sha256
+
+    def _spy_validate(**kwargs: object) -> object:
+        evidence_validate_calls.append("validate")
+        return real_validate(**kwargs)  # type: ignore[arg-type]
+
+    def _spy_hash_payload(**kwargs: object) -> object:
+        evidence_hash_payload_calls.append("hash_payload")
+        return real_hash_payload(**kwargs)  # type: ignore[arg-type]
+
+    def _spy_sha(value: object) -> str:
+        evidence_sha_calls.append("sha")
+        return real_sha(value)
+
+    monkeypatch.setattr(
+        elig_mod, "validate_activation_candidate_evidence_scalars", _spy_validate
+    )
+    monkeypatch.setattr(
+        evidence_mod, "activation_candidate_evidence_hash_payload", _spy_hash_payload
+    )
+    monkeypatch.setattr(evidence_mod, "payload_sha256", _spy_sha)
+
+    result = _assess(payload, ev, now)
+    assert result.outcome is OperatorApprovalConsumptionEligibilityOutcome.ELIGIBLE
+    assert evidence_validate_calls == ["validate"]
+    assert evidence_hash_payload_calls == ["hash_payload"]
+    # payload_sha256 in the evidence module is used exactly once for the evidence digest
+    # (the intent digest uses the verifier module's own payload_sha256 binding).
+    assert evidence_sha_calls == ["sha"]
