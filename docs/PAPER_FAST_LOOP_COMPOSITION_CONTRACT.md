@@ -421,11 +421,17 @@ verification of an untrusted **serialized** eligibility artifact (4t output roun
 JSON). Strict `type(payload) is dict` root, exact 13-field set, exact scalar types, semantic
 constants, aware-timestamp ordering, and canonical `eligibility_artifact_sha256` recomputed over
 the actual 12 serialized content fields; VALID converts to a frozen 13-field
-`VerifiedOperatorApprovalConsumptionEligibilityArtifact`. Shares the 4t semantic owner
-(`validate_operator_approval_consumption_eligibility_artifact_scalars_detailed`) and canonical hash
-owner (`operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars`). One detached
+`VerifiedOperatorApprovalConsumptionEligibilityArtifact`. The builder and verifier share a single
+content semantic owner
+(`validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed`, wrapped by
+the full `validate_operator_approval_consumption_eligibility_artifact_scalars_detailed`) and the
+canonical hash owner (`operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars`);
+neither re-implements content-field semantics inline. One detached
 payload snapshot + one scalar/semantic + one hash pass per call; snapshot API does not re-call the
-public verifier or re-read caller payload. Not actual consumption, consumed marker, replay
+public verifier or re-read caller payload. The verifier is a **consistency checker, not an
+authenticator**: a semantically valid content change with a correctly recomputed digest is VALID by
+design, while malformed input or a stale stored digest is INVALID — VALID never implies
+authenticity/provenance. Not actual consumption, consumed marker, replay
 protection, signing/HMAC, authentication, persistence, TTL/freshness re-evaluation, or activation
 authorization. Constant NO-GO. No new CLI mode. `MemoryError`/`KeyboardInterrupt`/`SystemExit`
 re-raised. See `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`.

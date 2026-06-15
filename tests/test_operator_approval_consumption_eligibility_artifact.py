@@ -575,3 +575,48 @@ def test_fatal_exceptions_reraise(monkeypatch: pytest.MonkeyPatch, exc: type[Bas
     )
     with pytest.raises(exc):
         _build(_eligible_result())
+
+
+# --- shared content owner: single-call discipline ---
+
+
+def test_build_calls_content_validator_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real = artifact_mod.validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed
+
+    def _spy(**kwargs: object) -> object:
+        calls.append("content")
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        artifact_mod,
+        "validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed",
+        _spy,
+    )
+    out = _build(_eligible_result())
+    assert out.outcome is OperatorApprovalConsumptionEligibilityArtifactOutcome.CREATED
+    assert calls == ["content"]
+
+
+def test_build_single_hash_and_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    hash_calls: list[str] = []
+    sha_calls: list[str] = []
+    real_hash = artifact_mod.operator_approval_consumption_eligibility_artifact_hash_payload
+    real_sha = artifact_mod.payload_sha256
+
+    def _hash_spy(**kwargs: object) -> object:
+        hash_calls.append("hash")
+        return real_hash(**kwargs)  # type: ignore[arg-type]
+
+    def _sha_spy(value: object) -> str:
+        sha_calls.append("sha")
+        return real_sha(value)
+
+    monkeypatch.setattr(
+        artifact_mod, "operator_approval_consumption_eligibility_artifact_hash_payload", _hash_spy
+    )
+    monkeypatch.setattr(artifact_mod, "payload_sha256", _sha_spy)
+    out = _build(_eligible_result())
+    assert out.outcome is OperatorApprovalConsumptionEligibilityArtifactOutcome.CREATED
+    assert hash_calls == ["hash"]
+    assert sha_calls == ["sha"]

@@ -165,7 +165,10 @@ An `ELIGIBLE` result is frozen into a canonical immutable artifact (4t,
 artifact is independently verified and converted to an immutable verified snapshot (4u,
 `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`). Both
 remain observations only — schema·semantic·hash consistency, never actual consumption,
-persistence, authentication, or activation authorization. Constant NO-GO.
+persistence, authentication, or activation authorization. The 4u verifier is a **consistency
+checker, not an authenticator**: a semantically valid content change with a correctly recomputed
+digest is VALID by design; only malformed/semantic-invalid input or a stale stored digest is
+INVALID. Builder and 4u verifier share a single content semantic owner. Constant NO-GO.
 
 ## Still OPEN (unchanged posture)
 

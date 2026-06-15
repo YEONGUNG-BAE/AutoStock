@@ -32,6 +32,7 @@ from composition.operator_approval_consumption_eligibility_artifact_verifier imp
 from decision.canonical_json import payload_sha256
 
 import composition.operator_approval_consumption_eligibility_artifact_verifier as ver_mod
+import composition.operator_approval_consumption_eligibility_artifact as art_mod
 import test_operator_approval_consumption_eligibility as elig_helper
 
 _FIELDS = {
@@ -291,12 +292,32 @@ def test_digest_str_subclass(field: str, reason: str) -> None:
     assert ver.reason_codes == (reason,)
 
 
-def test_stale_intent_hash_recomputed_still_mismatch() -> None:
-    # Change a binding digest and recompute the artifact digest over the change:
-    # still INVALID because the changed digest is not a valid hex64 / binding.
+def test_semantically_valid_digest_change_with_recomputed_artifact_hash_is_valid() -> None:
+    # The verifier is a consistency checker, not an authenticator. A semantically valid
+    # binding digest paired with a correctly recomputed artifact digest is VALID by design
+    # (Case C — consistency, not authenticity/provenance).
     ver = verify(_rehashed(approval_intent_sha256="a" * 64))
-    # a*64 is valid lower hex64, so binding passes; digest recomputed → VALID artifact.
     assert ver.outcome is VOut.VALID
+    assert ver.reason_codes == ()
+
+
+def test_semantically_valid_symbol_change_with_recomputed_hash_is_valid() -> None:
+    ver = verify(_rehashed(symbol="000660"))
+    assert ver.outcome is VOut.VALID
+    assert ver.reason_codes == ()
+
+
+def test_semantically_valid_checked_at_change_with_recomputed_hash_is_valid() -> None:
+    ver = verify(_rehashed(checked_at="2099-01-01T00:00:00+00:00"))
+    assert ver.outcome is VOut.VALID
+    assert ver.reason_codes == ()
+
+
+def test_semantically_valid_change_with_stale_hash_is_hash_mismatch() -> None:
+    # Case B — a semantically valid content change whose stored digest was NOT recomputed
+    # is INVALID/hash_mismatch (the consistency check fails).
+    ver = verify(_payload_with(symbol="000660"))
+    assert ver.reason_codes == ("eligibility_artifact_hash_mismatch",)
 
 
 def test_stale_hash_mismatch() -> None:
@@ -573,3 +594,73 @@ def test_snapshot_scalars_only() -> None:
     for value in dataclasses.asdict(res.snapshot).values():
         assert type(value) in (int, str, bool)
     assert isinstance(res.snapshot, VerifiedOperatorApprovalConsumptionEligibilityArtifact)
+
+
+# --- shared content owner: verifier path single-call discipline ---
+
+
+def test_verify_uses_shared_content_owner_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    full_calls: list[str] = []
+    content_calls: list[str] = []
+    real_full = art_mod.validate_operator_approval_consumption_eligibility_artifact_scalars_detailed
+    real_content = (
+        art_mod.validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed
+    )
+
+    def _full_spy(**kwargs: object) -> object:
+        full_calls.append("full")
+        return real_full(**kwargs)  # type: ignore[arg-type]
+
+    def _content_spy(**kwargs: object) -> object:
+        content_calls.append("content")
+        return real_content(**kwargs)  # type: ignore[arg-type]
+
+    payload = _valid_payload()  # build before patching so only verify is counted
+    monkeypatch.setattr(
+        ver_mod,
+        "validate_operator_approval_consumption_eligibility_artifact_scalars_detailed",
+        _full_spy,
+    )
+    monkeypatch.setattr(
+        art_mod,
+        "validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed",
+        _content_spy,
+    )
+    ver = verify(payload)
+    assert ver.outcome is VOut.VALID
+    assert full_calls == ["full"]
+    assert content_calls == ["content"]
+
+
+# --- builder -> verifier parity matrix ---
+
+
+@pytest.mark.parametrize(
+    "payload_factory,expected",
+    [
+        pytest.param(lambda: _valid_payload(), VOut.VALID, id="builder_created"),
+        pytest.param(lambda: _rehashed(approval_intent_sha256="a" * 64), VOut.VALID, id="alt_digest"),
+        pytest.param(lambda: _rehashed(symbol="000660"), VOut.VALID, id="alt_symbol"),
+        pytest.param(
+            lambda: _rehashed(checked_at="2099-01-01T00:00:00+00:00"), VOut.VALID, id="alt_checked_at"
+        ),
+        pytest.param(lambda: _payload_with(schema_version=2), VOut.INVALID, id="unsupported_schema"),
+        pytest.param(lambda: _payload_with(market="US"), VOut.INVALID, id="invalid_market"),
+        pytest.param(lambda: _payload_with(symbol="000660"), VOut.INVALID, id="stale_hash"),
+        pytest.param(
+            lambda: _payload_with(eligibility_artifact_sha256="a" * 64), VOut.INVALID, id="bad_digest"
+        ),
+    ],
+)
+def test_builder_verifier_parity_matrix(payload_factory, expected) -> None:
+    payload = payload_factory()
+    a = verify(payload)
+    b = verify_snapshot(payload)
+    assert a.outcome is expected
+    assert b.outcome is expected
+    assert a.reason_codes == b.reason_codes
+    if expected is VOut.VALID:
+        assert a.reason_codes == ()
+        assert b.snapshot is not None
+    else:
+        assert b.snapshot is None

@@ -179,8 +179,11 @@ immutable verified snapshot
 `verify_and_snapshot_operator_approval_consumption_eligibility_artifact` +
 `VerifiedOperatorApprovalConsumptionEligibilityArtifact`) — strict 13-field schema, semantic
 constants, aware-timestamp ordering, and canonical digest recomputed over the actual 12 serialized
-content fields. VALID/snapshot means schema·semantic·hash consistency only — **not** actual
-consumption, consumed marker, replay prevention, persistence, authentication/signature,
+content fields. The verifier is a **consistency checker, not an authenticator**: a semantically
+valid content change with a correctly recomputed digest is VALID by design, while malformed input
+or a stale stored digest is INVALID. Builder and verifier share a single content semantic owner.
+VALID/snapshot means schema·semantic·hash consistency only — **not** authenticity/provenance,
+actual consumption, consumed marker, replay prevention, persistence, authentication/signature,
 TTL/freshness re-evaluation, or activation authorization. API-only (no new CLI). Constant NO-GO.
 
 ## Orphan sidecar observation limit

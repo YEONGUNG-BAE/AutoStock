@@ -34,12 +34,15 @@ __all__ = [
     "OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION",
     "OperatorApprovalConsumptionEligibilityArtifact",
     "OperatorApprovalConsumptionEligibilityArtifactOutcome",
+    "OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation",
     "OperatorApprovalConsumptionEligibilityArtifactResult",
     "OperatorApprovalConsumptionEligibilityArtifactScalarValidation",
     "ValidatedOperatorApprovalConsumptionEligibilityArtifact",
+    "ValidatedOperatorApprovalConsumptionEligibilityArtifactContent",
     "build_operator_approval_consumption_eligibility_artifact",
     "operator_approval_consumption_eligibility_artifact_hash_payload",
     "operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars",
+    "validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed",
     "validate_operator_approval_consumption_eligibility_artifact_scalars_detailed",
 ]
 
@@ -137,8 +140,34 @@ class ValidatedOperatorApprovalConsumptionEligibilityArtifact:
 
 
 @dataclass(frozen=True)
+class ValidatedOperatorApprovalConsumptionEligibilityArtifactContent:
+    """검증된 12개 content scalar snapshot — stored digest 제외, builder/verifier 공유 owner."""
+
+    schema_version: int
+    checked_at: str
+    approval_intent_schema_version: int
+    approval_intent_sha256: str
+    candidate_evidence_schema_version: int
+    candidate_evidence_sha256: str
+    market: str
+    symbol: str
+    evidence_evaluated_at: str
+    intent_declared_at: str
+    activation_authorized: bool
+    runtime_activation_outcome: str
+
+
+@dataclass(frozen=True)
+class OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation:
+    """Content semantic validation owner 결과 — stable reason + validated content snapshot."""
+
+    validated: ValidatedOperatorApprovalConsumptionEligibilityArtifactContent | None
+    reason_code: str | None
+
+
+@dataclass(frozen=True)
 class OperatorApprovalConsumptionEligibilityArtifactScalarValidation:
-    """단일 semantic validation owner 결과 — stable reason + validated scalar snapshot."""
+    """Full scalar validation 결과 — content owner + stored digest를 합친 validated snapshot."""
 
     validated: ValidatedOperatorApprovalConsumptionEligibilityArtifact | None
     reason_code: str | None
@@ -193,28 +222,21 @@ def _build(
     activation_authorized = eligibility.activation_authorized
     runtime_activation_outcome = eligibility.runtime_activation_outcome
 
-    if not _is_lower_hex64(approval_intent_sha256):
-        return _invalid()
-    if not _is_lower_hex64(evidence_sha256):
-        return _invalid()
-    if type(market) is not str or market != _ARTIFACT_MARKET:
-        return _invalid()
-    if type(symbol) is not str or _SYMBOL6.fullmatch(symbol) is None:
-        return _invalid()
-    if activation_authorized is not False:
-        return _invalid()
-    if (
-        type(runtime_activation_outcome) is not str
-        or runtime_activation_outcome != _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME
-    ):
-        return _invalid()
-
-    evidence_parsed = _parse_aware(evidence_evaluated_at)
-    intent_parsed = _parse_aware(intent_declared_at)
-    checked_parsed = _parse_aware(checked_at)
-    if evidence_parsed is None or intent_parsed is None or checked_parsed is None:
-        return _invalid()
-    if not (evidence_parsed <= intent_parsed <= checked_parsed):
+    content = validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed(
+        schema_version=OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
+        checked_at=checked_at,
+        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
+        approval_intent_sha256=approval_intent_sha256,
+        candidate_evidence_schema_version=ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        candidate_evidence_sha256=evidence_sha256,
+        market=market,
+        symbol=symbol,
+        evidence_evaluated_at=evidence_evaluated_at,
+        intent_declared_at=intent_declared_at,
+        activation_authorized=activation_authorized,
+        runtime_activation_outcome=runtime_activation_outcome,
+    )
+    if content.validated is None:
         return _invalid()
 
     hash_payload = operator_approval_consumption_eligibility_artifact_hash_payload(
@@ -318,6 +340,94 @@ def operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars
     }
 
 
+def validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed(
+    *,
+    schema_version: object,
+    checked_at: object,
+    approval_intent_schema_version: object,
+    approval_intent_sha256: object,
+    candidate_evidence_schema_version: object,
+    candidate_evidence_sha256: object,
+    market: object,
+    symbol: object,
+    evidence_evaluated_at: object,
+    intent_declared_at: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+) -> OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation:
+    """12개 content scalar의 stable-reason 분류 + semantic + aware-timestamp + ordering 검증.
+
+    Builder와 verifier가 공유하는 단일 content semantic owner다 (stored digest는 제외).
+    schema/intent·evidence binding/digest shape/KR·ASCII symbol/timestamp/posture/ordering을
+    이 helper 단독이 소유한다."""
+
+    if type(schema_version) is not int or isinstance(schema_version, bool):
+        return _content_invalid(_VR_INVALID_FIELD)
+    if schema_version != OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION:
+        return _content_invalid(_VR_UNSUPPORTED_SCHEMA)
+
+    if type(approval_intent_schema_version) is not int or isinstance(
+        approval_intent_schema_version, bool
+    ):
+        return _content_invalid(_VR_INVALID_BINDING)
+    if approval_intent_schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
+        return _content_invalid(_VR_INVALID_BINDING)
+    if not _is_lower_hex64(approval_intent_sha256):
+        return _content_invalid(_VR_INVALID_BINDING)
+    if type(candidate_evidence_schema_version) is not int or isinstance(
+        candidate_evidence_schema_version, bool
+    ):
+        return _content_invalid(_VR_INVALID_BINDING)
+    if candidate_evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
+        return _content_invalid(_VR_INVALID_BINDING)
+    if not _is_lower_hex64(candidate_evidence_sha256):
+        return _content_invalid(_VR_INVALID_BINDING)
+
+    if type(market) is not str or market != _ARTIFACT_MARKET:
+        return _content_invalid(_VR_INVALID_FIELD)
+    if type(symbol) is not str or _SYMBOL6.fullmatch(symbol) is None:
+        return _content_invalid(_VR_INVALID_FIELD)
+
+    checked_parsed = _parse_aware(checked_at)
+    if checked_parsed is None:
+        return _content_invalid(_VR_INVALID_TIMESTAMP)
+    evidence_parsed = _parse_aware(evidence_evaluated_at)
+    if evidence_parsed is None:
+        return _content_invalid(_VR_INVALID_TIMESTAMP)
+    intent_parsed = _parse_aware(intent_declared_at)
+    if intent_parsed is None:
+        return _content_invalid(_VR_INVALID_TIMESTAMP)
+
+    if activation_authorized is not False:
+        return _content_invalid(_VR_INVALID_ACTIVATION_POSTURE)
+    if (
+        type(runtime_activation_outcome) is not str
+        or runtime_activation_outcome != _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME
+    ):
+        return _content_invalid(_VR_INVALID_ACTIVATION_POSTURE)
+
+    if not (evidence_parsed <= intent_parsed <= checked_parsed):
+        return _content_invalid(_VR_INVALID_TIME_ORDERING)
+
+    return OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation(
+        validated=ValidatedOperatorApprovalConsumptionEligibilityArtifactContent(
+            schema_version=schema_version,
+            checked_at=checked_at,
+            approval_intent_schema_version=approval_intent_schema_version,
+            approval_intent_sha256=approval_intent_sha256,
+            candidate_evidence_schema_version=candidate_evidence_schema_version,
+            candidate_evidence_sha256=candidate_evidence_sha256,
+            market=market,
+            symbol=symbol,
+            evidence_evaluated_at=evidence_evaluated_at,
+            intent_declared_at=intent_declared_at,
+            activation_authorized=False,
+            runtime_activation_outcome=runtime_activation_outcome,
+        ),
+        reason_code=None,
+    )
+
+
 def validate_operator_approval_consumption_eligibility_artifact_scalars_detailed(
     *,
     schema_version: object,
@@ -334,78 +444,56 @@ def validate_operator_approval_consumption_eligibility_artifact_scalars_detailed
     runtime_activation_outcome: object,
     eligibility_artifact_sha256: object,
 ) -> OperatorApprovalConsumptionEligibilityArtifactScalarValidation:
-    """Field별 stable reason 분류 + full semantic + aware-timestamp + time-ordering 검증.
+    """Full 13-field validation: shared content owner 정확히 1회 + stored digest shape.
 
     Verifier core가 정확히 1회 호출한다. Hash 재계산만 호출자 책임으로 남긴다."""
 
-    if type(schema_version) is not int or isinstance(schema_version, bool):
-        return _scalar_invalid(_VR_INVALID_FIELD)
-    if schema_version != OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION:
-        return _scalar_invalid(_VR_UNSUPPORTED_SCHEMA)
-
-    if type(approval_intent_schema_version) is not int or isinstance(
-        approval_intent_schema_version, bool
-    ):
-        return _scalar_invalid(_VR_INVALID_BINDING)
-    if approval_intent_schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
-        return _scalar_invalid(_VR_INVALID_BINDING)
-    if not _is_lower_hex64(approval_intent_sha256):
-        return _scalar_invalid(_VR_INVALID_BINDING)
-    if type(candidate_evidence_schema_version) is not int or isinstance(
-        candidate_evidence_schema_version, bool
-    ):
-        return _scalar_invalid(_VR_INVALID_BINDING)
-    if candidate_evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
-        return _scalar_invalid(_VR_INVALID_BINDING)
-    if not _is_lower_hex64(candidate_evidence_sha256):
-        return _scalar_invalid(_VR_INVALID_BINDING)
-
-    if type(market) is not str or market != _ARTIFACT_MARKET:
-        return _scalar_invalid(_VR_INVALID_FIELD)
-    if type(symbol) is not str or _SYMBOL6.fullmatch(symbol) is None:
-        return _scalar_invalid(_VR_INVALID_FIELD)
-
-    checked_parsed = _parse_aware(checked_at)
-    if checked_parsed is None:
-        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
-    evidence_parsed = _parse_aware(evidence_evaluated_at)
-    if evidence_parsed is None:
-        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
-    intent_parsed = _parse_aware(intent_declared_at)
-    if intent_parsed is None:
-        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
-
-    if activation_authorized is not False:
-        return _scalar_invalid(_VR_INVALID_ACTIVATION_POSTURE)
-    if (
-        type(runtime_activation_outcome) is not str
-        or runtime_activation_outcome != _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME
-    ):
-        return _scalar_invalid(_VR_INVALID_ACTIVATION_POSTURE)
+    content = validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed(
+        schema_version=schema_version,
+        checked_at=checked_at,
+        approval_intent_schema_version=approval_intent_schema_version,
+        approval_intent_sha256=approval_intent_sha256,
+        candidate_evidence_schema_version=candidate_evidence_schema_version,
+        candidate_evidence_sha256=candidate_evidence_sha256,
+        market=market,
+        symbol=symbol,
+        evidence_evaluated_at=evidence_evaluated_at,
+        intent_declared_at=intent_declared_at,
+        activation_authorized=activation_authorized,
+        runtime_activation_outcome=runtime_activation_outcome,
+    )
+    if content.validated is None:
+        return _scalar_invalid(content.reason_code or _VR_INVALID_FIELD)
 
     if not _is_lower_hex64(eligibility_artifact_sha256):
         return _scalar_invalid(_VR_INVALID_FIELD)
 
-    if not (evidence_parsed <= intent_parsed <= checked_parsed):
-        return _scalar_invalid(_VR_INVALID_TIME_ORDERING)
-
+    v = content.validated
     return OperatorApprovalConsumptionEligibilityArtifactScalarValidation(
         validated=ValidatedOperatorApprovalConsumptionEligibilityArtifact(
-            schema_version=schema_version,
-            checked_at=checked_at,
-            approval_intent_schema_version=approval_intent_schema_version,
-            approval_intent_sha256=approval_intent_sha256,
-            candidate_evidence_schema_version=candidate_evidence_schema_version,
-            candidate_evidence_sha256=candidate_evidence_sha256,
-            market=market,
-            symbol=symbol,
-            evidence_evaluated_at=evidence_evaluated_at,
-            intent_declared_at=intent_declared_at,
-            activation_authorized=False,
-            runtime_activation_outcome=runtime_activation_outcome,
+            schema_version=v.schema_version,
+            checked_at=v.checked_at,
+            approval_intent_schema_version=v.approval_intent_schema_version,
+            approval_intent_sha256=v.approval_intent_sha256,
+            candidate_evidence_schema_version=v.candidate_evidence_schema_version,
+            candidate_evidence_sha256=v.candidate_evidence_sha256,
+            market=v.market,
+            symbol=v.symbol,
+            evidence_evaluated_at=v.evidence_evaluated_at,
+            intent_declared_at=v.intent_declared_at,
+            activation_authorized=v.activation_authorized,
+            runtime_activation_outcome=v.runtime_activation_outcome,
             eligibility_artifact_sha256=eligibility_artifact_sha256,
         ),
         reason_code=None,
+    )
+
+
+def _content_invalid(
+    reason: str,
+) -> OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation:
+    return OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation(
+        validated=None, reason_code=reason
     )
 
 

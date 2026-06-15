@@ -14,7 +14,8 @@ Code:
 
 - `composition.operator_approval_consumption_eligibility_artifact_verifier.verify_operator_approval_consumption_eligibility_artifact_payload`
 - `composition.operator_approval_consumption_eligibility_artifact_verifier.verify_and_snapshot_operator_approval_consumption_eligibility_artifact`
-- shared semantic owner `validate_operator_approval_consumption_eligibility_artifact_scalars_detailed` (RTM-7c.4t module)
+- shared content semantic owner `validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed` (RTM-7c.4t module) — single owner of the 12 content-field schema / binding / digest-shape / market / symbol / timestamp / posture / ordering checks, shared by both the builder and the full validator
+- full semantic owner `validate_operator_approval_consumption_eligibility_artifact_scalars_detailed` (RTM-7c.4t module) — calls the content owner exactly once, then validates the stored `eligibility_artifact_sha256` digest shape
 - shared canonical hash owner `operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars` (RTM-7c.4t module)
 
 ## What VALID / a verified snapshot means
@@ -174,13 +175,26 @@ path uses the shared detached core directly — it never re-invokes the public v
 
 No raw exception text, traceback, or path escapes into the verdict.
 
-## 13-field serialized tamper coverage
+## Verification semantics: consistency, not authenticity
 
-Each of the 13 serialized fields is independently tampered (root type, dict subclass, unknown /
-missing / non-exact-string key, schema versions, three digests with malformed/uppercase/short/
-subclass/bytes/None/int/stale variants, market/symbol identity, three timestamps incl. naive /
-non-string / ordering, posture, and each content field recomputed) — every tamper stays `INVALID`.
-A semantically invalid field with an independently recomputed digest still verifies `INVALID`.
+The verifier is a **consistency checker**, not an authenticator. It confirms that a payload is
+well-formed, semantically valid, and that its stored digest matches a digest recomputed over the
+12 content fields. It does **not** prove provenance, authenticity, or that the artifact was
+produced by the trusted builder — there is no signature, HMAC, or origin check in this lane.
+
+A tampered field therefore falls into one of three categories:
+
+| Category | Example | Verdict |
+|----------|---------|---------|
+| (A) Malformed / semantic-invalid | bad root type, unknown/missing key, unsupported schema, non-`KR` market, non-6-digit symbol, naive/non-string/out-of-order timestamp, wrong posture, malformed digest hex | `INVALID` + single reason |
+| (B) Semantic-valid content change + **stale** stored digest | a different valid symbol/digest/`checked_at` whose `eligibility_artifact_sha256` was not recomputed | `INVALID` / `eligibility_artifact_hash_mismatch` |
+| (C) Semantic-valid content change + **recomputed** digest | a different valid symbol/digest/`checked_at` whose digest is correctly recomputed over the change | `VALID` (by design — consistency holds; authenticity is out of scope) |
+
+Tests cover each category independently across root type, dict subclass, unknown / missing /
+non-exact-string key, schema versions, three digests, market/symbol identity, three timestamps,
+posture, ordering, stale-digest, and recomputed-digest variants. Category (C) is **expected
+`VALID`**: a correctly recomputed payload is observationally consistent, and consistency is the
+only property this lane verifies.
 
 ## Still OPEN (unchanged posture)
 
