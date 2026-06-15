@@ -91,6 +91,11 @@ from composition.operator_approval_intent_verifier import (
     OperatorApprovalIntentVerificationOutcome,
     verify_operator_approval_intent_payload,
 )
+from composition.operator_approval_consumption_eligibility_artifact_verifier import (
+    OperatorApprovalConsumptionEligibilityArtifactVerification,
+    OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
+    verify_operator_approval_consumption_eligibility_artifact_payload,
+)
 from composition.receipt_freshness_policy import ReceiptFreshnessPolicy
 from composition.precheck_receipt_verifier import (
     ReceiptVerificationOutcome,
@@ -113,6 +118,17 @@ _RECEIPT_TO_APPROVAL_INTENT_INPUT_REASON: dict[str, str] = {
     "receipt_input_duplicate_key": "approval_intent_input_duplicate_key",
     "receipt_input_too_large": "approval_intent_input_too_large",
     "receipt_input_read_error": "approval_intent_input_read_error",
+}
+
+# receipt stdin parser reason → eligibility-artifact verify CLI reason (외부 노출 분리).
+_RECEIPT_TO_ELIGIBILITY_ARTIFACT_INPUT_REASON: dict[str, str] = {
+    "receipt_input_empty": "eligibility_artifact_input_empty",
+    "receipt_input_not_utf8": "eligibility_artifact_input_not_utf8",
+    "receipt_input_not_json": "eligibility_artifact_input_not_json",
+    "receipt_input_too_deep": "eligibility_artifact_input_too_deep",
+    "receipt_input_duplicate_key": "eligibility_artifact_input_duplicate_key",
+    "receipt_input_too_large": "eligibility_artifact_input_too_large",
+    "receipt_input_read_error": "eligibility_artifact_input_read_error",
 }
 
 
@@ -250,6 +266,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--verify-approval-consumption-eligibility-artifact",
+        action="store_true",
+        help=(
+            "stdin-only strict eligibility-artifact verification (schema + semantic + hash "
+            "consistency); no config, no env, no DB, no filesystem write, no network, no clock "
+            "read; VALID means schema/semantic/hash consistency only, NOT authenticity/"
+            "provenance, consumption, persistence, or activation authorization"
+        ),
+    )
+    parser.add_argument(
         "--replay",
         metavar="FIXTURE",
         default=None,
@@ -277,6 +303,10 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             ("freshness-preflight-activation-candidate", args.freshness_preflight_activation_candidate),
             ("build-operator-approval-intent", args.build_operator_approval_intent),
             ("verify-operator-approval-intent", args.verify_operator_approval_intent),
+            (
+                "verify-approval-consumption-eligibility-artifact",
+                args.verify_approval_consumption_eligibility_artifact,
+            ),
             ("replay", args.replay is not None),
             ("validate-only", args.validate_only),
         )
@@ -852,6 +882,71 @@ def _verify_approval_intent_applicability_fail(reason_code: str, *, out: TextIO)
     return _verify_approval_intent_input_fail(reason_code, out=out)
 
 
+_VERIFY_ELIGIBILITY_ARTIFACT_CLI_MODE = "verify-approval-consumption-eligibility-artifact"
+
+
+def _read_eligibility_artifact_verify_stdin_payload() -> tuple[object | None, str | None]:
+    """Eligibility-artifact verify mode stdin — receipt parser 재사용, reason은 전용 namespace로 매핑."""
+
+    payload, reason = _read_verify_stdin_payload()
+    if reason is None:
+        return payload, None
+    return None, _RECEIPT_TO_ELIGIBILITY_ARTIFACT_INPUT_REASON.get(
+        reason, "eligibility_artifact_input_not_json"
+    )
+
+
+def _verify_eligibility_artifact_posture_fields() -> dict[str, Any]:
+    """Constant read-only posture: VALID is consistency only, never authenticity/consumption."""
+
+    return {
+        "activation_authorized": False,
+        "runtime_activation_outcome": "no_go",
+        "artifact_authenticated": False,
+        "artifact_persisted": False,
+        "approval_consumed": False,
+        "replay_prevented": False,
+    }
+
+
+def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any]:
+    valid = (
+        result.outcome
+        is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID
+    )
+    return {
+        "outcome": "VALID" if valid else "INVALID",
+        "mode": _VERIFY_ELIGIBILITY_ARTIFACT_CLI_MODE,
+        "schema_version": result.schema_version,
+        "approval_intent_schema_version": result.approval_intent_schema_version,
+        "approval_intent_sha256": result.approval_intent_sha256,
+        "candidate_evidence_schema_version": result.candidate_evidence_schema_version,
+        "candidate_evidence_sha256": result.candidate_evidence_sha256,
+        "eligibility_artifact_sha256": result.eligibility_artifact_sha256,
+        "reason_codes": list(result.reason_codes),
+        **_verify_eligibility_artifact_posture_fields(),
+    }
+
+
+def _verify_eligibility_artifact_input_fail(reason_code: str, *, out: TextIO) -> int:
+    summary = _verify_eligibility_artifact_summary(
+        OperatorApprovalConsumptionEligibilityArtifactVerification(
+            outcome=(
+                OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID
+            ),
+            schema_version=None,
+            approval_intent_schema_version=None,
+            approval_intent_sha256=None,
+            candidate_evidence_schema_version=None,
+            candidate_evidence_sha256=None,
+            eligibility_artifact_sha256=None,
+            reason_codes=(reason_code,),
+        )
+    )
+    print(json.dumps(summary, ensure_ascii=False), file=out)
+    return 1
+
+
 def _approval_intent_mode_conflict_fail(
     *,
     build_requested: bool,
@@ -913,6 +1008,12 @@ def main(argv: list[str] | None = None) -> int:
     as_json = args.json
     out: TextIO = sys.stdout
 
+    # --run은 다른 어떤 mode/argument보다 먼저 거부한다(credential/network/DB/fs 접근 및
+    # mode-conflict 판정 이전): 어떤 조합이든 exit 2로 fail-closed.
+    if args.run:
+        _emit(_run_refused_summary(), as_json=as_json, out=out)
+        return 2
+
     try:
         mode = _resolve_mode(args)
     except CliInputError:
@@ -923,11 +1024,6 @@ def main(argv: list[str] | None = None) -> int:
                 out=out,
             )
         return _fail("modes are mutually exclusive.", as_json=as_json, out=out)
-
-    # --run은 어떤 부작용보다 먼저 거부한다(credential/network/DB/fs 접근 전).
-    if mode == "run":
-        _emit(_run_refused_summary(), as_json=as_json, out=out)
-        return 2
 
     # verify-operator-approval-intent: explicit --json + forbidden args — stdin/config/clock 이전.
     if mode == "verify-operator-approval-intent":
@@ -944,6 +1040,24 @@ def main(argv: list[str] | None = None) -> int:
         ):
             return _verify_approval_intent_applicability_fail(
                 "approval_intent_verification_argument_not_applicable", out=out
+            )
+
+    # verify-approval-consumption-eligibility-artifact: explicit --json + forbidden args —
+    # stdin/config/clock 이전 fail-closed.
+    if mode == "verify-approval-consumption-eligibility-artifact":
+        if not args.json:
+            return _verify_eligibility_artifact_input_fail(
+                "eligibility_artifact_verification_json_required", out=out
+            )
+        if (
+            args.config is not None
+            or args.max_age_microseconds is not None
+            or args.operator_approval_declared
+            or args.writers_stopped_manually_confirmed
+            or args.live_orders_forbidden_confirmed
+        ):
+            return _verify_eligibility_artifact_input_fail(
+                "eligibility_artifact_verification_argument_not_applicable", out=out
             )
 
     # approval-intent confirmation flags는 build mode에서만 허용한다.
@@ -995,6 +1109,24 @@ def main(argv: list[str] | None = None) -> int:
                 "approval_intent_invalid_field", out=out
             )
         summary = _verify_approval_intent_summary(result)
+        print(json.dumps(summary, ensure_ascii=False), file=out)
+        return 0 if summary["outcome"] == "VALID" else 1
+
+    # verify-approval-consumption-eligibility-artifact: stdin-only — config/env/DB/fs write/
+    # network/clock read 없음. API verifier 정확히 1회.
+    if mode == "verify-approval-consumption-eligibility-artifact":
+        payload, input_error = _read_eligibility_artifact_verify_stdin_payload()
+        if input_error is not None:
+            return _verify_eligibility_artifact_input_fail(input_error, out=out)
+        try:
+            result = verify_operator_approval_consumption_eligibility_artifact_payload(payload)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return _verify_eligibility_artifact_input_fail(
+                "eligibility_artifact_invalid_field", out=out
+            )
+        summary = _verify_eligibility_artifact_summary(result)
         print(json.dumps(summary, ensure_ascii=False), file=out)
         return 0 if summary["outcome"] == "VALID" else 1
 

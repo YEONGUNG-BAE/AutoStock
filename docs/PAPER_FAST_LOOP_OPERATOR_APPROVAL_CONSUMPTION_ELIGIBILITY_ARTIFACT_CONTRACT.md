@@ -187,6 +187,23 @@ whereas the same change with a stale stored digest is `INVALID`/`hash_mismatch`.
 means schema·semantic·hash consistency only, never authenticity/provenance or actual consumption.
 See `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`.
 
+## Validated-content emission (RTM-7c.4v carry-over)
+
+The builder's ELIGIBLE path now hashes and constructs the artifact from the **validated content
+snapshot** (`content.validated`) returned by the shared content owner, never the raw caller locals
+— so validation, hashing, and construction observe one identical source. Builder output (13 fields)
+and the `eligibility_artifact_sha256` digest stay byte-equivalent to the pre-change result; the
+content validator, canonical hash payload, and `payload_sha256` are each invoked exactly once, and
+caller-payload mutation isolation is unchanged.
+
+## Operator-facing verification CLI (RTM-7c.4v)
+
+The RTM-7c.4u verifier API is exposed read-only via
+`ops/run_paper_fast_loop.py --verify-approval-consumption-eligibility-artifact --json` (stdin-only,
+no config/env/clock/DB/filesystem write). Same consistency-not-authenticity semantics and constant
+NO-GO posture. See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`.
+
 ## Still OPEN (unchanged posture)
 
 Approval consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

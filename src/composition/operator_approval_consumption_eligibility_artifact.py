@@ -239,30 +239,33 @@ def _build(
     if content.validated is None:
         return _invalid()
 
+    # Hash and artifact are emitted from the validated content snapshot only — never the raw
+    # caller locals — so validation, hashing, and construction observe one identical source.
+    v = content.validated
     hash_payload = operator_approval_consumption_eligibility_artifact_hash_payload(
-        checked_at=checked_at,
-        approval_intent_sha256=approval_intent_sha256,
-        candidate_evidence_sha256=evidence_sha256,
-        market=market,
-        symbol=symbol,
-        evidence_evaluated_at=evidence_evaluated_at,
-        intent_declared_at=intent_declared_at,
+        checked_at=v.checked_at,
+        approval_intent_sha256=v.approval_intent_sha256,
+        candidate_evidence_sha256=v.candidate_evidence_sha256,
+        market=v.market,
+        symbol=v.symbol,
+        evidence_evaluated_at=v.evidence_evaluated_at,
+        intent_declared_at=v.intent_declared_at,
     )
     eligibility_artifact_sha256 = payload_sha256(hash_payload)
 
     artifact = OperatorApprovalConsumptionEligibilityArtifact(
-        schema_version=OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
-        checked_at=checked_at,
-        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
-        approval_intent_sha256=approval_intent_sha256,
-        candidate_evidence_schema_version=ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
-        candidate_evidence_sha256=evidence_sha256,
-        market=market,
-        symbol=symbol,
-        evidence_evaluated_at=evidence_evaluated_at,
-        intent_declared_at=intent_declared_at,
-        activation_authorized=False,
-        runtime_activation_outcome=_ARTIFACT_RUNTIME_ACTIVATION_OUTCOME,
+        schema_version=v.schema_version,
+        checked_at=v.checked_at,
+        approval_intent_schema_version=v.approval_intent_schema_version,
+        approval_intent_sha256=v.approval_intent_sha256,
+        candidate_evidence_schema_version=v.candidate_evidence_schema_version,
+        candidate_evidence_sha256=v.candidate_evidence_sha256,
+        market=v.market,
+        symbol=v.symbol,
+        evidence_evaluated_at=v.evidence_evaluated_at,
+        intent_declared_at=v.intent_declared_at,
+        activation_authorized=v.activation_authorized,
+        runtime_activation_outcome=v.runtime_activation_outcome,
         eligibility_artifact_sha256=eligibility_artifact_sha256,
     )
     return OperatorApprovalConsumptionEligibilityArtifactResult(

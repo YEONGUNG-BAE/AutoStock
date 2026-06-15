@@ -196,14 +196,23 @@ posture, ordering, stale-digest, and recomputed-digest variants. Category (C) is
 `VALID`**: a correctly recomputed payload is observationally consistent, and consistency is the
 only property this lane verifies.
 
+## Operator-facing CLI (RTM-7c.4v)
+
+This verifier API is exposed read-only via
+`ops/run_paper_fast_loop.py --verify-approval-consumption-eligibility-artifact --json` — stdin-only,
+bounded parser, no config/env/clock/DB/filesystem write, verifier called exactly once. The CLI
+carries the same consistency-not-authenticity semantics (Category C recomputed payload → VALID) and
+constant NO-GO posture. See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`.
+
 ## Still OPEN (unchanged posture)
 
 Artifact persistence / file output, actual approval consumption, consumed marker, replay / nonce /
 idempotency, signing / HMAC, Operator identity authentication, intent/evidence lookup, TTL /
 freshness re-evaluation, activation token/caller, `--run`, KIS/network, broker/order, operational
-DB write, schema migration/reconcile, daemon/scheduler, unattended pilot. No new CLI in this lane;
-a stdin/file CLI is deferred to the lane that introduces artifact persistence or external file
-input.
+DB write, schema migration/reconcile, daemon/scheduler, unattended pilot. A stdin/file CLI for
+external file input (vs. the 4v stdin-only mode) is deferred to the lane that introduces artifact
+persistence.
 
 ## Related contracts
 

@@ -158,7 +158,7 @@ full semantic validation, and validated scalar snapshot creation. Verifier core
 `_verify_detached_operator_approval_intent` calls it exactly once (no duplicate declared-at /
 evidence-binding / identity / declaration / posture helpers).
 
-## Downstream artifact + verification (RTM-7c.4t / 7c.4u)
+## Downstream artifact + verification (RTM-7c.4t / 7c.4u / 7c.4v)
 
 An `ELIGIBLE` result is frozen into a canonical immutable artifact (4t,
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`); a serialized
@@ -168,7 +168,11 @@ remain observations only — schema·semantic·hash consistency, never actual co
 persistence, authentication, or activation authorization. The 4u verifier is a **consistency
 checker, not an authenticator**: a semantically valid content change with a correctly recomputed
 digest is VALID by design; only malformed/semantic-invalid input or a stale stored digest is
-INVALID. Builder and 4u verifier share a single content semantic owner. Constant NO-GO.
+INVALID. Builder and 4u verifier share a single content semantic owner. The 4u verifier API is exposed
+read-only as a stdin-only operator CLI mode
+(`--verify-approval-consumption-eligibility-artifact --json`, 4v,
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`),
+carrying the same consistency-not-authenticity semantics. Constant NO-GO.
 
 ## Still OPEN (unchanged posture)
 

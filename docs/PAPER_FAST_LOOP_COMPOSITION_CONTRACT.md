@@ -277,8 +277,9 @@ Ten mutually-exclusive modes (default `--validate-only`):
 | `--freshness-preflight-activation-candidate` | 0 if freshness-qualified mechanical `PASS`, else 1 (`NO_GO`) | stdin receipt + config (`environ={}`) + **required** `--max-age-microseconds` (strict entire-token ASCII decimal parser via `re.fullmatch` — rejects trailing newline / all whitespace / non-`str` / over-long-token `ValueError`; no default/config/env threshold); composes verified final preflight + explicit freshness policy (`now=datetime.now(tz=KST)`); path-free summary; on a freshness-qualified PASS emits optional `candidate_evidence_sha256` / `candidate_evidence_schema_version` (canonical digest, RTM-7c.4n; `null` on `NO_GO`/`STALE`/input failure; qualified preflight run once, same `now`); mechanical FRESH PASS is **not** activation authorization (RTM-7c.4m/4n — see `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_FRESHNESS_PREFLIGHT_CONTRACT.md`, `PAPER_FAST_LOOP_ACTIVATION_CANDIDATE_EVIDENCE_CONTRACT.md`) |
 | `--build-operator-approval-intent` | 0 if combined PASS + intent CREATED, else 1 (`NO_GO`/`FAIL`) | stdin receipt + **explicit** `--config` (no default fallback) + **explicit** `--json` (stdout JSON only) + **required** `--max-age-microseconds` + three explicit manual confirmation flags; composes freshness-qualified evidence then `build_operator_approval_intent` once; stable envelope `mode=build-operator-approval-intent` with `reasons` list only; input/config failure → `FAIL`, mechanical rejection → `NO_GO` (RTM-7c.4p — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_CLI_CONTRACT.md`) |
 | `--verify-operator-approval-intent` | 0 if `VALID`, else 1 | stdin-only approval-intent schema + hash verification; **explicit** `--json`; no config/env/DB/fs write/clock read; detached payload snapshot + exact built-in hex64 digests; `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raised (RTM-7c.4q + 7c.4r H1 — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_INTENT_VERIFICATION_CONTRACT.md`) |
+| `--verify-approval-consumption-eligibility-artifact` | 0 if `VALID`, else 1 | stdin-only serialized eligibility-artifact schema·semantic·hash verification; **explicit** `--json`; forbidden `--config`/`--max-age-microseconds`/confirmation flags (→ `eligibility_artifact_verification_argument_not_applicable`); no config/env/DB/fs write/clock read/builder/eligibility/intent/evidence rerun; verifier called exactly once; consistency-not-authenticity (Category C recomputed → VALID); constant NO-GO; `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raised (RTM-7c.4v — see `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`) |
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
-| `--run` | **2** | **REFUSED** before any side effect |
+| `--run` | **2** | **REFUSED** before any side effect (early refusal precedes mode resolution, applicability, stdin read) |
 
 - Mode collisions → exit 1. When `--build-operator-approval-intent` or
   `--verify-operator-approval-intent` participates, emit approval-specific JSON envelope
@@ -433,8 +434,28 @@ authenticator**: a semantically valid content change with a correctly recomputed
 design, while malformed input or a stale stored digest is INVALID — VALID never implies
 authenticity/provenance. Not actual consumption, consumed marker, replay
 protection, signing/HMAC, authentication, persistence, TTL/freshness re-evaluation, or activation
-authorization. Constant NO-GO. No new CLI mode. `MemoryError`/`KeyboardInterrupt`/`SystemExit`
+authorization. Constant NO-GO. `MemoryError`/`KeyboardInterrupt`/`SystemExit`
 re-raised. See `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`.
+
+### RTM-7c.4v — operator-facing eligibility-artifact verification CLI (stdin-only, read-only)
+
+`ops/run_paper_fast_loop.py --verify-approval-consumption-eligibility-artifact --json` exposes the
+4u `verify_operator_approval_consumption_eligibility_artifact_payload` API (called **exactly once**)
+as a mutually-exclusive operator CLI mode. Stdin-only via the bounded strict JSON parser (1 MiB,
+`read(limit+1)`, exact JSON-object root); parser receipt-namespace reasons are mapped into the
+`eligibility_artifact_input_*` namespace. Required `--json`; forbidden `--config`,
+`--max-age-microseconds`, and the three confirmation flags (→
+`eligibility_artifact_verification_argument_not_applicable`); missing `--json` →
+`eligibility_artifact_verification_json_required`. `--run` is refused with exit 2 **before** mode
+resolution / applicability / stdin read. No `load_settings`/`os.environ`/`datetime.now`/`time.time`/
+SQLite/store/precheck/evidence-builder/eligibility/intent-verifier/broker/network/fs-write. Every
+path emits the constant posture (`activation_authorized=false`, `runtime_activation_outcome="no_go"`,
+`artifact_authenticated=false`, `artifact_persisted=false`, `approval_consumed=false`,
+`replay_prevented=false`). Consistency-not-authenticity (Category C recomputed payload → VALID); no
+raw stdin/path/secret/exception leak; only verified exact lowercase hex64 digests echoed. Carry-over:
+the 4t builder now hashes and constructs the artifact from `content.validated` (one observation
+source; byte-equivalent output/digest). `MemoryError`/`KeyboardInterrupt`/`SystemExit` re-raised.
+See `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`.
 
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,
@@ -469,3 +490,6 @@ touch network/credentials/DB/clock and never activate runtime:
   (`PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`).
   VALID/snapshot means schema·semantic·hash consistency only — **not** actual consumption,
   consumed marker, replay prevention, persistence, authentication, or activation authorization.
+- RTM-7c.4v `--verify-approval-consumption-eligibility-artifact` CLI mode — stdin-only read-only
+  exposure of the 4u verifier API, same consistency-not-authenticity semantics and constant NO-GO
+  posture (`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`).

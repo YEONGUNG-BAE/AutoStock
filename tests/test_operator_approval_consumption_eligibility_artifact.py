@@ -498,6 +498,68 @@ def test_single_read_mutation_isolation(monkeypatch: pytest.MonkeyPatch) -> None
     assert art.checked_at == original_checked
 
 
+def test_build_emits_from_validated_content_not_raw_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Carry-over H1: hash + artifact must be emitted from content.validated, not the raw
+    # eligibility locals. Force the content owner to return a validated snapshot whose values
+    # differ from the raw input and assert the artifact (and its digest) reflect the validated
+    # snapshot — proving a single emission source.
+    from composition.operator_approval_consumption_eligibility_artifact import (
+        OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation,
+        ValidatedOperatorApprovalConsumptionEligibilityArtifactContent,
+        operator_approval_consumption_eligibility_artifact_hash_payload,
+    )
+
+    result = _eligible_result()
+    elig = result.eligibility
+    assert elig is not None
+
+    validated = ValidatedOperatorApprovalConsumptionEligibilityArtifactContent(
+        schema_version=1,
+        checked_at=elig.checked_at,
+        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
+        approval_intent_sha256="a" * 64,
+        candidate_evidence_schema_version=2,
+        candidate_evidence_sha256="b" * 64,
+        market="KR",
+        symbol="000660",
+        evidence_evaluated_at=elig.evidence_evaluated_at,
+        intent_declared_at=elig.intent_declared_at,
+        activation_authorized=False,
+        runtime_activation_outcome="no_go",
+    )
+
+    def _fake_content(**_k: object) -> object:
+        return OperatorApprovalConsumptionEligibilityArtifactContentScalarValidation(
+            validated=validated, reason_code=None
+        )
+
+    monkeypatch.setattr(
+        artifact_mod,
+        "validate_operator_approval_consumption_eligibility_artifact_content_scalars_detailed",
+        _fake_content,
+    )
+    out = _build(result)
+    art = out.artifact
+    assert art is not None
+    assert art.approval_intent_sha256 == "a" * 64
+    assert art.candidate_evidence_sha256 == "b" * 64
+    assert art.symbol == "000660"
+    expected_digest = payload_sha256(
+        operator_approval_consumption_eligibility_artifact_hash_payload(
+            checked_at=validated.checked_at,
+            approval_intent_sha256="a" * 64,
+            candidate_evidence_sha256="b" * 64,
+            market="KR",
+            symbol="000660",
+            evidence_evaluated_at=validated.evidence_evaluated_at,
+            intent_declared_at=validated.intent_declared_at,
+        )
+    )
+    assert art.eligibility_artifact_sha256 == expected_digest
+
+
 # --- isolation ---
 
 

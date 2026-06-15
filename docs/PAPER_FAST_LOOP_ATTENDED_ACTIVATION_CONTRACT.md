@@ -184,7 +184,12 @@ valid content change with a correctly recomputed digest is VALID by design, whil
 or a stale stored digest is INVALID. Builder and verifier share a single content semantic owner.
 VALID/snapshot means schema·semantic·hash consistency only — **not** authenticity/provenance,
 actual consumption, consumed marker, replay prevention, persistence, authentication/signature,
-TTL/freshness re-evaluation, or activation authorization. API-only (no new CLI). Constant NO-GO.
+TTL/freshness re-evaluation, or activation authorization. Constant NO-GO.
+**RTM-7c.4v** exposes the 4u verifier API read-only as a stdin-only operator CLI mode
+(`--verify-approval-consumption-eligibility-artifact --json`) — no config/env/clock/DB/filesystem
+write, verifier called exactly once, same consistency-not-authenticity semantics and constant
+NO-GO posture. The 4t builder now emits the hash + artifact from the validated content snapshot
+(carry-over, byte-equivalent output/digest).
 
 ## Orphan sidecar observation limit
 
@@ -300,4 +305,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` (RTM-7c.4s — consumption eligibility preflight; not consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` (RTM-7c.4t — canonical eligibility observation artifact; not consumption/persistence/activation)
 - `docs/PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` (RTM-7c.4u — serialized artifact verification + immutable verified snapshot; not consumption/persistence/activation)
+- `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md` (RTM-7c.4v — stdin-only read-only operator CLI exposing the 4u verifier; not consumption/persistence/activation)
 - `docs/TECH_DEBT.md` (OPEN items)

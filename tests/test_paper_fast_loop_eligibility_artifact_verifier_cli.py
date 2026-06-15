@@ -1,0 +1,399 @@
+"""RTM-7c.4v — Operator approval consumption eligibility-artifact verification CLI tests.
+
+stdin-only, read-only. No config, no env, no clock, no DB, no filesystem write, no network,
+no persistence, no consumption, no activation authorization. VALID means schema/semantic/hash
+consistency only — never authenticity/provenance.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import importlib.util
+import io
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from composition.operator_approval_consumption_eligibility import (
+    OperatorApprovalConsumptionEligibilityOutcome,
+    assess_operator_approval_consumption_eligibility,
+)
+from composition.operator_approval_consumption_eligibility_artifact import (
+    build_operator_approval_consumption_eligibility_artifact,
+    operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars,
+)
+from decision.canonical_json import payload_sha256
+
+import test_operator_approval_consumption_eligibility as elig_helper
+
+_CLI_PATH = Path(__file__).resolve().parents[1] / "ops" / "run_paper_fast_loop.py"
+_spec = importlib.util.spec_from_file_location("run_paper_fast_loop", _CLI_PATH)
+assert _spec is not None and _spec.loader is not None
+cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cli)
+
+_MODE = "verify-approval-consumption-eligibility-artifact"
+_FLAG = "--verify-approval-consumption-eligibility-artifact"
+
+_ENVELOPE_KEYS = frozenset(
+    {
+        "outcome",
+        "mode",
+        "schema_version",
+        "approval_intent_schema_version",
+        "approval_intent_sha256",
+        "candidate_evidence_schema_version",
+        "candidate_evidence_sha256",
+        "eligibility_artifact_sha256",
+        "reason_codes",
+        "activation_authorized",
+        "runtime_activation_outcome",
+        "artifact_authenticated",
+        "artifact_persisted",
+        "approval_consumed",
+        "replay_prevented",
+    }
+)
+
+
+def _valid_artifact_payload() -> dict[str, object]:
+    payload, ev, now = elig_helper._eligible_inputs()
+    result = assess_operator_approval_consumption_eligibility(
+        intent_payload=payload, evidence=ev, now=now
+    )
+    assert result.outcome is OperatorApprovalConsumptionEligibilityOutcome.ELIGIBLE
+    art = build_operator_approval_consumption_eligibility_artifact(result).artifact
+    assert art is not None
+    return dataclasses.asdict(art)
+
+
+def _payload_with(**overrides: object) -> dict[str, object]:
+    d = _valid_artifact_payload()
+    d.update(overrides)
+    return d
+
+
+def _rehashed(**overrides: object) -> dict[str, object]:
+    d = _valid_artifact_payload()
+    d.update(overrides)
+    d["eligibility_artifact_sha256"] = payload_sha256(
+        operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars(
+            schema_version=d["schema_version"],
+            checked_at=d["checked_at"],
+            approval_intent_schema_version=d["approval_intent_schema_version"],
+            approval_intent_sha256=d["approval_intent_sha256"],
+            candidate_evidence_schema_version=d["candidate_evidence_schema_version"],
+            candidate_evidence_sha256=d["candidate_evidence_sha256"],
+            market=d["market"],
+            symbol=d["symbol"],
+            evidence_evaluated_at=d["evidence_evaluated_at"],
+            intent_declared_at=d["intent_declared_at"],
+            activation_authorized=d["activation_authorized"],
+            runtime_activation_outcome=d["runtime_activation_outcome"],
+        )
+    )
+    return d
+
+
+def _stdin_bytes(data: bytes) -> object:
+    class _Stdin:
+        buffer = io.BytesIO(data)
+
+    return _Stdin()
+
+
+def _run_cli(
+    argv: list[str],
+    stdin: bytes | dict[str, object] | None,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, dict[str, Any]]:
+    if stdin is not None:
+        data = stdin if isinstance(stdin, bytes) else json.dumps(stdin).encode("utf-8")
+        sys.stdin = _stdin_bytes(data)  # type: ignore[assignment]
+    code = cli.main(argv)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    return code, payload
+
+
+def _assert_constant_posture(payload: dict[str, Any]) -> None:
+    assert payload["activation_authorized"] is False
+    assert payload["runtime_activation_outcome"] == "no_go"
+    assert payload["artifact_authenticated"] is False
+    assert payload["artifact_persisted"] is False
+    assert payload["approval_consumed"] is False
+    assert payload["replay_prevented"] is False
+
+
+# --- VALID / verdict matrix ---
+
+
+def test_builder_artifact_is_valid(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+    assert payload["mode"] == _MODE
+    assert payload["reason_codes"] == []
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_constant_posture(payload)
+
+
+def test_semantic_invalid_is_invalid(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli([_FLAG, "--json"], _payload_with(market="US"), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_invalid_field"]
+    _assert_constant_posture(payload)
+
+
+def test_stale_hash_is_hash_mismatch(capsys: pytest.CaptureFixture[str]) -> None:
+    # Category B: semantic-valid content change, stale stored digest.
+    code, payload = _run_cli([_FLAG, "--json"], _payload_with(symbol="000660"), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_hash_mismatch"]
+    _assert_constant_posture(payload)
+
+
+def test_semantic_valid_recomputed_hash_is_valid(capsys: pytest.CaptureFixture[str]) -> None:
+    # Category C: semantic-valid content change with a correctly recomputed digest → VALID.
+    code, payload = _run_cli([_FLAG, "--json"], _rehashed(symbol="000660"), capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+    assert payload["reason_codes"] == []
+    _assert_constant_posture(payload)
+
+
+def test_valid_never_claims_authenticity_or_consumption(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 0
+    assert payload["artifact_authenticated"] is False
+    assert payload["approval_consumed"] is False
+    assert payload["artifact_persisted"] is False
+    assert payload["replay_prevented"] is False
+
+
+# --- argument contract ---
+
+
+def test_missing_json_is_fail(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli([_FLAG], None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_verification_json_required"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(["--config", "config/config.toml.example"], id="config"),
+        pytest.param(["--max-age-microseconds", "100"], id="max_age"),
+        pytest.param(["--operator-approval-declared"], id="approval_declared"),
+        pytest.param(["--writers-stopped-manually-confirmed"], id="writer_stop"),
+        pytest.param(["--live-orders-forbidden-confirmed"], id="live_forbidden"),
+    ],
+)
+def test_forbidden_arguments_are_not_applicable(
+    extra: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, payload = _run_cli([_FLAG, "--json", *extra], None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == [
+        "eligibility_artifact_verification_argument_not_applicable"
+    ]
+
+
+def test_mode_conflict_is_fail(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli(
+        [_FLAG, "--verify-operator-approval-intent", "--json"], None, capsys
+    )
+    assert code == 1
+    assert payload["outcome"] in ("FAIL", "INVALID")
+
+
+def test_run_precedence_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli([_FLAG, "--run", "--json"], None, capsys)
+    assert code == 2
+    assert payload["outcome"] == "NO_GO"
+    assert payload["reason_code"] == "live_run_not_implemented"
+
+
+# --- stdin boundary ---
+
+
+@pytest.mark.parametrize(
+    ("stdin_data", "expected_reason"),
+    [
+        (b"", "eligibility_artifact_input_empty"),
+        (b"\xff\xfe", "eligibility_artifact_input_not_utf8"),
+        (b"not json", "eligibility_artifact_input_not_json"),
+        (b'{"a": 1, "a": 2}', "eligibility_artifact_input_duplicate_key"),
+        (b'{"a": {"b": 1, "b": 2}}', "eligibility_artifact_input_duplicate_key"),
+        (b"NaN", "eligibility_artifact_input_not_json"),
+        (b"Infinity", "eligibility_artifact_input_not_json"),
+        (b"[" * 5000 + b"0" + b"]" * 5000, "eligibility_artifact_input_too_deep"),
+    ],
+    ids=[
+        "empty",
+        "invalid_utf8",
+        "invalid_json",
+        "duplicate_top",
+        "duplicate_nested",
+        "nan",
+        "infinity",
+        "too_deep",
+    ],
+)
+def test_stdin_input_errors(
+    stdin_data: bytes, expected_reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, payload = _run_cli([_FLAG, "--json"], stdin_data, capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == [expected_reason]
+
+
+def test_stdin_exact_1mib_not_too_large(capsys: pytest.CaptureFixture[str]) -> None:
+    # Exactly the limit must NOT be rejected as too_large; it is parsed (and here, invalid JSON).
+    data = b" " * (cli._VERIFY_RECEIPT_STDIN_LIMIT - 2) + b"{}"
+    assert len(data) == cli._VERIFY_RECEIPT_STDIN_LIMIT
+    code, payload = _run_cli([_FLAG, "--json"], data, capsys)
+    assert code == 1
+    assert payload["reason_codes"] == ["eligibility_artifact_missing_field"]
+
+
+def test_stdin_over_1mib_is_too_large(capsys: pytest.CaptureFixture[str]) -> None:
+    data = b"x" * (cli._VERIFY_RECEIPT_STDIN_LIMIT + 1)
+    code, payload = _run_cli([_FLAG, "--json"], data, capsys)
+    assert code == 1
+    assert payload["reason_codes"] == ["eligibility_artifact_input_too_large"]
+
+
+def test_stdin_oserror_is_read_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _read_raises(_size: int) -> bytes:
+        raise OSError("simulated stdin read failure")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_read_raises)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main([_FLAG, "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+    assert code == 1
+    assert payload["reason_codes"] == ["eligibility_artifact_input_read_error"]
+
+
+def test_stdin_reads_exactly_limit_plus_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reads: list[int] = []
+
+    def _spy_read(size: int) -> bytes:
+        reads.append(size)
+        return json.dumps(_valid_artifact_payload()).encode("utf-8")
+
+    class _Stdin:
+        buffer = type("_B", (), {"read": staticmethod(_spy_read)})()
+
+    monkeypatch.setattr(sys, "stdin", _Stdin())
+    code = cli.main([_FLAG, "--json"])
+    assert code == 0
+    assert reads == [cli._VERIFY_RECEIPT_STDIN_LIMIT + 1]
+
+
+# --- isolation / single execution ---
+
+
+def test_verifier_called_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+    real = cli.verify_operator_approval_consumption_eligibility_artifact_payload
+
+    def _spy(payload: object) -> object:
+        calls.append("verify")
+        return real(payload)
+
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload", _spy
+    )
+    code, _ = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 0
+    assert calls == ["verify"]
+
+
+def test_no_config_env_clock_db_fs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _boom_settings(*_a: object, **_k: object) -> object:
+        raise AssertionError("load_settings must not be called in verify mode")
+
+    def _boom_now(*_a: object, **_k: object) -> object:
+        raise AssertionError("datetime.now must not be called in verify mode")
+
+    monkeypatch.setattr(cli, "load_settings", _boom_settings)
+    monkeypatch.setattr(cli, "datetime", type("_DT", (), {"now": staticmethod(_boom_now)}))
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 0
+    assert payload["outcome"] == "VALID"
+
+
+# --- exception contract ---
+
+
+def test_verifier_exception_is_invalid(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _raise(_payload: object) -> object:
+        raise ValueError("SECRET_LEAK_/home/user/APP_SECRET")
+
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload", _raise
+    )
+    code, payload = _run_cli([_FLAG, "--json"], _valid_artifact_payload(), capsys)
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert payload["reason_codes"] == ["eligibility_artifact_invalid_field"]
+    blob = json.dumps(payload)
+    assert "SECRET_LEAK" not in blob
+    assert "APP_SECRET" not in blob
+    assert "/home/" not in blob
+    assert "Traceback" not in blob
+
+
+@pytest.mark.parametrize("exc", [MemoryError, KeyboardInterrupt, SystemExit])
+def test_fatal_exceptions_reraise(
+    monkeypatch: pytest.MonkeyPatch, exc: type[BaseException]
+) -> None:
+    def _raise(_payload: object) -> object:
+        raise exc()
+
+    monkeypatch.setattr(
+        cli, "verify_operator_approval_consumption_eligibility_artifact_payload", _raise
+    )
+    sys.stdin = _stdin_bytes(json.dumps(_valid_artifact_payload()).encode("utf-8"))  # type: ignore[assignment]
+    with pytest.raises(exc):
+        cli.main([_FLAG, "--json"])
+
+
+# --- sanitization ---
+
+
+def test_invalid_digest_original_not_echoed(capsys: pytest.CaptureFixture[str]) -> None:
+    code, payload = _run_cli(
+        [_FLAG, "--json"], _payload_with(eligibility_artifact_sha256="ZZZ_not_hex"), capsys
+    )
+    assert code == 1
+    assert payload["outcome"] == "INVALID"
+    assert "ZZZ_not_hex" not in json.dumps(payload)
