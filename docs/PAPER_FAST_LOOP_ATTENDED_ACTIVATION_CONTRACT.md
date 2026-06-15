@@ -188,7 +188,10 @@ TTL/freshness re-evaluation, or activation authorization. Constant NO-GO.
 **RTM-7c.4v** exposes the 4u verifier API read-only as a stdin-only operator CLI mode
 (`--verify-approval-consumption-eligibility-artifact --json`) — no config/env/clock/DB/filesystem
 write, verifier called exactly once, same consistency-not-authenticity semantics and constant
-NO-GO posture. The 4t builder now emits the hash + artifact from the validated content snapshot
+NO-GO posture. The CLI separates three outcomes over one stable envelope key set: FAIL
+(CLI/argument/input boundary — verification not started), INVALID (verifier rejected the artifact),
+VALID (consistency only); a mode conflict including the artifact flag emits a dedicated FAIL
+conflict envelope. The 4t builder emits the hash + artifact from the validated content snapshot
 (carry-over, byte-equivalent output/digest).
 
 ## Orphan sidecar observation limit

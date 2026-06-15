@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RTM-7c.4a operator CLI for the offline paper fast-loop composition.
 
-Eleven mutually-exclusive modes:
+Mutually-exclusive modes:
 
 * ``--validate-only`` (default): load+validate the on-disk execution-inputs snapshot
   and run single-symbol preflight. No execution, no DB writes, no network.
@@ -34,6 +34,11 @@ Eleven mutually-exclusive modes:
 * ``--verify-operator-approval-intent``: stdin-only strict approval-intent schema + hash
   verification; no config, no env, no DB, no filesystem write, no network, no clock read
   (RTM-7c.4q).
+* ``--verify-approval-consumption-eligibility-artifact``: stdin-only strict eligibility-artifact
+  schema + semantic + hash verification; no config, no env, no DB, no filesystem write, no
+  network, no clock read (RTM-7c.4v). FAIL = verification not started (CLI/argument/input
+  boundary); INVALID = verifier rejected the artifact; VALID = schema/semantic/hash consistency
+  only, never authenticity/provenance/consumption.
 * ``--replay FIXTURE``: deterministic offline replay against a built-in normalized-event
   fixture, using a fresh OS temp dir (never the configured ``runtime/`` paths).
 * ``--run``: REFUSED. Returns ``outcome=NO_GO`` / ``reason_code=live_run_not_implemented``
@@ -92,7 +97,6 @@ from composition.operator_approval_intent_verifier import (
     verify_operator_approval_intent_payload,
 )
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
-    OperatorApprovalConsumptionEligibilityArtifactVerification,
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
     verify_operator_approval_consumption_eligibility_artifact_payload,
 )
@@ -319,6 +323,7 @@ def _resolve_mode(args: argparse.Namespace) -> str:
             "--final-preflight-activation-candidate / "
             "--freshness-preflight-activation-candidate / --build-operator-approval-intent / "
             "--verify-operator-approval-intent / "
+            "--verify-approval-consumption-eligibility-artifact / "
             "--replay / --run are mutually exclusive."
         )
     return selected[0] if selected else "validate-only"
@@ -909,41 +914,87 @@ def _verify_eligibility_artifact_posture_fields() -> dict[str, Any]:
     }
 
 
+def _verify_eligibility_artifact_cli_envelope(
+    *,
+    outcome: str,
+    reason_codes: list[str],
+    schema_version: int | None = None,
+    approval_intent_schema_version: int | None = None,
+    approval_intent_sha256: str | None = None,
+    candidate_evidence_schema_version: int | None = None,
+    candidate_evidence_sha256: str | None = None,
+    eligibility_artifact_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Stable artifact-verify CLI envelope — every outcome (FAIL/INVALID/VALID) shares this key
+    set and constant posture. Metadata digests/schemas are ``None`` unless the verifier validated
+    them. ``reason_codes`` is always a list (no singular ``reason_code`` key)."""
+
+    return {
+        "outcome": outcome,
+        "mode": _VERIFY_ELIGIBILITY_ARTIFACT_CLI_MODE,
+        "schema_version": schema_version,
+        "approval_intent_schema_version": approval_intent_schema_version,
+        "approval_intent_sha256": approval_intent_sha256,
+        "candidate_evidence_schema_version": candidate_evidence_schema_version,
+        "candidate_evidence_sha256": candidate_evidence_sha256,
+        "eligibility_artifact_sha256": eligibility_artifact_sha256,
+        "reason_codes": reason_codes,
+        **_verify_eligibility_artifact_posture_fields(),
+    }
+
+
 def _verify_eligibility_artifact_summary(result: Any) -> dict[str, Any]:
     valid = (
         result.outcome
         is OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.VALID
     )
-    return {
-        "outcome": "VALID" if valid else "INVALID",
-        "mode": _VERIFY_ELIGIBILITY_ARTIFACT_CLI_MODE,
-        "schema_version": result.schema_version,
-        "approval_intent_schema_version": result.approval_intent_schema_version,
-        "approval_intent_sha256": result.approval_intent_sha256,
-        "candidate_evidence_schema_version": result.candidate_evidence_schema_version,
-        "candidate_evidence_sha256": result.candidate_evidence_sha256,
-        "eligibility_artifact_sha256": result.eligibility_artifact_sha256,
-        "reason_codes": list(result.reason_codes),
-        **_verify_eligibility_artifact_posture_fields(),
-    }
+    return _verify_eligibility_artifact_cli_envelope(
+        outcome="VALID" if valid else "INVALID",
+        reason_codes=list(result.reason_codes),
+        schema_version=result.schema_version,
+        approval_intent_schema_version=result.approval_intent_schema_version,
+        approval_intent_sha256=result.approval_intent_sha256,
+        candidate_evidence_schema_version=result.candidate_evidence_schema_version,
+        candidate_evidence_sha256=result.candidate_evidence_sha256,
+        eligibility_artifact_sha256=result.eligibility_artifact_sha256,
+    )
 
 
 def _verify_eligibility_artifact_input_fail(reason_code: str, *, out: TextIO) -> int:
-    summary = _verify_eligibility_artifact_summary(
-        OperatorApprovalConsumptionEligibilityArtifactVerification(
-            outcome=(
-                OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome.INVALID
+    """CLI/argument/input boundary failure — verification not started: outcome FAIL, no metadata."""
+
+    print(
+        json.dumps(
+            _verify_eligibility_artifact_cli_envelope(
+                outcome="FAIL", reason_codes=[reason_code]
             ),
-            schema_version=None,
-            approval_intent_schema_version=None,
-            approval_intent_sha256=None,
-            candidate_evidence_schema_version=None,
-            candidate_evidence_sha256=None,
-            eligibility_artifact_sha256=None,
-            reason_codes=(reason_code,),
-        )
+            ensure_ascii=False,
+        ),
+        file=out,
     )
-    print(json.dumps(summary, ensure_ascii=False), file=out)
+    return 1
+
+
+def _verify_eligibility_artifact_mode_conflict_fail(*, out: TextIO) -> int:
+    """Artifact-verify flag가 포함된 mutually-exclusive conflict — 전용 FAIL envelope."""
+
+    return _verify_eligibility_artifact_input_fail(
+        "eligibility_artifact_verification_mode_conflict", out=out
+    )
+
+
+def _verify_eligibility_artifact_verifier_fail(reason_code: str, *, out: TextIO) -> int:
+    """Payload가 verifier까지 전달된 뒤 거부/처리 실패 — outcome INVALID."""
+
+    print(
+        json.dumps(
+            _verify_eligibility_artifact_cli_envelope(
+                outcome="INVALID", reason_codes=[reason_code]
+            ),
+            ensure_ascii=False,
+        ),
+        file=out,
+    )
     return 1
 
 
@@ -1017,6 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mode = _resolve_mode(args)
     except CliInputError:
+        # --run은 위에서 exit 2로 이미 처리됨. artifact-verify flag가 포함된 conflict는
+        # approval-intent/generic envelope보다 우선해 전용 artifact FAIL envelope를 발행한다.
+        if args.verify_approval_consumption_eligibility_artifact:
+            return _verify_eligibility_artifact_mode_conflict_fail(out=out)
         if args.build_operator_approval_intent or args.verify_operator_approval_intent:
             return _approval_intent_mode_conflict_fail(
                 build_requested=args.build_operator_approval_intent,
@@ -1123,7 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
         except (MemoryError, KeyboardInterrupt, SystemExit):
             raise
         except Exception:
-            return _verify_eligibility_artifact_input_fail(
+            return _verify_eligibility_artifact_verifier_fail(
                 "eligibility_artifact_invalid_field", out=out
             )
         summary = _verify_eligibility_artifact_summary(result)

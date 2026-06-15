@@ -264,7 +264,7 @@ close-event log across all three handles (not merely a per-handle close count).
 
 ## CLI contract (`ops/run_paper_fast_loop.py`)
 
-Ten mutually-exclusive modes (default `--validate-only`):
+Mutually-exclusive modes (default `--validate-only`):
 
 | mode | exit code | notes |
 |------|-----------|-------|
@@ -281,8 +281,13 @@ Ten mutually-exclusive modes (default `--validate-only`):
 | `--replay FIXTURE` | 0 (1 on unknown fixture) | OS temp dir only |
 | `--run` | **2** | **REFUSED** before any side effect (early refusal precedes mode resolution, applicability, stdin read) |
 
-- Mode collisions → exit 1. When `--build-operator-approval-intent` or
-  `--verify-operator-approval-intent` participates, emit approval-specific JSON envelope
+- Mode collisions → exit 1 (except `--run`, which is refused with exit 2 before conflict
+  resolution). When `--verify-approval-consumption-eligibility-artifact` participates, emit the
+  artifact-specific FAIL envelope (`outcome=FAIL`,
+  `reason_codes=["eligibility_artifact_verification_mode_conflict"]`, full stable artifact key
+  set + constant NO-GO posture, all metadata null) — this takes precedence over the
+  approval-intent envelope. Otherwise when `--build-operator-approval-intent` or
+  `--verify-operator-approval-intent` participates, emit the approval-specific JSON envelope
   (`approval_intent_mode_conflict` / `approval_intent_verification_mode_conflict`); otherwise
   global `reason_code` containing `mutually exclusive`.
 - `--max-age-microseconds` is valid **only** with `--freshness-preflight-activation-candidate`;

@@ -21,7 +21,7 @@ Mutually exclusive with all other modes. Required:
 --json
 ```
 
-Forbidden (→ `eligibility_artifact_verification_argument_not_applicable`, exit 1):
+Forbidden (→ `outcome=FAIL`, `eligibility_artifact_verification_argument_not_applicable`, exit 1):
 
 ```text
 --config
@@ -29,14 +29,23 @@ Forbidden (→ `eligibility_artifact_verification_argument_not_applicable`, exit
 --operator-approval-declared
 --writers-stopped-manually-confirmed
 --live-orders-forbidden-confirmed
-(any other execution/verification mode → mode conflict, fail-closed JSON)
 ```
 
-Missing `--json` → `eligibility_artifact_verification_json_required`, exit 1.
+Any other execution/verification mode combined with this flag → `outcome=FAIL`,
+`eligibility_artifact_verification_mode_conflict`, exit 1. This artifact-specific conflict envelope
+takes precedence over the approval-intent conflict envelope when both participate.
+
+Missing `--json` → `outcome=FAIL`, `eligibility_artifact_verification_json_required`, exit 1.
 
 `--run` takes precedence over every new argument: any combination including `--run` returns the
 run-refused envelope (`outcome=NO_GO` / `live_run_not_implemented`) with **exit 2** before mode
 resolution, stdin read, or any side effect.
+
+### Applicability precedence
+
+```text
+--run (exit 2)  >  mode conflict  >  --json required  >  argument not applicable  >  stdin read
+```
 
 ## Processing order
 
@@ -57,8 +66,8 @@ eligibility API / intent verifier, touches the broker, the network, or writes th
 ## Stdin boundary
 
 Reuses the bounded strict JSON parser (`parse_receipt_stdin_json`). Bound: 1 MiB; the CLI reads
-`limit + 1` bytes. Root must be an exact JSON object. Receipt-namespace parser reasons are mapped
-into the eligibility-artifact namespace:
+`limit + 1` bytes. These stdin boundary failures are `outcome=FAIL` (verification not started) —
+the parser never reaches the verifier:
 
 ```text
 eligibility_artifact_input_empty
@@ -70,19 +79,28 @@ eligibility_artifact_input_duplicate_key
 eligibility_artifact_input_read_error
 ```
 
+The parser only requires a syntactically valid JSON value. **The verifier — not the parser —
+requires an exact object root**: a parsed JSON `list`/`string`/`null` reaches the verifier and is
+rejected `INVALID` / `eligibility_artifact_not_object`.
+
 Raw stdin, duplicate keys, numbers, paths, and exception text are never echoed.
 
-## Outcomes
+## Outcome taxonomy
 
-| Outcome | Exit | reason_codes |
-|---------|------|--------------|
-| VALID | 0 | `[]` |
-| INVALID (artifact) | 1 | verifier stable reason codes |
-| INVALID (input/argument) | 1 | one stable CLI/input reason |
+Three disjoint outcomes share one stable key set and constant posture:
 
-VALID metadata: `schema_version`, `approval_intent_schema_version`, `approval_intent_sha256`,
-`candidate_evidence_schema_version`, `candidate_evidence_sha256`, `eligibility_artifact_sha256`
-(verified exact lowercase hex64 only; INVALID malformed digests are not echoed).
+| Outcome | Exit | Meaning | reason_codes | metadata |
+|---------|------|---------|--------------|----------|
+| FAIL | 1 | verification **not started** — CLI/argument/input boundary | one stable CLI/input reason | all `null` |
+| INVALID | 1 | payload reached the verifier and was **rejected** | verifier stable reason code | only verifier-validated values |
+| VALID | 0 | schema/semantic/hash **consistency only** | `[]` | verified exact lowercase hex64 |
+
+Stable key set (every outcome): `outcome`, `mode`, `schema_version`,
+`approval_intent_schema_version`, `approval_intent_sha256`, `candidate_evidence_schema_version`,
+`candidate_evidence_sha256`, `eligibility_artifact_sha256`, `reason_codes`, plus the constant
+posture below. `reason_codes` is always a list — there is no singular `reason_code` key on this
+envelope. FAIL emits all metadata digests/schemas as `null`; INVALID malformed digests are not
+echoed.
 
 Every path emits the constant posture:
 
@@ -113,9 +131,10 @@ consumption-ready. VALID is an observation of internal consistency.
 
 ## Exception contract
 
-A verifier raising an ordinary `Exception` → exit 1 / `INVALID` /
-`eligibility_artifact_invalid_field`, no raw exception text. `MemoryError`,
-`KeyboardInterrupt`, and `SystemExit` are re-raised.
+A verifier raising an ordinary `Exception` (defensive — the verifier itself returns INVALID rather
+than raising) → exit 1 / `INVALID` / `eligibility_artifact_invalid_field`, no raw exception text.
+Because the payload had already reached the verifier, this is an INVALID (verifier-domain) outcome,
+not a FAIL boundary outcome. `MemoryError`, `KeyboardInterrupt`, and `SystemExit` are re-raised.
 
 ## Single execution (per VALID call)
 

@@ -183,11 +183,24 @@ def test_valid_never_claims_authenticity_or_consumption(
 # --- argument contract ---
 
 
+def _assert_null_metadata(payload: dict[str, Any]) -> None:
+    assert payload["schema_version"] is None
+    assert payload["approval_intent_schema_version"] is None
+    assert payload["approval_intent_sha256"] is None
+    assert payload["candidate_evidence_schema_version"] is None
+    assert payload["candidate_evidence_sha256"] is None
+    assert payload["eligibility_artifact_sha256"] is None
+
+
 def test_missing_json_is_fail(capsys: pytest.CaptureFixture[str]) -> None:
     code, payload = _run_cli([_FLAG], None, capsys)
     assert code == 1
-    assert payload["outcome"] == "INVALID"
+    assert payload["outcome"] == "FAIL"
+    assert payload["mode"] == _MODE
     assert payload["reason_codes"] == ["eligibility_artifact_verification_json_required"]
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_null_metadata(payload)
+    _assert_constant_posture(payload)
 
 
 @pytest.mark.parametrize(
@@ -205,18 +218,77 @@ def test_forbidden_arguments_are_not_applicable(
 ) -> None:
     code, payload = _run_cli([_FLAG, "--json", *extra], None, capsys)
     assert code == 1
-    assert payload["outcome"] == "INVALID"
+    assert payload["outcome"] == "FAIL"
+    assert payload["mode"] == _MODE
     assert payload["reason_codes"] == [
         "eligibility_artifact_verification_argument_not_applicable"
     ]
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_null_metadata(payload)
+    _assert_constant_posture(payload)
 
 
-def test_mode_conflict_is_fail(capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    "conflicting_flag",
+    [
+        "--verify-operator-approval-intent",
+        "--build-operator-approval-intent",
+        "--validate-only",
+        "--inspect-existing",
+        "--precheck-runtime",
+        "--verify-precheck-receipt",
+        "--revalidate-activation-candidate",
+        "--final-preflight-activation-candidate",
+        "--freshness-preflight-activation-candidate",
+        "--replay",
+    ],
+)
+def test_mode_conflict_is_fail(
+    conflicting_flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [_FLAG, conflicting_flag, "--json"]
+    if conflicting_flag == "--replay":
+        argv = [_FLAG, "--replay", "buy_fill", "--json"]
+    code, payload = _run_cli(argv, None, capsys)
+    assert code == 1
+    assert payload["outcome"] == "FAIL"
+    assert payload["mode"] == _MODE
+    assert payload["reason_codes"] == ["eligibility_artifact_verification_mode_conflict"]
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_null_metadata(payload)
+    _assert_constant_posture(payload)
+
+
+def test_mode_conflict_run_takes_precedence_exit_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     code, payload = _run_cli(
-        [_FLAG, "--verify-operator-approval-intent", "--json"], None, capsys
+        [_FLAG, "--verify-operator-approval-intent", "--run", "--json"], None, capsys
+    )
+    assert code == 2
+    assert payload["outcome"] == "NO_GO"
+    assert payload["reason_code"] == "live_run_not_implemented"
+
+
+def test_mode_conflict_artifact_precedes_approval_intent_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # artifact flag + both approval-intent flags → artifact conflict envelope, not approval-intent.
+    code, payload = _run_cli(
+        [
+            _FLAG,
+            "--build-operator-approval-intent",
+            "--verify-operator-approval-intent",
+            "--json",
+        ],
+        None,
+        capsys,
     )
     assert code == 1
-    assert payload["outcome"] in ("FAIL", "INVALID")
+    assert payload["outcome"] == "FAIL"
+    assert payload["mode"] == _MODE
+    assert payload["reason_codes"] == ["eligibility_artifact_verification_mode_conflict"]
+    assert frozenset(payload) == _ENVELOPE_KEYS
 
 
 def test_run_precedence_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
@@ -257,16 +329,22 @@ def test_stdin_input_errors(
 ) -> None:
     code, payload = _run_cli([_FLAG, "--json"], stdin_data, capsys)
     assert code == 1
-    assert payload["outcome"] == "INVALID"
+    assert payload["outcome"] == "FAIL"
+    assert payload["mode"] == _MODE
     assert payload["reason_codes"] == [expected_reason]
+    assert frozenset(payload) == _ENVELOPE_KEYS
+    _assert_null_metadata(payload)
+    _assert_constant_posture(payload)
 
 
 def test_stdin_exact_1mib_not_too_large(capsys: pytest.CaptureFixture[str]) -> None:
-    # Exactly the limit must NOT be rejected as too_large; it is parsed (and here, invalid JSON).
+    # Exactly the limit must NOT be rejected as too_large; it is parsed then the verifier rejects
+    # it (missing fields) → INVALID, not a FAIL input-boundary outcome.
     data = b" " * (cli._VERIFY_RECEIPT_STDIN_LIMIT - 2) + b"{}"
     assert len(data) == cli._VERIFY_RECEIPT_STDIN_LIMIT
     code, payload = _run_cli([_FLAG, "--json"], data, capsys)
     assert code == 1
+    assert payload["outcome"] == "INVALID"
     assert payload["reason_codes"] == ["eligibility_artifact_missing_field"]
 
 
@@ -274,6 +352,7 @@ def test_stdin_over_1mib_is_too_large(capsys: pytest.CaptureFixture[str]) -> Non
     data = b"x" * (cli._VERIFY_RECEIPT_STDIN_LIMIT + 1)
     code, payload = _run_cli([_FLAG, "--json"], data, capsys)
     assert code == 1
+    assert payload["outcome"] == "FAIL"
     assert payload["reason_codes"] == ["eligibility_artifact_input_too_large"]
 
 
@@ -291,6 +370,7 @@ def test_stdin_oserror_is_read_error(
     captured = capsys.readouterr()
     payload = json.loads(captured.out.strip().splitlines()[-1])
     assert code == 1
+    assert payload["outcome"] == "FAIL"
     assert payload["reason_codes"] == ["eligibility_artifact_input_read_error"]
 
 

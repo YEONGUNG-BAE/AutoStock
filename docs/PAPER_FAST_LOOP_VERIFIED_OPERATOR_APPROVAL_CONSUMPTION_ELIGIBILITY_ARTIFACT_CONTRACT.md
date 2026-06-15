@@ -202,7 +202,9 @@ This verifier API is exposed read-only via
 `ops/run_paper_fast_loop.py --verify-approval-consumption-eligibility-artifact --json` — stdin-only,
 bounded parser, no config/env/clock/DB/filesystem write, verifier called exactly once. The CLI
 carries the same consistency-not-authenticity semantics (Category C recomputed payload → VALID) and
-constant NO-GO posture. See
+constant NO-GO posture, and separates three outcomes: **FAIL** (CLI/argument/input boundary —
+verification not started, verifier `0`), **INVALID** (verifier rejected the artifact), **VALID**
+(consistency only). See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_VERIFICATION_CLI_CONTRACT.md`.
 
 ## Still OPEN (unchanged posture)
