@@ -413,6 +413,23 @@ authorization. Constant NO-GO posture on every path. Carry-over H1: intent seman
 single owner (`validate_operator_approval_intent_scalars_detailed`). See
 `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md`.
 
+### RTM-7c.4u — standalone serialized eligibility-artifact verification + verified snapshot (API-only)
+
+`verify_operator_approval_consumption_eligibility_artifact_payload(payload)` and
+`verify_and_snapshot_operator_approval_consumption_eligibility_artifact(payload)` — pure
+verification of an untrusted **serialized** eligibility artifact (4t output round-tripped through
+JSON). Strict `type(payload) is dict` root, exact 13-field set, exact scalar types, semantic
+constants, aware-timestamp ordering, and canonical `eligibility_artifact_sha256` recomputed over
+the actual 12 serialized content fields; VALID converts to a frozen 13-field
+`VerifiedOperatorApprovalConsumptionEligibilityArtifact`. Shares the 4t semantic owner
+(`validate_operator_approval_consumption_eligibility_artifact_scalars_detailed`) and canonical hash
+owner (`operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars`). One detached
+payload snapshot + one scalar/semantic + one hash pass per call; snapshot API does not re-call the
+public verifier or re-read caller payload. Not actual consumption, consumed marker, replay
+protection, signing/HMAC, authentication, persistence, TTL/freshness re-evaluation, or activation
+authorization. Constant NO-GO. No new CLI mode. `MemoryError`/`KeyboardInterrupt`/`SystemExit`
+re-raised. See `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`.
+
 - **Allowed (composition IS the wiring root):** `broker`, `ledger`, `execution`,
   `orchestration`, `market_data`, `risk`, `paper_loop`, `domain`, `allocator`,
   `decision`, `analysis`, `config`, `composition`. Any first-party package
@@ -441,3 +458,8 @@ touch network/credentials/DB/clock and never activate runtime:
   The artifact is **not** consumption: no consumed marker, replay prevention, persistence,
   authentication/signature, TTL/freshness re-evaluation, or activation authorization;
   malformed `NO_GO` maps to `INVALID`. Runtime activation stays NO-GO.
+- RTM-7c.4u `operator_approval_consumption_eligibility_artifact_verifier` — standalone
+  verification of a serialized eligibility artifact + immutable verified snapshot
+  (`PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`).
+  VALID/snapshot means schema·semantic·hash consistency only — **not** actual consumption,
+  consumed marker, replay prevention, persistence, authentication, or activation authorization.

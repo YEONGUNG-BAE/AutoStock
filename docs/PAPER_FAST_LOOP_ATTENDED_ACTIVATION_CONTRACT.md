@@ -169,6 +169,19 @@ evidence could combine as consumption candidates; **not actual consumption** (no
 replay protection, persistence, authentication, TTL/freshness re-evaluation, or activation
 authorization). Intent semantic validation single owner (`validate_operator_approval_intent_scalars_detailed`).
 Approval consumption and activation caller remain **OPEN**.
+**RTM-7c.4t** freezes an `ELIGIBLE` preflight into a canonical immutable eligibility-artifact with
+a stable digest (`build_operator_approval_consumption_eligibility_artifact`) — an observation, not
+consumption (no consumed marker/replay/persistence/signing/authentication/activation); malformed
+`NO_GO` → `INVALID`.
+**RTM-7c.4u** adds standalone verification of a **serialized** eligibility artifact plus an
+immutable verified snapshot
+(`verify_operator_approval_consumption_eligibility_artifact_payload` /
+`verify_and_snapshot_operator_approval_consumption_eligibility_artifact` +
+`VerifiedOperatorApprovalConsumptionEligibilityArtifact`) — strict 13-field schema, semantic
+constants, aware-timestamp ordering, and canonical digest recomputed over the actual 12 serialized
+content fields. VALID/snapshot means schema·semantic·hash consistency only — **not** actual
+consumption, consumed marker, replay prevention, persistence, authentication/signature,
+TTL/freshness re-evaluation, or activation authorization. API-only (no new CLI). Constant NO-GO.
 
 ## Orphan sidecar observation limit
 
@@ -283,4 +296,5 @@ calibration; unattended pilot; persistent activation epoch.
 - `docs/PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` (RTM-7c.4r — immutable verified snapshot API; not authentication/consumption/persistence)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` (RTM-7c.4s — consumption eligibility preflight; not consumption/activation)
 - `docs/PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` (RTM-7c.4t — canonical eligibility observation artifact; not consumption/persistence/activation)
+- `docs/PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md` (RTM-7c.4u — serialized artifact verification + immutable verified snapshot; not consumption/persistence/activation)
 - `docs/TECH_DEBT.md` (OPEN items)

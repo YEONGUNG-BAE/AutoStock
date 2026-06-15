@@ -160,6 +160,24 @@ path leakage). `MemoryError` / `KeyboardInterrupt` / `SystemExit` are re-raised.
 - **H3**: ELIGIBLE-path evidence canonical hash measured — `validate_activation_candidate_evidence_scalars`,
   `activation_candidate_evidence_hash_payload`, and the evidence-module `payload_sha256` each = 1.
 
+## Standalone serialized verification (RTM-7c.4u)
+
+A serialized artifact (this builder's output round-tripped through JSON) is independently verified
+and converted to an immutable verified snapshot by
+`composition.operator_approval_consumption_eligibility_artifact_verifier`. The builder and verifier
+share two semantic owners exported from this module:
+
+```text
+validate_operator_approval_consumption_eligibility_artifact_scalars_detailed(...)   # 13-field scalar/semantic/timestamp/ordering owner
+operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars(...)    # canonical 12-field hash owner
+operator_approval_consumption_eligibility_artifact_hash_payload(...)                 # builder convenience, delegates to *_from_scalars (output unchanged)
+```
+
+The verifier recomputes the digest from the **input payload values** of the 12 serialized content
+fields and separately asserts the semantic constants — it does not auto-insert constants while
+ignoring raw fields. VALID/snapshot still means schema·semantic·hash consistency only, never actual
+consumption. See `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`.
+
 ## Still OPEN (unchanged posture)
 
 Approval consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

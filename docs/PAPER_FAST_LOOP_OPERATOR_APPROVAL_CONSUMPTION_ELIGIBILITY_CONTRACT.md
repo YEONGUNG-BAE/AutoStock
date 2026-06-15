@@ -158,6 +158,15 @@ full semantic validation, and validated scalar snapshot creation. Verifier core
 `_verify_detached_operator_approval_intent` calls it exactly once (no duplicate declared-at /
 evidence-binding / identity / declaration / posture helpers).
 
+## Downstream artifact + verification (RTM-7c.4t / 7c.4u)
+
+An `ELIGIBLE` result is frozen into a canonical immutable artifact (4t,
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`); a serialized
+artifact is independently verified and converted to an immutable verified snapshot (4u,
+`PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_CONTRACT.md`). Both
+remain observations only — schema·semantic·hash consistency, never actual consumption,
+persistence, authentication, or activation authorization. Constant NO-GO.
+
 ## Still OPEN (unchanged posture)
 
 Approval consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

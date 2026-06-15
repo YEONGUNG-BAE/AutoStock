@@ -30,12 +30,17 @@ from composition.operator_approval_intent import (
 from decision.canonical_json import payload_sha256
 
 __all__ = [
+    "OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FIELD_NAMES",
     "OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION",
     "OperatorApprovalConsumptionEligibilityArtifact",
     "OperatorApprovalConsumptionEligibilityArtifactOutcome",
     "OperatorApprovalConsumptionEligibilityArtifactResult",
+    "OperatorApprovalConsumptionEligibilityArtifactScalarValidation",
+    "ValidatedOperatorApprovalConsumptionEligibilityArtifact",
     "build_operator_approval_consumption_eligibility_artifact",
     "operator_approval_consumption_eligibility_artifact_hash_payload",
+    "operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars",
+    "validate_operator_approval_consumption_eligibility_artifact_scalars_detailed",
 ]
 
 OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION = 1
@@ -48,6 +53,36 @@ _SYMBOL6 = re.compile(r"[0-9]{6}")
 
 _REASON_NOT_ELIGIBLE = "approval_consumption_artifact_not_eligible"
 _REASON_INVALID = "approval_consumption_artifact_invalid_input"
+
+OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FIELD_NAMES = frozenset(
+    {
+        "schema_version",
+        "checked_at",
+        "approval_intent_schema_version",
+        "approval_intent_sha256",
+        "candidate_evidence_schema_version",
+        "candidate_evidence_sha256",
+        "market",
+        "symbol",
+        "evidence_evaluated_at",
+        "intent_declared_at",
+        "activation_authorized",
+        "runtime_activation_outcome",
+        "eligibility_artifact_sha256",
+    }
+)
+
+# Stable verifier reason codes (RTM-7c.4u) — one root cause maps to exactly one code.
+_VR_NOT_OBJECT = "eligibility_artifact_not_object"
+_VR_UNKNOWN_FIELD = "eligibility_artifact_unknown_field"
+_VR_MISSING_FIELD = "eligibility_artifact_missing_field"
+_VR_UNSUPPORTED_SCHEMA = "eligibility_artifact_unsupported_schema"
+_VR_INVALID_FIELD = "eligibility_artifact_invalid_field"
+_VR_INVALID_TIMESTAMP = "eligibility_artifact_invalid_timestamp"
+_VR_INVALID_BINDING = "eligibility_artifact_invalid_binding"
+_VR_INVALID_ACTIVATION_POSTURE = "eligibility_artifact_invalid_activation_posture"
+_VR_INVALID_TIME_ORDERING = "eligibility_artifact_invalid_time_ordering"
+_VR_HASH_MISMATCH = "eligibility_artifact_hash_mismatch"
 
 
 class OperatorApprovalConsumptionEligibilityArtifactOutcome(StrEnum):
@@ -80,6 +115,33 @@ class OperatorApprovalConsumptionEligibilityArtifactResult:
     outcome: OperatorApprovalConsumptionEligibilityArtifactOutcome
     reasons: tuple[str, ...]
     artifact: OperatorApprovalConsumptionEligibilityArtifact | None
+
+
+@dataclass(frozen=True)
+class ValidatedOperatorApprovalConsumptionEligibilityArtifact:
+    """검증된 eligibility-artifact scalar snapshot — builder/verifier 공유 semantic owner."""
+
+    schema_version: int
+    checked_at: str
+    approval_intent_schema_version: int
+    approval_intent_sha256: str
+    candidate_evidence_schema_version: int
+    candidate_evidence_sha256: str
+    market: str
+    symbol: str
+    evidence_evaluated_at: str
+    intent_declared_at: str
+    activation_authorized: bool
+    runtime_activation_outcome: str
+    eligibility_artifact_sha256: str
+
+
+@dataclass(frozen=True)
+class OperatorApprovalConsumptionEligibilityArtifactScalarValidation:
+    """단일 semantic validation owner 결과 — stable reason + validated scalar snapshot."""
+
+    validated: ValidatedOperatorApprovalConsumptionEligibilityArtifact | None
+    reason_code: str | None
 
 
 def build_operator_approval_consumption_eligibility_artifact(
@@ -198,22 +260,161 @@ def operator_approval_consumption_eligibility_artifact_hash_payload(
     evidence_evaluated_at: str,
     intent_declared_at: str,
 ) -> dict[str, object]:
-    """Canonical hash payload — every artifact field except ``eligibility_artifact_sha256``."""
+    """Canonical hash payload — every artifact field except ``eligibility_artifact_sha256``.
+
+    Builder convenience over the canonical constants. The actual canonical owner is
+    :func:`operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars`."""
+
+    return operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars(
+        schema_version=OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
+        checked_at=checked_at,
+        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
+        approval_intent_sha256=approval_intent_sha256,
+        candidate_evidence_schema_version=ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        candidate_evidence_sha256=candidate_evidence_sha256,
+        market=market,
+        symbol=symbol,
+        evidence_evaluated_at=evidence_evaluated_at,
+        intent_declared_at=intent_declared_at,
+        activation_authorized=False,
+        runtime_activation_outcome=_ARTIFACT_RUNTIME_ACTIVATION_OUTCOME,
+    )
+
+
+def operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars(
+    *,
+    schema_version: int,
+    checked_at: str,
+    approval_intent_schema_version: int,
+    approval_intent_sha256: str,
+    candidate_evidence_schema_version: int,
+    candidate_evidence_sha256: str,
+    market: str,
+    symbol: str,
+    evidence_evaluated_at: str,
+    intent_declared_at: str,
+    activation_authorized: bool,
+    runtime_activation_outcome: str,
+) -> dict[str, object]:
+    """Canonical hash payload over the 12 serialized content fields using the passed values.
+
+    The verifier recomputes the digest from the *input payload* values (including the semantic
+    constants), so a tampered serialized field changes the digest even when the constants would
+    otherwise be auto-inserted."""
 
     return {
-        "schema_version": OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "checked_at": checked_at,
-        "approval_intent_schema_version": OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
+        "approval_intent_schema_version": approval_intent_schema_version,
         "approval_intent_sha256": approval_intent_sha256,
-        "candidate_evidence_schema_version": ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        "candidate_evidence_schema_version": candidate_evidence_schema_version,
         "candidate_evidence_sha256": candidate_evidence_sha256,
         "market": market,
         "symbol": symbol,
         "evidence_evaluated_at": evidence_evaluated_at,
         "intent_declared_at": intent_declared_at,
-        "activation_authorized": False,
-        "runtime_activation_outcome": _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME,
+        "activation_authorized": activation_authorized,
+        "runtime_activation_outcome": runtime_activation_outcome,
     }
+
+
+def validate_operator_approval_consumption_eligibility_artifact_scalars_detailed(
+    *,
+    schema_version: object,
+    checked_at: object,
+    approval_intent_schema_version: object,
+    approval_intent_sha256: object,
+    candidate_evidence_schema_version: object,
+    candidate_evidence_sha256: object,
+    market: object,
+    symbol: object,
+    evidence_evaluated_at: object,
+    intent_declared_at: object,
+    activation_authorized: object,
+    runtime_activation_outcome: object,
+    eligibility_artifact_sha256: object,
+) -> OperatorApprovalConsumptionEligibilityArtifactScalarValidation:
+    """Field별 stable reason 분류 + full semantic + aware-timestamp + time-ordering 검증.
+
+    Verifier core가 정확히 1회 호출한다. Hash 재계산만 호출자 책임으로 남긴다."""
+
+    if type(schema_version) is not int or isinstance(schema_version, bool):
+        return _scalar_invalid(_VR_INVALID_FIELD)
+    if schema_version != OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION:
+        return _scalar_invalid(_VR_UNSUPPORTED_SCHEMA)
+
+    if type(approval_intent_schema_version) is not int or isinstance(
+        approval_intent_schema_version, bool
+    ):
+        return _scalar_invalid(_VR_INVALID_BINDING)
+    if approval_intent_schema_version != OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION:
+        return _scalar_invalid(_VR_INVALID_BINDING)
+    if not _is_lower_hex64(approval_intent_sha256):
+        return _scalar_invalid(_VR_INVALID_BINDING)
+    if type(candidate_evidence_schema_version) is not int or isinstance(
+        candidate_evidence_schema_version, bool
+    ):
+        return _scalar_invalid(_VR_INVALID_BINDING)
+    if candidate_evidence_schema_version != ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION:
+        return _scalar_invalid(_VR_INVALID_BINDING)
+    if not _is_lower_hex64(candidate_evidence_sha256):
+        return _scalar_invalid(_VR_INVALID_BINDING)
+
+    if type(market) is not str or market != _ARTIFACT_MARKET:
+        return _scalar_invalid(_VR_INVALID_FIELD)
+    if type(symbol) is not str or _SYMBOL6.fullmatch(symbol) is None:
+        return _scalar_invalid(_VR_INVALID_FIELD)
+
+    checked_parsed = _parse_aware(checked_at)
+    if checked_parsed is None:
+        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
+    evidence_parsed = _parse_aware(evidence_evaluated_at)
+    if evidence_parsed is None:
+        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
+    intent_parsed = _parse_aware(intent_declared_at)
+    if intent_parsed is None:
+        return _scalar_invalid(_VR_INVALID_TIMESTAMP)
+
+    if activation_authorized is not False:
+        return _scalar_invalid(_VR_INVALID_ACTIVATION_POSTURE)
+    if (
+        type(runtime_activation_outcome) is not str
+        or runtime_activation_outcome != _ARTIFACT_RUNTIME_ACTIVATION_OUTCOME
+    ):
+        return _scalar_invalid(_VR_INVALID_ACTIVATION_POSTURE)
+
+    if not _is_lower_hex64(eligibility_artifact_sha256):
+        return _scalar_invalid(_VR_INVALID_FIELD)
+
+    if not (evidence_parsed <= intent_parsed <= checked_parsed):
+        return _scalar_invalid(_VR_INVALID_TIME_ORDERING)
+
+    return OperatorApprovalConsumptionEligibilityArtifactScalarValidation(
+        validated=ValidatedOperatorApprovalConsumptionEligibilityArtifact(
+            schema_version=schema_version,
+            checked_at=checked_at,
+            approval_intent_schema_version=approval_intent_schema_version,
+            approval_intent_sha256=approval_intent_sha256,
+            candidate_evidence_schema_version=candidate_evidence_schema_version,
+            candidate_evidence_sha256=candidate_evidence_sha256,
+            market=market,
+            symbol=symbol,
+            evidence_evaluated_at=evidence_evaluated_at,
+            intent_declared_at=intent_declared_at,
+            activation_authorized=False,
+            runtime_activation_outcome=runtime_activation_outcome,
+            eligibility_artifact_sha256=eligibility_artifact_sha256,
+        ),
+        reason_code=None,
+    )
+
+
+def _scalar_invalid(
+    reason: str,
+) -> OperatorApprovalConsumptionEligibilityArtifactScalarValidation:
+    return OperatorApprovalConsumptionEligibilityArtifactScalarValidation(
+        validated=None, reason_code=reason
+    )
 
 
 def _parse_aware(value: object) -> datetime | None:
