@@ -160,12 +160,14 @@ Operator identity, signature, consumption, replay, or activation.
 Closes independent-review findings without adding file I/O or new scope:
 
 - **Dependency result invariants:** encoder validates `type(result) is
-  OperatorApprovalConsumptionEligibilityArtifactVerification` plus VALID/INVALID invariants and
-  metadata binding before emitting bytes; decoder validates `type(result) is
+  OperatorApprovalConsumptionEligibilityArtifactVerification` plus VALID/INVALID invariants,
+  expected schema-version constants, and metadata binding before emitting bytes; decoder validates
+  `type(result) is
   VerifiedOperatorApprovalConsumptionEligibilityArtifactResult` plus VALID snapshot exact-type before
   returning `VALID`.
 - **Canonical decode enforcement:** decoder requires input bytes to equal the canonical re-encode of
-  the verified snapshot; equivalent noncanonical JSON is rejected even when semantically/hash valid.
+  the verified snapshot; equivalent noncanonical JSON (pretty/reordered/whitespace/newline/**alternate
+  Unicode `\u00XX` escapes for ASCII content**) is rejected even when semantically/hash valid.
 - **Malformed dependency fail-closed:** None/object/dict/subclass/wrong-outcome/property-raising/
   invariant-violating verifier or snapshot results never produce `CREATED`/`VALID` and never leak raw
   dependency objects/paths/secrets.
@@ -173,7 +175,10 @@ Closes independent-review findings without adding file I/O or new scope:
 
 ## Out of scope (deferred)
 
-Actual file persistence / atomic writer / reader CLI / external-file input; actual approval
-consumption; consumed marker; replay/nonce/idempotency; signing/HMAC; Operator identity
+Actual approval consumption; consumed marker; replay/nonce/idempotency; signing/HMAC; Operator identity
 authentication; provenance verification; intent/evidence lookup; TTL/freshness re-evaluation;
 activation caller/token; `--run`; KIS/network; broker/order; operational DB write; daemon/scheduler.
+
+File persistence is implemented in RTM-7c.4x
+(`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`) — atomic
+create-new writer + read-only reader over this byte format; **no CLI** in that lane.

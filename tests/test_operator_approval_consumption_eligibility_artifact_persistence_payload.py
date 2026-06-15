@@ -21,14 +21,18 @@ from composition.operator_approval_consumption_eligibility import (
     assess_operator_approval_consumption_eligibility,
 )
 from composition.operator_approval_consumption_eligibility_artifact import (
+    OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
     build_operator_approval_consumption_eligibility_artifact,
     operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars,
 )
+from composition.activation_candidate_evidence import ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION
+from composition.operator_approval_intent import OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
     OperatorApprovalConsumptionEligibilityArtifactVerification as _Verif,
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome as _VerifOutcome,
     VerifiedOperatorApprovalConsumptionEligibilityArtifact,
     VerifiedOperatorApprovalConsumptionEligibilityArtifactResult as _SnapResult,
+    validate_operator_approval_consumption_eligibility_artifact_verification_invariants,
     verify_and_snapshot_operator_approval_consumption_eligibility_artifact,
 )
 import composition.operator_approval_consumption_eligibility_artifact_persistence_payload as mod
@@ -596,6 +600,116 @@ def test_encode_malformed_verifier_result_skips_canonical_dumps(
     monkeypatch.setattr(mod, "canonical_json_dumps", _dumps)
     encode(_valid_snapshot())
     assert calls == ["verify"]
+
+
+# --- carry-over H1: expected schema constant matrix ---
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"schema_version": 2}, id="artifact_schema"),
+        pytest.param({"approval_intent_schema_version": 2}, id="intent_schema"),
+        pytest.param({"candidate_evidence_schema_version": 3}, id="evidence_schema"),
+    ],
+)
+def test_verification_invariant_rejects_wrong_schema_constants(
+    overrides: dict[str, int],
+) -> None:
+    snap = _valid_snapshot()
+    result = _Verif(
+        outcome=_VerifOutcome.VALID,
+        schema_version=overrides.get("schema_version", snap.schema_version),
+        approval_intent_schema_version=overrides.get(
+            "approval_intent_schema_version", snap.approval_intent_schema_version
+        ),
+        approval_intent_sha256=snap.approval_intent_sha256,
+        candidate_evidence_schema_version=overrides.get(
+            "candidate_evidence_schema_version", snap.candidate_evidence_schema_version
+        ),
+        candidate_evidence_sha256=snap.candidate_evidence_sha256,
+        eligibility_artifact_sha256=snap.eligibility_artifact_sha256,
+        reason_codes=(),
+    )
+    assert validate_operator_approval_consumption_eligibility_artifact_verification_invariants(
+        result
+    ) is False
+
+
+def test_verification_invariant_accepts_expected_schema_constants() -> None:
+    snap = _valid_snapshot()
+    result = _Verif(
+        outcome=_VerifOutcome.VALID,
+        schema_version=OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
+        approval_intent_schema_version=OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION,
+        approval_intent_sha256=snap.approval_intent_sha256,
+        candidate_evidence_schema_version=ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+        candidate_evidence_sha256=snap.candidate_evidence_sha256,
+        eligibility_artifact_sha256=snap.eligibility_artifact_sha256,
+        reason_codes=(),
+    )
+    assert validate_operator_approval_consumption_eligibility_artifact_verification_invariants(
+        result
+    ) is True
+    assert (
+        OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION == 1
+        and OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION == 1
+        and ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION == 2
+    )
+
+
+def test_encode_impossible_valid_wrong_schema_constants_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = _valid_snapshot()
+    impossible = _Verif(
+        outcome=_VerifOutcome.VALID,
+        schema_version=2,
+        approval_intent_schema_version=2,
+        approval_intent_sha256=snap.approval_intent_sha256,
+        candidate_evidence_schema_version=3,
+        candidate_evidence_sha256=snap.candidate_evidence_sha256,
+        eligibility_artifact_sha256=snap.eligibility_artifact_sha256,
+        reason_codes=(),
+    )
+    monkeypatch.setattr(
+        mod, "verify_operator_approval_consumption_eligibility_artifact_payload", lambda _p: impossible
+    )
+    res = encode(_valid_snapshot())
+    assert res.outcome is EligibilityArtifactPersistencePayloadOutcome.INVALID
+    assert res.reason_codes == ("eligibility_persistence_payload_invalid_snapshot",)
+
+
+# --- carry-over H2: alternate Unicode escape noncanonical ---
+
+
+def test_decode_alternate_unicode_escape_noncanonical() -> None:
+    canonical = _valid_canonical_bytes()
+    parsed = json.loads(canonical)
+    assert parsed["market"] == "KR"
+    alternate = canonical.decode("utf-8").replace('"market":"KR"', '"market":"\\u004b\\u0052"').encode(
+        "utf-8"
+    )
+    assert alternate != canonical
+    assert json.loads(alternate) == parsed
+    dec = decode(alternate)
+    assert dec.outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID
+    assert dec.reason_codes == ("eligibility_persistence_payload_not_canonical",)
+    assert dec.snapshot is None
+
+
+def test_decode_symbol_unicode_escape_noncanonical() -> None:
+    canonical = _valid_canonical_bytes()
+    parsed = json.loads(canonical)
+    symbol = parsed["symbol"]
+    assert isinstance(symbol, str) and symbol.isascii()
+    escaped_symbol = "".join(f"\\u{ord(ch):04x}" for ch in symbol)
+    raw = canonical.decode("utf-8").replace(f'"symbol":"{symbol}"', f'"symbol":"{escaped_symbol}"')
+    alternate = raw.encode("utf-8")
+    assert alternate != canonical
+    assert json.loads(alternate) == parsed
+    dec = decode(alternate)
+    assert dec.reason_codes == ("eligibility_persistence_payload_not_canonical",)
 
 
 # --- decoder malformed snapshot-result matrix (P1-A) ---

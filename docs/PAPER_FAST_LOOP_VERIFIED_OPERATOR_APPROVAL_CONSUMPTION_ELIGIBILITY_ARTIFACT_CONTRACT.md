@@ -209,12 +209,16 @@ verification not started, verifier `0`), **INVALID** (verifier rejected the arti
 
 ## Still OPEN (unchanged posture)
 
-Artifact persistence / file output, actual approval consumption, consumed marker, replay / nonce /
+Actual approval consumption, consumed marker, replay / nonce /
 idempotency, signing / HMAC, Operator identity authentication, intent/evidence lookup, TTL /
 freshness re-evaluation, activation token/caller, `--run`, KIS/network, broker/order, operational
-DB write, schema migration/reconcile, daemon/scheduler, unattended pilot. A stdin/file CLI for
-external file input (vs. the 4v stdin-only mode) is deferred to the lane that introduces artifact
-persistence.
+DB write, schema migration/reconcile, daemon/scheduler, unattended pilot.
+
+## RTM-7c.4x file I/O lane
+
+Atomic create-new file publish + read-only file verification over the 4w canonical payload —
+explicit caller-provided path only, no CLI, no ``runtime/`` auto-selection. See
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`.
 
 ## Related contracts
 
@@ -222,5 +226,6 @@ persistence.
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_CONTRACT.md` — RTM-7c.4s eligibility preflight
 - `PAPER_FAST_LOOP_VERIFIED_OPERATOR_APPROVAL_INTENT_CONTRACT.md` — RTM-7c.4r verified intent snapshot (sibling verifier pattern)
 - `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md` — RTM-7c.4w canonical persistence-payload encode/decode (consumes this verified snapshot; API-only, no file I/O; decoder requires exact canonical bytes; shared result-invariant helpers exported from this module)
+- `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md` — RTM-7c.4x atomic create-new file writer + read-only file reader (explicit path only; no CLI)
 - `PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` — attended activation posture inventory
 - `PAPER_FAST_LOOP_COMPOSITION_CONTRACT.md` — composition root

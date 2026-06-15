@@ -20,12 +20,17 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from composition.activation_candidate_evidence import (
+    ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
+)
 from composition.operator_approval_consumption_eligibility_artifact import (
     OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FIELD_NAMES,
+    OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION,
     ValidatedOperatorApprovalConsumptionEligibilityArtifact,
     operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars,
     validate_operator_approval_consumption_eligibility_artifact_scalars_detailed,
 )
+from composition.operator_approval_intent import OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION
 from decision.canonical_json import payload_sha256
 
 __all__ = [
@@ -140,8 +145,12 @@ def validate_operator_approval_consumption_eligibility_artifact_verification_inv
             return False
         return (
             is_exact_int(result.schema_version)
+            and result.schema_version == OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_SCHEMA_VERSION
             and is_exact_int(result.approval_intent_schema_version)
+            and result.approval_intent_schema_version == OPERATOR_APPROVAL_INTENT_SCHEMA_VERSION
             and is_exact_int(result.candidate_evidence_schema_version)
+            and result.candidate_evidence_schema_version
+            == ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION
             and is_lower_hex64(result.approval_intent_sha256)
             and is_lower_hex64(result.candidate_evidence_sha256)
             and is_lower_hex64(result.eligibility_artifact_sha256)

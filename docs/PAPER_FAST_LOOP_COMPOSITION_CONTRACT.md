@@ -510,3 +510,11 @@ touch network/credentials/DB/clock and never activate runtime:
   hardening (malformed verifier result fails closed inside one defensive boundary; early-failure call
   counts) — see
   `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_CONTRACT.md`.
+- RTM-7c.4x `operator_approval_consumption_eligibility_artifact_file` — atomic **create-new** file
+  publish + read-only file verification over the 4w canonical payload. Explicit caller-provided
+  `pathlib.Path` only (no ``runtime/`` auto-selection, no CLI). Writer: encode → same-directory temp
+  (`O_EXCL`, `O_NOFOLLOW` when available, mode `0o600`) → write/fsync → `os.link` create-new →
+  parent fsync; no overwrite. Reader: read-only bounded I/O → persistence decoder exactly once.
+  Read/decode VALID = schema·semantic·hash consistency only — not authenticity, consumption,
+  replay, signing, or activation. TOCTOU/parent-symlink/platform limits documented. See
+  `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`.

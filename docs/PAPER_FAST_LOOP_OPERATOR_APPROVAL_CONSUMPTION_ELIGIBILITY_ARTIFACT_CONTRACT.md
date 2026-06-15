@@ -215,10 +215,16 @@ canonical bytes** — equivalent noncanonical JSON is `eligibility_persistence_p
 That lane is API-only — no file I/O — and decode `VALID` is consistency only, not
 persistence/authenticity/provenance.
 
+## RTM-7c.4x file I/O lane
+
+Actual atomic create-new file publish + read-only file verification is implemented in
+`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md` — explicit
+caller-provided path only; no CLI; no ``runtime/`` auto-selection; no consumption/replay/signing/
+activation.
+
 ## Still OPEN (unchanged posture)
 
 Approval consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity
-authentication, **actual** artifact persistence/file output (the 4w payload format is API-only;
-the atomic writer/reader CLI is a follow-on lane), intent/evidence lookup, TTL/freshness
-re-evaluation, activation caller/token, `--run`, KIS/network, broker/order, operational DB write,
-daemon/scheduler, unattended pilot, default runtime activation beyond constant NO-GO observation.
+authentication, intent/evidence lookup, TTL/freshness re-evaluation, activation caller/token,
+`--run`, KIS/network, broker/order, operational DB write, daemon/scheduler, unattended pilot,
+default runtime activation beyond constant NO-GO observation.

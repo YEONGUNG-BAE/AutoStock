@@ -27,6 +27,7 @@ from composition.operator_approval_consumption_eligibility_artifact import (
     build_operator_approval_consumption_eligibility_artifact,
     operator_approval_consumption_eligibility_artifact_hash_payload_from_scalars,
 )
+from composition.activation_candidate_evidence import ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION
 from decision.canonical_json import payload_sha256
 
 import test_operator_approval_consumption_eligibility as elig_helper
@@ -510,7 +511,7 @@ def _valid_verif(**kw: Any) -> _Verif:
         "schema_version": 1,
         "approval_intent_schema_version": 1,
         "approval_intent_sha256": _HEX,
-        "candidate_evidence_schema_version": 1,
+        "candidate_evidence_schema_version": ACTIVATION_CANDIDATE_EVIDENCE_SCHEMA_VERSION,
         "candidate_evidence_sha256": _HEX,
         "eligibility_artifact_sha256": _HEX,
         "reason_codes": (),
