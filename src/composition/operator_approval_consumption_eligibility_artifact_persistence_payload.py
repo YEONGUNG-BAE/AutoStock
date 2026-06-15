@@ -23,6 +23,7 @@ from enum import StrEnum
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
     OperatorApprovalConsumptionEligibilityArtifactVerificationOutcome,
     VerifiedOperatorApprovalConsumptionEligibilityArtifact,
+    is_lower_hex64,
     operator_approval_consumption_eligibility_artifact_verification_metadata_matches_payload,
     validate_operator_approval_consumption_eligibility_artifact_verification_invariants,
     validate_verified_operator_approval_consumption_eligibility_artifact_result_invariants,
@@ -43,6 +44,8 @@ __all__ = [
     "EligibilityArtifactPersistencePayloadVerificationOutcome",
     "decode_operator_approval_consumption_eligibility_artifact_payload",
     "encode_verified_operator_approval_consumption_eligibility_artifact",
+    "validate_eligibility_artifact_persistence_payload_decode_result_invariants",
+    "validate_eligibility_artifact_persistence_payload_encode_result_invariants",
 ]
 
 ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES = 1 << 20  # 1 MiB — untrusted bound
@@ -114,6 +117,65 @@ def encode_verified_operator_approval_consumption_eligibility_artifact(
         raise
     except Exception:
         return _encode_invalid()
+
+
+def validate_eligibility_artifact_persistence_payload_encode_result_invariants(
+    result: object,
+) -> bool:
+    """``encode_verified_...`` 반환값이 exact type과 CREATED/INVALID invariant를 만족하는지 검사한다."""
+
+    if type(result) is not EligibilityArtifactPersistencePayloadResult:
+        return False
+
+    outcome = result.outcome
+    reason_codes = result.reason_codes
+
+    if outcome is EligibilityArtifactPersistencePayloadOutcome.CREATED:
+        if type(reason_codes) is not tuple or reason_codes != ():
+            return False
+        if type(result.payload_bytes) is not bytes:
+            return False
+        payload_len = len(result.payload_bytes)
+        if payload_len <= 0 or payload_len > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
+            return False
+        return is_lower_hex64(result.eligibility_artifact_sha256)
+
+    if outcome is EligibilityArtifactPersistencePayloadOutcome.INVALID:
+        if type(reason_codes) is not tuple or len(reason_codes) != 1:
+            return False
+        if type(reason_codes[0]) is not str:
+            return False
+        if result.payload_bytes is not None:
+            return False
+        return result.eligibility_artifact_sha256 is None
+
+    return False
+
+
+def validate_eligibility_artifact_persistence_payload_decode_result_invariants(
+    result: object,
+) -> bool:
+    """``decode_...`` 반환값이 exact type과 VALID/INVALID invariant를 만족하는지 검사한다."""
+
+    if type(result) is not EligibilityArtifactPersistencePayloadVerification:
+        return False
+
+    outcome = result.outcome
+    reason_codes = result.reason_codes
+
+    if outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.VALID:
+        if type(reason_codes) is not tuple or reason_codes != ():
+            return False
+        return type(result.snapshot) is VerifiedOperatorApprovalConsumptionEligibilityArtifact
+
+    if outcome is EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID:
+        if type(reason_codes) is not tuple or len(reason_codes) != 1:
+            return False
+        if type(reason_codes[0]) is not str:
+            return False
+        return result.snapshot is None
+
+    return False
 
 
 def decode_operator_approval_consumption_eligibility_artifact_payload(

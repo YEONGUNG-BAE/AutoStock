@@ -28,6 +28,8 @@ from composition.operator_approval_consumption_eligibility_artifact_persistence_
     EligibilityArtifactPersistencePayloadVerificationOutcome,
     decode_operator_approval_consumption_eligibility_artifact_payload,
     encode_verified_operator_approval_consumption_eligibility_artifact,
+    validate_eligibility_artifact_persistence_payload_decode_result_invariants,
+    validate_eligibility_artifact_persistence_payload_encode_result_invariants,
 )
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
     VerifiedOperatorApprovalConsumptionEligibilityArtifact,
@@ -44,6 +46,7 @@ __all__ = [
 
 _FILE_MODE = 0o600
 _TEMP_PREFIX = ".tmp_eligibility_artifact_"
+_CONCRETE_PATH_TYPE = type(Path())
 
 _REASON_INVALID_INPUT = "eligibility_artifact_file_invalid_input"
 _REASON_INVALID_SNAPSHOT = "eligibility_artifact_file_invalid_snapshot"
@@ -55,6 +58,7 @@ _REASON_TEMP_CREATE_FAILED = "eligibility_artifact_file_temp_create_failed"
 _REASON_WRITE_FAILED = "eligibility_artifact_file_write_failed"
 _REASON_PUBLISH_FAILED = "eligibility_artifact_file_publish_failed"
 _REASON_SYNC_FAILED = "eligibility_artifact_file_sync_failed"
+_REASON_TEMP_CLEANUP_FAILED = "eligibility_artifact_file_temp_cleanup_failed"
 _REASON_MISSING = "eligibility_artifact_file_missing"
 _REASON_NOT_REGULAR = "eligibility_artifact_file_not_regular"
 _REASON_TOO_LARGE = "eligibility_artifact_file_too_large"
@@ -63,6 +67,7 @@ _REASON_READ_FAILED = "eligibility_artifact_file_read_failed"
 
 class EligibilityArtifactFileWriteOutcome(StrEnum):
     WRITTEN = "written"
+    PUBLISHED_INCOMPLETE = "published_incomplete"
     NOT_WRITTEN = "not_written"
     INVALID = "invalid"
 
@@ -124,7 +129,19 @@ def read_operator_approval_consumption_eligibility_artifact_file(
 
 
 def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileWriteResult:
-    encode_result = encode_verified_operator_approval_consumption_eligibility_artifact(snapshot)
+    try:
+        encode_result = encode_verified_operator_approval_consumption_eligibility_artifact(snapshot)
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+
+    if not validate_eligibility_artifact_persistence_payload_encode_result_invariants(encode_result):
+        return EligibilityArtifactFileWriteResult(
+            outcome=EligibilityArtifactFileWriteOutcome.INVALID,
+            reason_codes=(_REASON_INVALID_SNAPSHOT,),
+            eligibility_artifact_sha256=None,
+            bytes_written=None,
+        )
+
     if encode_result.outcome is not EligibilityArtifactPersistencePayloadOutcome.CREATED:
         return EligibilityArtifactFileWriteResult(
             outcome=EligibilityArtifactFileWriteOutcome.INVALID,
@@ -137,6 +154,7 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     assert payload_bytes is not None
     digest = encode_result.eligibility_artifact_sha256
     assert digest is not None
+    bytes_written = len(payload_bytes)
 
     path_error = _validate_exact_path(destination)
     if path_error is not None:
@@ -155,59 +173,147 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
 
     temp_path = dest.parent / f"{_TEMP_PREFIX}{secrets.token_hex(16)}"
     temp_fd: int | None = None
-    published = False
-    primary_reason: str | None = None
+    destination_published = False
+    temp_cleanup_complete = False
+    parent_sync_confirmed = False
+    primary_reasons: list[str] = []
+
+    def _attempt_temp_cleanup() -> None:
+        nonlocal temp_cleanup_complete
+        if temp_cleanup_complete:
+            return
+        if not temp_path.exists():
+            temp_cleanup_complete = True
+            return
+        try:
+            os.unlink(temp_path)
+            temp_cleanup_complete = True
+        except OSError:
+            temp_cleanup_complete = False
+
+    def _build_reason_codes() -> tuple[str, ...]:
+        reasons: list[str] = []
+        if destination_published:
+            reasons.extend(primary_reasons)
+            if not temp_cleanup_complete:
+                reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+            if not parent_sync_confirmed:
+                reasons.append(_REASON_SYNC_FAILED)
+        else:
+            reasons.extend(primary_reasons)
+            if not temp_cleanup_complete:
+                reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for reason in reasons:
+            if reason not in seen:
+                seen.add(reason)
+                deduped.append(reason)
+        return tuple(deduped)
+
+    def _finalize() -> EligibilityArtifactFileWriteResult:
+        if destination_published:
+            reason_codes = _build_reason_codes()
+            if (
+                temp_cleanup_complete
+                and parent_sync_confirmed
+                and not primary_reasons
+            ):
+                return EligibilityArtifactFileWriteResult(
+                    outcome=EligibilityArtifactFileWriteOutcome.WRITTEN,
+                    reason_codes=(),
+                    eligibility_artifact_sha256=digest,
+                    bytes_written=bytes_written,
+                )
+            return EligibilityArtifactFileWriteResult(
+                outcome=EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE,
+                reason_codes=reason_codes,
+                eligibility_artifact_sha256=digest,
+                bytes_written=bytes_written,
+            )
+        return EligibilityArtifactFileWriteResult(
+            outcome=EligibilityArtifactFileWriteOutcome.NOT_WRITTEN,
+            reason_codes=_build_reason_codes(),
+            eligibility_artifact_sha256=None,
+            bytes_written=None,
+        )
 
     try:
         temp_fd = _open_exclusive_temp(temp_path)
         if temp_fd is None:
-            return _write_not_written(_REASON_TEMP_CREATE_FAILED)
+            primary_reasons.append(_REASON_TEMP_CREATE_FAILED)
+            return _finalize()
 
         if not _write_all(temp_fd, payload_bytes):
-            primary_reason = _REASON_WRITE_FAILED
-            return _write_not_written(primary_reason)
+            primary_reasons.append(_REASON_WRITE_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
 
         if not _fsync_fd(temp_fd):
-            primary_reason = _REASON_SYNC_FAILED
-            return _write_not_written(primary_reason)
+            primary_reasons.append(_REASON_SYNC_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
 
-        os.close(temp_fd)
-        temp_fd = None
+        try:
+            temp_stat = os.fstat(temp_fd)
+        except OSError:
+            primary_reasons.append(_REASON_PUBLISH_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
 
         try:
             os.link(temp_path, dest)
         except OSError as exc:
             if exc.errno in (errno.EEXIST, errno.ENOTDIR):
-                primary_reason = _REASON_DESTINATION_EXISTS
+                primary_reasons.append(_REASON_DESTINATION_EXISTS)
             else:
-                primary_reason = _REASON_PUBLISH_FAILED
-            return _write_not_written(primary_reason)
+                primary_reasons.append(_REASON_PUBLISH_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
 
-        published = True
+        destination_published = True
 
         try:
-            os.unlink(temp_path)
+            dest_stat = os.lstat(dest)
         except OSError:
-            # publish 성공 후 temp unlink 실패는 destination을 변경하지 않는다.
+            primary_reasons.append(_REASON_PUBLISH_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
+
+        if not stat.S_ISREG(dest_stat.st_mode):
+            primary_reasons.append(_REASON_DESTINATION_NOT_REGULAR)
+            _attempt_temp_cleanup()
+            return _finalize()
+
+        if (
+            dest_stat.st_dev != temp_stat.st_dev
+            or dest_stat.st_ino != temp_stat.st_ino
+        ):
+            primary_reasons.append(_REASON_PUBLISH_FAILED)
+            _attempt_temp_cleanup()
+            return _finalize()
+
+        try:
+            os.close(temp_fd)
+        except OSError:
             pass
+        temp_fd = None
+
+        _attempt_temp_cleanup()
 
         if not _fsync_directory(dest.parent):
-            primary_reason = _REASON_SYNC_FAILED
-            return _write_not_written(primary_reason)
+            parent_sync_confirmed = False
+        else:
+            parent_sync_confirmed = True
 
-        return EligibilityArtifactFileWriteResult(
-            outcome=EligibilityArtifactFileWriteOutcome.WRITTEN,
-            reason_codes=(),
-            eligibility_artifact_sha256=digest,
-            bytes_written=len(payload_bytes),
-        )
+        return _finalize()
     finally:
         if temp_fd is not None:
             try:
                 os.close(temp_fd)
             except OSError:
                 pass
-        if not published and temp_path.exists():
+        if not destination_published and temp_path.exists():
             try:
                 os.unlink(temp_path)
             except OSError:
@@ -223,41 +329,67 @@ def _read(*, source: object) -> EligibilityArtifactFileReadResult:
     assert isinstance(src, Path)
 
     try:
-        st = os.lstat(src)
+        lst = os.lstat(src)
     except FileNotFoundError:
         return _read_invalid(_REASON_MISSING)
     except OSError:
         return _read_invalid(_REASON_READ_FAILED)
 
-    if stat.S_ISLNK(st.st_mode):
+    if stat.S_ISLNK(lst.st_mode):
         return _read_invalid(_REASON_NOT_REGULAR)
-    if stat.S_ISDIR(st.st_mode):
+    if stat.S_ISDIR(lst.st_mode):
         return _read_invalid(_REASON_NOT_REGULAR)
-    if not stat.S_ISREG(st.st_mode):
+    if not stat.S_ISREG(lst.st_mode):
         return _read_invalid(_REASON_NOT_REGULAR)
 
-    if st.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
+    if lst.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
         return _read_invalid(_REASON_TOO_LARGE)
 
     fd: int | None = None
+    payload_bytes: bytes | None = None
     try:
         fd = _open_readonly_no_follow(src)
         if fd is None:
             return _read_invalid(_REASON_READ_FAILED)
 
         try:
-            fst = os.fstat(fd)
+            fst_before = os.fstat(fd)
         except OSError:
             return _read_invalid(_REASON_READ_FAILED)
 
-        if not stat.S_ISREG(fst.st_mode):
+        if (
+            fst_before.st_dev != lst.st_dev
+            or fst_before.st_ino != lst.st_ino
+        ):
+            return _read_invalid(_REASON_READ_FAILED)
+
+        if not stat.S_ISREG(fst_before.st_mode):
             return _read_invalid(_REASON_NOT_REGULAR)
 
-        if fst.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
+        if fst_before.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
             return _read_invalid(_REASON_TOO_LARGE)
 
-        payload_bytes = _read_exact(fd, fst.st_size)
+        payload_bytes = _read_exact(fd, fst_before.st_size)
         if payload_bytes is None:
+            return _read_invalid(_REASON_READ_FAILED)
+
+        try:
+            extra = os.read(fd, 1)
+        except OSError:
+            return _read_invalid(_REASON_READ_FAILED)
+        if extra != b"":
+            return _read_invalid(_REASON_READ_FAILED)
+
+        try:
+            fst_after = os.fstat(fd)
+        except OSError:
+            return _read_invalid(_REASON_READ_FAILED)
+
+        if (
+            fst_after.st_dev != fst_before.st_dev
+            or fst_after.st_ino != fst_before.st_ino
+            or fst_after.st_size != fst_before.st_size
+        ):
             return _read_invalid(_REASON_READ_FAILED)
     finally:
         if fd is not None:
@@ -266,9 +398,20 @@ def _read(*, source: object) -> EligibilityArtifactFileReadResult:
             except OSError:
                 pass
 
-    decode_result = decode_operator_approval_consumption_eligibility_artifact_payload(
-        payload_bytes
-    )
+    assert payload_bytes is not None
+
+    try:
+        decode_result = decode_operator_approval_consumption_eligibility_artifact_payload(
+            payload_bytes
+        )
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+
+    if not validate_eligibility_artifact_persistence_payload_decode_result_invariants(
+        decode_result
+    ):
+        return _read_invalid(_REASON_READ_FAILED)
+
     if (
         decode_result.outcome
         is EligibilityArtifactPersistencePayloadVerificationOutcome.VALID
@@ -287,15 +430,9 @@ def _read(*, source: object) -> EligibilityArtifactFileReadResult:
 
 
 def _validate_exact_path(value: object) -> str | None:
-    if not isinstance(value, Path):
+    if type(value) is not _CONCRETE_PATH_TYPE:
         return _REASON_INVALID_INPUT
-    path_type = type(value)
-    if path_type is Path:
-        return None
-    # macOS/Linux/Windows에서 ``Path(...)``가 반환하는 concrete 구현만 허용한다(사용자 subclass 거부).
-    if path_type.__name__ in ("PosixPath", "WindowsPath") and issubclass(path_type, Path):
-        return None
-    return _REASON_INVALID_INPUT
+    return None
 
 
 def _validate_existing_parent_directory(parent: Path) -> str | None:

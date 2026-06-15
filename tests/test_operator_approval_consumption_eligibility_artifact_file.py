@@ -13,6 +13,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,10 @@ from composition.operator_approval_consumption_eligibility_artifact_file import 
     write_verified_operator_approval_consumption_eligibility_artifact_create_new as write_file,
 )
 from composition.operator_approval_consumption_eligibility_artifact_persistence_payload import (
+    EligibilityArtifactPersistencePayloadOutcome,
+    EligibilityArtifactPersistencePayloadResult,
+    EligibilityArtifactPersistencePayloadVerification,
+    EligibilityArtifactPersistencePayloadVerificationOutcome,
     encode_verified_operator_approval_consumption_eligibility_artifact as encode,
 )
 from composition.operator_approval_consumption_eligibility_artifact_verifier import (
@@ -39,6 +44,7 @@ from composition.operator_approval_consumption_eligibility_artifact_verifier imp
     verify_and_snapshot_operator_approval_consumption_eligibility_artifact,
 )
 import composition.operator_approval_consumption_eligibility_artifact_file as file_mod
+import composition.operator_approval_consumption_eligibility_artifact_persistence_payload as payload_mod
 
 import test_operator_approval_consumption_eligibility as elig_helper
 
@@ -116,6 +122,31 @@ def test_write_path_subclass_rejected(tmp_path: Path) -> None:
         pass
 
     res = write_file(snapshot=_valid_snapshot(), destination=_Sub(tmp_path / "x.json"))
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_input",)
+
+
+def test_write_path_spoofed_posix_name_rejected(tmp_path: Path) -> None:
+    class PosixPath(type(tmp_path)):  # noqa: N801 — deliberate name spoof
+        pass
+
+    res = write_file(snapshot=_valid_snapshot(), destination=PosixPath(tmp_path / "x.json"))
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_input",)
+
+
+def test_write_path_custom_fspath_rejected(tmp_path: Path) -> None:
+    class _FakePath(type(tmp_path)):
+        def __fspath__(self) -> str:
+            return str(tmp_path / "x.json")
+
+    res = write_file(snapshot=_valid_snapshot(), destination=_FakePath(tmp_path / "x.json"))
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_input",)
+
+
+def test_read_path_spoofed_posix_name_rejected(tmp_path: Path) -> None:
+    class PosixPath(type(tmp_path)):  # noqa: N801
+        pass
+
+    res = read_file(source=PosixPath(tmp_path / "x.json"))
     assert res.reason_codes == ("eligibility_artifact_file_invalid_input",)
 
 
@@ -228,7 +259,38 @@ def test_write_fsync_failure_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(file_mod.os, "fsync", _fail_file_fsync)
     res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
     assert res.reason_codes == ("eligibility_artifact_file_sync_failed",)
+    assert not dest.exists()
+
+
+def test_write_fsync_failure_plus_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    fsync_calls = {"n": 0}
+
+    def _fail_file_fsync(fd: int) -> None:
+        fsync_calls["n"] += 1
+        if fsync_calls["n"] == 1:
+            raise OSError("injected")
+        real_fsync(fd)
+
+    def _fail_temp_unlink(path: str | bytes) -> None:
+        if str(path).startswith(str(tmp_path / file_mod._TEMP_PREFIX)):
+            raise OSError("injected cleanup")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "fsync", _fail_file_fsync)
+    monkeypatch.setattr(file_mod.os, "unlink", _fail_temp_unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == (
+        "eligibility_artifact_file_sync_failed",
+        "eligibility_artifact_file_temp_cleanup_failed",
+    )
     assert not dest.exists()
 
 
@@ -247,15 +309,118 @@ def test_write_link_failure_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_write_parent_fsync_failure_after_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dest = tmp_path / "artifact.json"
+    snap = _valid_snapshot()
 
     def _fail_dir(_directory: Path) -> bool:
         return False
 
     monkeypatch.setattr(file_mod, "_fsync_directory", _fail_dir)
-    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    res = write_file(snapshot=snap, destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
     assert res.reason_codes == ("eligibility_artifact_file_sync_failed",)
+    assert res.eligibility_artifact_sha256 == snap.eligibility_artifact_sha256
+    assert res.bytes_written == len(encode(snap).payload_bytes)
     assert dest.exists()
-    assert dest.read_bytes() == encode(_valid_snapshot()).payload_bytes
+    assert dest.read_bytes() == encode(snap).payload_bytes
+
+
+def test_write_post_publish_unlink_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "artifact.json"
+    snap = _valid_snapshot()
+    real_unlink = os.unlink
+
+    def _fail_temp_unlink(path: str | bytes) -> None:
+        if str(path).startswith(str(tmp_path / file_mod._TEMP_PREFIX)):
+            raise OSError("injected")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "unlink", _fail_temp_unlink)
+    res = write_file(snapshot=snap, destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == ("eligibility_artifact_file_temp_cleanup_failed",)
+    assert dest.exists()
+    assert dest.read_bytes() == encode(snap).payload_bytes
+    assert any(p.name.startswith(file_mod._TEMP_PREFIX) for p in tmp_path.iterdir())
+
+
+def test_write_post_publish_unlink_and_fsync_failure_ordered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    snap = _valid_snapshot()
+    real_unlink = os.unlink
+
+    def _fail_temp_unlink(path: str | bytes) -> None:
+        if str(path).startswith(str(tmp_path / file_mod._TEMP_PREFIX)):
+            raise OSError("injected")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "unlink", _fail_temp_unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda _d: False)
+    res = write_file(snapshot=snap, destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == (
+        "eligibility_artifact_file_temp_cleanup_failed",
+        "eligibility_artifact_file_sync_failed",
+    )
+    assert dest.exists()
+
+
+def test_write_pre_publish_failure_plus_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_unlink = os.unlink
+
+    def _fail_write(_fd: int, _data: memoryview | bytes) -> int:
+        raise OSError("injected")
+
+    def _fail_temp_unlink(path: str | bytes) -> None:
+        if str(path).startswith(str(tmp_path / file_mod._TEMP_PREFIX)):
+            raise OSError("injected cleanup")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "write", _fail_write)
+    monkeypatch.setattr(file_mod.os, "unlink", _fail_temp_unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == (
+        "eligibility_artifact_file_write_failed",
+        "eligibility_artifact_file_temp_cleanup_failed",
+    )
+    assert not dest.exists()
+
+
+def test_write_link_failure_plus_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_unlink = os.unlink
+
+    def _fail_link(_src: str | bytes, _dst: str | bytes) -> None:
+        raise OSError("injected")
+
+    def _fail_temp_unlink(path: str | bytes) -> None:
+        if str(path).startswith(str(tmp_path / file_mod._TEMP_PREFIX)):
+            raise OSError("injected cleanup")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _fail_link)
+    monkeypatch.setattr(file_mod.os, "unlink", _fail_temp_unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == (
+        "eligibility_artifact_file_publish_failed",
+        "eligibility_artifact_file_temp_cleanup_failed",
+    )
+    assert not dest.exists()
+
+
+def test_write_normal_no_temp_residue(tmp_path: Path) -> None:
+    dest = tmp_path / "artifact.json"
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.WRITTEN
+    assert not any(p.name.startswith(file_mod._TEMP_PREFIX) for p in tmp_path.iterdir())
 
 
 def test_write_existing_destination_unchanged_on_publish_race(
@@ -405,6 +570,141 @@ def test_read_size_changes_after_open(tmp_path: Path, monkeypatch: pytest.Monkey
     assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
 
 
+def test_read_extra_trailing_byte(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "artifact.json"
+    payload = encode(_valid_snapshot()).payload_bytes
+    dest.write_bytes(payload + b"x")
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def _underreport_fstat(fd: int) -> os.stat_result:
+        calls["n"] += 1
+        st = real_fstat(fd)
+        if calls["n"] == 1:
+            return os.stat_result(
+                (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+                 len(payload), st.st_atime, st.st_mtime, st.st_ctime)
+            )
+        return st
+
+    monkeypatch.setattr(file_mod.os, "fstat", _underreport_fstat)
+    res = read_file(source=dest)
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+
+
+def test_read_lstat_fstat_identity_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_fstat = os.fstat
+
+    def _mismatch_fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        return os.stat_result(
+            (st.st_mode, st.st_ino + 1, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+             st.st_size, st.st_atime, st.st_mtime, st.st_ctime)
+        )
+
+    monkeypatch.setattr(file_mod.os, "fstat", _mismatch_fstat)
+    res = read_file(source=dest)
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+
+
+def test_read_append_after_fstat_before_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "artifact.json"
+    payload = encode(_valid_snapshot()).payload_bytes
+    dest.write_bytes(payload)
+    real_read = os.read
+    calls = {"n": 0}
+
+    def _append_on_second_read(fd: int, n: int) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            with open(dest, "ab") as fh:
+                fh.write(b"x")
+        return real_read(fd, n)
+
+    monkeypatch.setattr(file_mod.os, "read", _append_on_second_read)
+    res = read_file(source=dest)
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+
+
+def test_read_fstat_size_change_after_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "artifact.json"
+    payload = encode(_valid_snapshot()).payload_bytes
+    dest.write_bytes(payload)
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def _grow_after_read(fd: int) -> os.stat_result:
+        calls["n"] += 1
+        st = real_fstat(fd)
+        if calls["n"] >= 2:
+            return os.stat_result(
+                (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+                 st.st_size + 1, st.st_atime, st.st_mtime, st.st_ctime)
+            )
+        return st
+
+    monkeypatch.setattr(file_mod.os, "fstat", _grow_after_read)
+    res = read_file(source=dest)
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+
+
+def test_read_decoder_not_called_on_unstable_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    payload = encode(_valid_snapshot()).payload_bytes
+    dest.write_bytes(payload + b"x")
+    real_fstat = os.fstat
+    calls_decode: list[str] = []
+    fstat_calls = {"n": 0}
+
+    def _underreport_fstat(fd: int) -> os.stat_result:
+        fstat_calls["n"] += 1
+        st = real_fstat(fd)
+        if fstat_calls["n"] == 1:
+            return os.stat_result(
+                (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+                 len(payload), st.st_atime, st.st_mtime, st.st_ctime)
+            )
+        return st
+
+    def _dec(_b: object) -> object:
+        calls_decode.append("decode")
+        return payload_mod.decode_operator_approval_consumption_eligibility_artifact_payload(_b)
+
+    monkeypatch.setattr(file_mod.os, "fstat", _underreport_fstat)
+    monkeypatch.setattr(
+        file_mod,
+        "decode_operator_approval_consumption_eligibility_artifact_payload",
+        _dec,
+    )
+    read_file(source=dest)
+    assert calls_decode == []
+
+
+def test_read_decoder_called_once_on_stable_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    write_file(snapshot=_valid_snapshot(), destination=dest)
+    calls: list[str] = []
+    real_decode = file_mod.decode_operator_approval_consumption_eligibility_artifact_payload
+
+    def _dec(b: object) -> object:
+        calls.append("decode")
+        return real_decode(b)
+
+    monkeypatch.setattr(
+        file_mod,
+        "decode_operator_approval_consumption_eligibility_artifact_payload",
+        _dec,
+    )
+    read_file(source=dest)
+    assert calls == ["decode"]
+
+
 def test_read_does_not_modify_source(tmp_path: Path) -> None:
     dest = tmp_path / "artifact.json"
     snap = _valid_snapshot()
@@ -509,3 +809,177 @@ def test_run_exit_2_before_file_io() -> None:
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     assert cli.main(["--run"]) == 2
+
+
+# --- dependency result invariants (encoder) ---
+
+
+class _BadEncodeResult:
+    """Property getter가 raise하는 malformed encoder result."""
+
+    outcome = EligibilityArtifactPersistencePayloadOutcome.CREATED
+    reason_codes = ()
+    eligibility_artifact_sha256 = "abc"
+
+    @property
+    def payload_bytes(self) -> bytes:
+        raise RuntimeError("SECRET_payload")
+
+
+def _snap() -> VerifiedOperatorApprovalConsumptionEligibilityArtifact:
+    return _valid_snapshot()
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        None,
+        object(),
+        {},
+        SimpleNamespace(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=b"x",
+            eligibility_artifact_sha256="abc",
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=("eligibility_persistence_payload_invalid_snapshot",),
+            payload_bytes=b"x",
+            eligibility_artifact_sha256=_snap().eligibility_artifact_sha256,
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=None,
+            eligibility_artifact_sha256=_snap().eligibility_artifact_sha256,
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=b"",
+            eligibility_artifact_sha256=_snap().eligibility_artifact_sha256,
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=b"x" * (payload_mod.ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES + 1),
+            eligibility_artifact_sha256=_snap().eligibility_artifact_sha256,
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=b"x",
+            eligibility_artifact_sha256=None,
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.CREATED,
+            reason_codes=(),
+            payload_bytes=b"x",
+            eligibility_artifact_sha256="NOT_HEX64",
+        ),
+        EligibilityArtifactPersistencePayloadResult(
+            outcome=EligibilityArtifactPersistencePayloadOutcome.INVALID,
+            reason_codes=("eligibility_persistence_payload_invalid_snapshot",),
+            payload_bytes=b"x",
+            eligibility_artifact_sha256="abc",
+        ),
+        _BadEncodeResult(),
+    ],
+)
+def test_write_malformed_encoder_result_invalid_no_fs(
+    bad_result: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    before = _count_files(tmp_path)
+
+    def _bad(_s: object) -> object:
+        return bad_result
+
+    monkeypatch.setattr(
+        file_mod,
+        "encode_verified_operator_approval_consumption_eligibility_artifact",
+        _bad,
+    )
+    res = write_file(snapshot=_snap(), destination=dest)
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_snapshot",)
+    assert not dest.exists()
+    assert _count_files(tmp_path) == before
+
+
+@pytest.mark.parametrize("exc", [MemoryError, KeyboardInterrupt, SystemExit])
+def test_write_malformed_encoder_fatal_propagates(
+    monkeypatch: pytest.MonkeyPatch, exc: type[BaseException]
+) -> None:
+    def _raise(_s: object) -> object:
+        raise exc()
+
+    monkeypatch.setattr(
+        file_mod,
+        "encode_verified_operator_approval_consumption_eligibility_artifact",
+        _raise,
+    )
+    with pytest.raises(exc):
+        write_file(snapshot=_snap(), destination=Path("x.json"))
+
+
+# --- dependency result invariants (decoder) ---
+
+
+class _BadDecodeResult:
+    outcome = EligibilityArtifactPersistencePayloadVerificationOutcome.VALID
+    reason_codes = ()
+
+    @property
+    def snapshot(self) -> object:
+        raise RuntimeError("SECRET_snapshot")
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        None,
+        object(),
+        {},
+        SimpleNamespace(
+            outcome=EligibilityArtifactPersistencePayloadVerificationOutcome.VALID,
+            reason_codes=(),
+            snapshot=_snap(),
+        ),
+        EligibilityArtifactPersistencePayloadVerification(
+            outcome=EligibilityArtifactPersistencePayloadVerificationOutcome.VALID,
+            reason_codes=("eligibility_persistence_payload_not_bytes",),
+            snapshot=_snap(),
+        ),
+        EligibilityArtifactPersistencePayloadVerification(
+            outcome=EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID,
+            reason_codes=("eligibility_persistence_payload_not_bytes",),
+            snapshot=_snap(),
+        ),
+        EligibilityArtifactPersistencePayloadVerification(
+            outcome=EligibilityArtifactPersistencePayloadVerificationOutcome.INVALID,
+            reason_codes=(),
+            snapshot=None,
+        ),
+        _BadDecodeResult(),
+    ],
+)
+def test_read_malformed_decoder_result_read_failed(
+    bad_result: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    write_file(snapshot=_snap(), destination=dest)
+
+    def _bad(_b: object) -> object:
+        return bad_result
+
+    monkeypatch.setattr(
+        file_mod,
+        "decode_operator_approval_consumption_eligibility_artifact_payload",
+        _bad,
+    )
+    res = read_file(source=dest)
+    assert res.outcome is EligibilityArtifactFileReadOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+    assert res.snapshot is None

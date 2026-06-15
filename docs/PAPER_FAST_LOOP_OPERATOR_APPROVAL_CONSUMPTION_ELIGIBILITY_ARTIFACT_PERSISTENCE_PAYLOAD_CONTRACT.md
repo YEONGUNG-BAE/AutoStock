@@ -154,6 +154,13 @@ Operator identity, signature, consumption, replay, or activation.
 - Shared result validators exported from `composition.operator_approval_consumption_eligibility_artifact_verifier`
   are reused by the persistence encoder, persistence decoder, and the 4v verify CLI (no duplicated rules;
   `composition` does not import `ops`).
+- **RTM-7c.4x file-lane dependency helpers:** `validate_eligibility_artifact_persistence_payload_encode_result_invariants`
+  and `validate_eligibility_artifact_persistence_payload_decode_result_invariants` exported from this
+  module for the 4x file writer/reader. Encoder invariant: exact
+  `EligibilityArtifactPersistencePayloadResult`; `CREATED` ⇒ empty reasons, exact `bytes`, bounded
+  length, lowercase hex64 digest; `INVALID` ⇒ one string reason, null bytes/digest. Decoder invariant:
+  exact `EligibilityArtifactPersistencePayloadVerification`; `VALID` ⇒ empty reasons, exact verified
+  snapshot type; `INVALID` ⇒ one string reason, null snapshot.
 
 ## RTM-7c.4w closure — result-invariant and canonical-decode
 
