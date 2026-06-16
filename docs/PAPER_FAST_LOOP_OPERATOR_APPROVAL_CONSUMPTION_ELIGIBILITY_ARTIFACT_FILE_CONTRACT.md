@@ -76,9 +76,11 @@ Canonical reason order (deduped, no duplicates):
 
 Processing order:
 
-1. persistence encode + encode-result invariant validation (malformed encode result or non-`CREATED`
-   ⇒ `INVALID` / `invalid_snapshot`, filesystem access **0**)
-2. exact concrete `Path` type validation (`type(value) is type(Path())` only)
+1. exact concrete `Path` type validation (`type(value) is type(Path())` only); invalid destination
+   input returns `INVALID` and calls the encoder **0**
+2. persistence encode + encode-result invariant validation (ordinary encoder exception, malformed
+   encode result, or non-`CREATED` ⇒ `INVALID` / `invalid_snapshot`, filesystem access **0**;
+   `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised)
 3. parent exists and is a directory (writer does **not** create directories)
 4. destination create-new gate (`lstat`, no symlink follow on final component)
 5. same-directory temp create (`O_CREAT | O_EXCL`, `O_NOFOLLOW` when available, mode `0o600`)
@@ -87,8 +89,10 @@ Processing order:
 8. `fstat(temp_fd)` — temp identity capture (temp fd kept open until after publish)
 9. atomic publish: `os.link(temp, destination)` (create-new — no overwrite)
 10. `lstat(destination)` — dev/ino must match temp `fstat`; destination must be regular file
-11. close temp fd with exactly two bounded attempts; temp `unlink` with exactly two bounded attempts
-    (failure recorded, not swallowed; successful retry produces no failure reason)
+11. close temp fd exactly once; ordinary close failure makes close status uncertain and records
+    `eligibility_artifact_file_temp_close_failed` (no same-integer retry, no no-leak claim). Temp
+    `unlink` uses exactly two bounded attempts (failure recorded, not swallowed; successful retry
+    produces no failure reason)
 12. parent-directory `fsync` after every published path, including post-publish identity defects
     (failure ⇒ `PUBLISHED_INCOMPLETE`, destination unchanged)
 13. result from explicit publication-state locals (`temp_created`, `temp_fd_open`,
@@ -145,8 +149,9 @@ Processing:
 7. read exactly `fstat_before.st_size` bytes (short read ⇒ fail-closed)
 8. 1-byte EOF probe — must be `b""` (extra trailing byte / growth ⇒ fail-closed)
 9. `fstat_after` — dev/ino/size unchanged vs `fstat_before`
-10. close
-11. persistence decoder exactly once; malformed decoder dependency result ⇒
+10. close; close ordinary failure ⇒ `INVALID` / `eligibility_artifact_file_read_failed` before
+    decoder, close fatal re-raised
+11. persistence decoder exactly once after close is confirmed; malformed decoder dependency result ⇒
     `eligibility_artifact_file_read_failed` (never `VALID`)
 
 Reader creates/modifies/deletes **nothing** — no sidecar/temp/reconcile files.
@@ -187,7 +192,17 @@ parent-sync reason.
 
 Ordinary filesystem exceptions map to stable outcomes — no raw path/errno/exception in reason codes.
 Post-publish ordinary exceptions preserve publication state and return `PUBLISHED_INCOMPLETE`, never
-`NOT_WRITTEN`. `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised.
+`NOT_WRITTEN`. If a temp-create helper creates a temp path then raises, the writer checks the
+post-condition and unlinks any observed temp residue before returning `NOT_WRITTEN` /
+`temp_create_failed`. If a publish helper creates the hard link then raises, the writer compares
+destination `lstat` with temp `fstat`; a match is recovered as `destination_published=True`,
+followed by temp cleanup and parent sync, and the result is `PUBLISHED_INCOMPLETE` /
+`publish_failed`.
+
+`MemoryError` / `KeyboardInterrupt` / `SystemExit` from the operation phase are re-raised as the
+original fatal. When temp or destination state already exists, the writer first runs bounded
+best-effort close/unlink and published-parent sync; ordinary cleanup failures and cleanup-time fatal
+exceptions do not replace the original operation fatal.
 
 ## Dependency result invariants
 
@@ -269,7 +284,9 @@ activation:
   `eligibility_artifact_file_temp_create_failed` only; `temp_cleanup_failed` is not inferred and no
   residue is expected.
 - Temp fd close failures are visible as `eligibility_artifact_file_temp_close_failed`. A successful
-  close retry produces no failure reason. `WRITTEN` is impossible unless close completion is proven.
+  close is attempted exactly once. Ordinary close failure leaves close status uncertain, records
+  `temp_close_failed`, and prevents `WRITTEN`; tests may manually close the fd afterward for fixture
+  cleanup, but that is not a production safety proof.
 - Temp unlink uses a fixed two-attempt retry. A transient first failure followed by success returns
   the final successful cleanup state; all failed attempts return `temp_cleanup_failed`.
 - Published paths attempt parent-directory fsync even when a post-publish identity check fails.
@@ -281,6 +298,29 @@ activation:
   result are `INVALID`; missing parent, parent not directory, and existing destination are
   `NOT_WRITTEN`; complete publish is `WRITTEN`; published-but-incomplete lifecycle is
   `PUBLISHED_INCOMPLETE`.
+
+## RTM-7c.4x resource-finalization and side-effect recovery closure
+
+Closes the remaining resource-finalization review items without adding CLI, consumption, replay,
+signing, authentication, or activation:
+
+- **Encoder taxonomy and order:** path type validation precedes the encoder; ordinary encoder
+  exceptions and malformed encode results are `INVALID` / `invalid_snapshot`, and filesystem
+  publication calls remain **0**. Fatal encoder exceptions still propagate.
+- **Fatal cleanup before re-raise:** operation-phase fatal exceptions preserve the original fatal
+  type while running best-effort cleanup for any acquired temp path/fd and best-effort parent sync
+  for any recovered or confirmed published destination.
+- **Side-effect recovery:** temp-create and hard-link helpers are treated as side-effect boundaries.
+  After an ordinary or fatal exception, observed temp residue is cleaned, and a destination whose
+  dev/ino matches the temp identity is recovered as published rather than falsely reported
+  `NOT_WRITTEN`.
+- **Temp close truth:** temp fd close is one-shot. Ordinary close failure means lifecycle status is
+  uncertain, forbids `WRITTEN`, and exposes `temp_close_failed`; the API does not claim handle-leak
+  proof after such a failure.
+- **Reader close truth:** the reader closes the fd before decode. A close failure returns `INVALID`
+  / `read_failed` and calls the decoder **0**; close fatal exceptions propagate.
+- **Parent-directory close truth:** directory fsync success is complete only when directory fd close
+  also succeeds. Directory close failure after publish is `PUBLISHED_INCOMPLETE` / `sync_failed`.
 
 **Still OPEN (unchanged posture):** file-path CLI, automatic path selection, actual approval
 consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

@@ -621,7 +621,7 @@ def test_write_pre_publish_failure_plus_cleanup_failure(
     assert not dest.exists()
 
 
-def test_write_close_retry_success_allows_written(
+def test_write_close_failure_is_not_retried_or_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dest = tmp_path / "artifact.json"
@@ -648,10 +648,12 @@ def test_write_close_retry_success_allows_written(
     monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
     monkeypatch.setattr(file_mod.os, "close", _close)
     res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    if temp_open["active"] and temp_fds:
+        real_close(temp_fds[0])
 
-    assert res.outcome is EligibilityArtifactFileWriteOutcome.WRITTEN
-    assert res.reason_codes == ()
-    assert close_calls["temp"] == 2
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == ("eligibility_artifact_file_temp_close_failed",)
+    assert close_calls["temp"] == 1
 
 
 def test_write_post_publish_close_final_failure_is_incomplete(
@@ -857,9 +859,164 @@ def test_write_ordinary_exception_sanitized(monkeypatch: pytest.MonkeyPatch, tmp
 
     monkeypatch.setattr(file_mod, "encode_verified_operator_approval_consumption_eligibility_artifact", _raise)
     res = write_file(snapshot=_valid_snapshot(), destination=tmp_path / "x.json")
-    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_snapshot",)
     blob = json.dumps([res.reason_codes, res.bytes_written])
     assert "SECRET_" not in blob and "/home/" not in blob
+
+
+def test_write_invalid_path_does_not_call_poison_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def _raise(_s: object) -> object:
+        calls.append("encode")
+        raise RuntimeError("poison")
+
+    monkeypatch.setattr(file_mod, "encode_verified_operator_approval_consumption_eligibility_artifact", _raise)
+    res = write_file(snapshot=_valid_snapshot(), destination="not-a-path")
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_input",)
+    assert calls == []
+
+
+def test_write_encoder_ordinary_exception_invalid_and_no_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def _raise(_s: object) -> object:
+        raise ValueError("SECRET_snapshot")
+
+    def _fs_call(*_args: object, **_kwargs: object) -> object:
+        calls.append("fs")
+        raise AssertionError("filesystem should not be touched")
+
+    monkeypatch.setattr(file_mod, "encode_verified_operator_approval_consumption_eligibility_artifact", _raise)
+    monkeypatch.setattr(file_mod.os, "lstat", _fs_call)
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _fs_call)
+
+    res = write_file(snapshot=_valid_snapshot(), destination=tmp_path / "artifact.json")
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_invalid_snapshot",)
+    assert calls == []
+    assert _count_files(tmp_path) == 0
+
+
+def test_write_processing_order_path_then_encode_then_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real_encode = file_mod.encode_verified_operator_approval_consumption_eligibility_artifact
+    real_parent = file_mod._validate_existing_parent_directory
+
+    def _enc(snapshot: object) -> object:
+        calls.append("encode")
+        return real_encode(snapshot)
+
+    def _parent(path: Path) -> str | None:
+        calls.append("parent")
+        return real_parent(path)
+
+    monkeypatch.setattr(file_mod, "encode_verified_operator_approval_consumption_eligibility_artifact", _enc)
+    monkeypatch.setattr(file_mod, "_validate_existing_parent_directory", _parent)
+
+    write_file(snapshot=_valid_snapshot(), destination=tmp_path / "artifact.json")
+
+    assert calls[:2] == ["encode", "parent"]
+
+
+def test_write_temp_create_side_effect_exception_cleans_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open = file_mod._open_exclusive_temp
+    real_close = os.close
+
+    def _create_then_raise(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        real_close(fd)
+        raise RuntimeError("SECRET_temp_create")
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _create_then_raise)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_temp_create_failed",)
+    assert not dest.exists()
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+
+
+def test_write_link_side_effect_exception_recovers_published_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    sync_calls: list[Path] = []
+
+    def _link_then_raise(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise RuntimeError("SECRET_link")
+
+    def _sync(directory: Path) -> bool:
+        sync_calls.append(directory)
+        return True
+
+    monkeypatch.setattr(file_mod.os, "link", _link_then_raise)
+    monkeypatch.setattr(file_mod, "_fsync_directory", _sync)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert dest.exists()
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+    assert sync_calls == [tmp_path]
+
+
+@pytest.mark.parametrize("stage", ["write", "file_fsync", "fstat", "link"])
+def test_write_fatal_before_publish_cleans_temp(
+    stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+
+    if stage == "write":
+        monkeypatch.setattr(file_mod.os, "write", lambda _fd, _data: (_ for _ in ()).throw(MemoryError()))
+    elif stage == "file_fsync":
+        monkeypatch.setattr(file_mod.os, "fsync", lambda _fd: (_ for _ in ()).throw(MemoryError()))
+    elif stage == "fstat":
+        monkeypatch.setattr(file_mod.os, "fstat", lambda _fd: (_ for _ in ()).throw(MemoryError()))
+    else:
+        monkeypatch.setattr(file_mod.os, "link", lambda _src, _dst: (_ for _ in ()).throw(MemoryError()))
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert not dest.exists()
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+
+
+def test_write_fatal_after_link_side_effect_preserves_original_and_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    sync_calls: list[Path] = []
+
+    def _link_then_fatal(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise MemoryError()
+
+    monkeypatch.setattr(file_mod.os, "link", _link_then_fatal)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda directory: sync_calls.append(directory) or True)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert dest.exists()
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+    assert sync_calls == [tmp_path]
 
 
 def test_write_call_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1105,6 +1262,74 @@ def test_read_decoder_called_once_on_stable_read(
     assert calls == ["decode"]
 
 
+def test_read_close_failure_invalid_and_decoder_not_called(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_open = file_mod._open_readonly_no_follow
+    real_close = os.close
+    read_fds: list[int] = []
+    decode_calls: list[str] = []
+
+    def _open(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        read_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if read_fds and fd == read_fds[0]:
+            raise OSError("SECRET_close")
+        real_close(fd)
+
+    def _decode(_payload: bytes) -> object:
+        decode_calls.append("decode")
+        return payload_mod.decode_operator_approval_consumption_eligibility_artifact_payload(_payload)
+
+    monkeypatch.setattr(file_mod, "_open_readonly_no_follow", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod, "decode_operator_approval_consumption_eligibility_artifact_payload", _decode)
+
+    res = read_file(source=dest)
+    if read_fds:
+        real_close(read_fds[0])
+
+    assert res.outcome is EligibilityArtifactFileReadOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+    assert decode_calls == []
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+def test_read_close_fatal_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_open = file_mod._open_readonly_no_follow
+    real_close = os.close
+    read_fds: list[int] = []
+
+    def _open(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        read_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if read_fds and fd == read_fds[0]:
+            raise KeyboardInterrupt()
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod, "_open_readonly_no_follow", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+
+    with pytest.raises(KeyboardInterrupt):
+        read_file(source=dest)
+    if read_fds:
+        real_close(read_fds[0])
+
+
 def test_read_does_not_modify_source(tmp_path: Path) -> None:
     dest = tmp_path / "artifact.json"
     snap = _valid_snapshot()
@@ -1116,6 +1341,37 @@ def test_read_does_not_modify_source(tmp_path: Path) -> None:
     assert dest.read_bytes() == before_bytes
     assert dest.stat().st_mtime_ns == before_stat.st_mtime_ns
     assert dest.stat().st_size == before_stat.st_size
+
+
+def test_write_parent_directory_close_failure_is_sync_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open = os.open
+    real_close = os.close
+    dir_fds: list[int] = []
+
+    def _open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        if Path(path) == tmp_path and flags & os.O_CREAT == 0:
+            dir_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if dir_fds and fd == dir_fds[0]:
+            raise OSError("SECRET_dir_close")
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod.os, "open", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+    if dir_fds:
+        real_close(dir_fds[0])
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == ("eligibility_artifact_file_sync_failed",)
+    assert dest.exists()
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
 
 
 # --- reader: fatal / sanitization / call counts ---

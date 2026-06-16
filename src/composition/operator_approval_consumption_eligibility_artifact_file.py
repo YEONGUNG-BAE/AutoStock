@@ -47,7 +47,6 @@ __all__ = [
 _FILE_MODE = 0o600
 _TEMP_PREFIX = ".tmp_eligibility_artifact_"
 _CONCRETE_PATH_TYPE = type(Path())
-_TEMP_CLOSE_ATTEMPTS = 2
 _TEMP_UNLINK_ATTEMPTS = 2
 
 _REASON_INVALID_INPUT = "eligibility_artifact_file_invalid_input"
@@ -139,7 +138,7 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     except (MemoryError, KeyboardInterrupt, SystemExit):
         raise
     except Exception:
-        return _write_not_written(_REASON_WRITE_FAILED)
+        return _write_invalid(_REASON_INVALID_SNAPSHOT)
 
     try:
         encode_result_valid = validate_eligibility_artifact_persistence_payload_encode_result_invariants(
@@ -192,6 +191,7 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     parent_sync_attempted = False
     parent_sync_confirmed = False
     primary_reasons: list[str] = []
+    operation_stage = "temp_create"
 
     def _append_primary(reason: str) -> None:
         if reason not in primary_reasons:
@@ -202,18 +202,16 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
         if not temp_fd_open or temp_fd is None or temp_close_complete:
             return
         temp_close_attempted = True
-        for _ in range(_TEMP_CLOSE_ATTEMPTS):
-            try:
-                os.close(temp_fd)
-            except (MemoryError, KeyboardInterrupt, SystemExit):
-                raise
-            except Exception:
-                continue
-            temp_fd = None
-            temp_fd_open = False
-            temp_close_complete = True
+        try:
+            os.close(temp_fd)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            temp_close_complete = False
             return
-        temp_close_complete = False
+        temp_fd = None
+        temp_fd_open = False
+        temp_close_complete = True
 
     def _attempt_temp_cleanup() -> None:
         nonlocal temp_cleanup_attempted, temp_cleanup_complete
@@ -326,7 +324,53 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                 bytes_written=None,
             )
 
+    def _recover_temp_create_side_effect() -> None:
+        nonlocal temp_created
+        if temp_created:
+            return
+        try:
+            os.lstat(temp_path)
+        except (FileNotFoundError, OSError):
+            return
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return
+        temp_created = True
+
+    def _recover_publish_side_effect(temp_stat: os.stat_result | None) -> None:
+        nonlocal destination_published
+        if destination_published or temp_stat is None:
+            return
+        try:
+            dest_stat = os.lstat(dest)
+        except (FileNotFoundError, OSError):
+            return
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            return
+        if (
+            stat.S_ISREG(dest_stat.st_mode)
+            and dest_stat.st_dev == temp_stat.st_dev
+            and dest_stat.st_ino == temp_stat.st_ino
+        ):
+            destination_published = True
+
+    def _cleanup_after_fatal(original: BaseException) -> None:
+        try:
+            _attempt_temp_close()
+            _attempt_temp_cleanup()
+            _attempt_parent_sync()
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            pass
+        except Exception:
+            pass
+        raise original
+
+    temp_stat: os.stat_result | None = None
     try:
+        operation_stage = "temp_create"
         temp_fd = _open_exclusive_temp(temp_path)
         if temp_fd is None:
             _append_primary(_REASON_TEMP_CREATE_FAILED)
@@ -335,33 +379,41 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
             temp_fd_open = True
 
         if temp_created and not primary_reasons:
+            operation_stage = "write"
             if not _write_all(temp_fd, payload_bytes):
                 _append_primary(_REASON_WRITE_FAILED)
 
         if temp_created and not primary_reasons:
+            operation_stage = "file_fsync"
             if not _fsync_fd(temp_fd):
                 _append_primary(_REASON_SYNC_FAILED)
 
-        temp_stat: os.stat_result | None = None
         if temp_created and not primary_reasons:
             try:
+                operation_stage = "fstat"
                 temp_stat = os.fstat(temp_fd)
             except OSError:
                 _append_primary(_REASON_PUBLISH_FAILED)
 
         if temp_created and not primary_reasons:
             try:
+                operation_stage = "link"
                 os.link(temp_path, dest)
             except OSError as exc:
+                _recover_publish_side_effect(temp_stat)
                 if exc.errno in (errno.EEXIST, errno.ENOTDIR):
                     _append_primary(_REASON_DESTINATION_EXISTS)
                 else:
                     _append_primary(_REASON_PUBLISH_FAILED)
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                _recover_publish_side_effect(temp_stat)
+                _cleanup_after_fatal(exc)
             else:
                 destination_published = True
 
         if destination_published:
             try:
+                operation_stage = "post_link_lstat"
                 dest_stat = os.lstat(dest)
             except (MemoryError, KeyboardInterrupt, SystemExit):
                 raise
@@ -376,10 +428,20 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                     or dest_stat.st_ino != temp_stat.st_ino
                 ):
                     _append_primary(_REASON_PUBLISH_FAILED)
-    except (MemoryError, KeyboardInterrupt, SystemExit):
-        raise
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        if operation_stage == "temp_create":
+            _recover_temp_create_side_effect()
+        elif operation_stage == "link":
+            _recover_publish_side_effect(temp_stat)
+        _cleanup_after_fatal(exc)
     except Exception:
-        if destination_published:
+        if operation_stage == "temp_create":
+            _recover_temp_create_side_effect()
+            _append_primary(_REASON_TEMP_CREATE_FAILED)
+        elif operation_stage == "link":
+            _recover_publish_side_effect(temp_stat)
+            _append_primary(_REASON_PUBLISH_FAILED)
+        elif destination_published:
             _append_primary(_REASON_PUBLISH_FAILED)
         else:
             _append_primary(_REASON_WRITE_FAILED)
@@ -417,56 +479,75 @@ def _read(*, source: object) -> EligibilityArtifactFileReadResult:
 
     fd: int | None = None
     payload_bytes: bytes | None = None
+    invalid_reason: str | None = None
     try:
         fd = _open_readonly_no_follow(src)
         if fd is None:
-            return _read_invalid(_REASON_READ_FAILED)
+            invalid_reason = _REASON_READ_FAILED
 
-        try:
-            fst_before = os.fstat(fd)
-        except OSError:
-            return _read_invalid(_REASON_READ_FAILED)
+        if invalid_reason is None:
+            assert fd is not None
+            try:
+                fst_before = os.fstat(fd)
+            except OSError:
+                invalid_reason = _REASON_READ_FAILED
 
-        if (
-            fst_before.st_dev != lst.st_dev
-            or fst_before.st_ino != lst.st_ino
-        ):
-            return _read_invalid(_REASON_READ_FAILED)
+        if invalid_reason is None:
+            assert fd is not None
+            if (
+                fst_before.st_dev != lst.st_dev
+                or fst_before.st_ino != lst.st_ino
+            ):
+                invalid_reason = _REASON_READ_FAILED
 
-        if not stat.S_ISREG(fst_before.st_mode):
-            return _read_invalid(_REASON_NOT_REGULAR)
-
-        if fst_before.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES:
-            return _read_invalid(_REASON_TOO_LARGE)
-
-        payload_bytes = _read_exact(fd, fst_before.st_size)
-        if payload_bytes is None:
-            return _read_invalid(_REASON_READ_FAILED)
-
-        try:
-            extra = os.read(fd, 1)
-        except OSError:
-            return _read_invalid(_REASON_READ_FAILED)
-        if extra != b"":
-            return _read_invalid(_REASON_READ_FAILED)
-
-        try:
-            fst_after = os.fstat(fd)
-        except OSError:
-            return _read_invalid(_REASON_READ_FAILED)
+        if invalid_reason is None and not stat.S_ISREG(fst_before.st_mode):
+            invalid_reason = _REASON_NOT_REGULAR
 
         if (
-            fst_after.st_dev != fst_before.st_dev
-            or fst_after.st_ino != fst_before.st_ino
-            or fst_after.st_size != fst_before.st_size
+            invalid_reason is None
+            and fst_before.st_size > ELIGIBILITY_ARTIFACT_PERSISTENCE_PAYLOAD_LIMIT_BYTES
         ):
-            return _read_invalid(_REASON_READ_FAILED)
+            invalid_reason = _REASON_TOO_LARGE
+
+        if invalid_reason is None:
+            assert fd is not None
+            payload_bytes = _read_exact(fd, fst_before.st_size)
+            if payload_bytes is None:
+                invalid_reason = _REASON_READ_FAILED
+
+        if invalid_reason is None:
+            assert fd is not None
+            try:
+                extra = os.read(fd, 1)
+            except OSError:
+                invalid_reason = _REASON_READ_FAILED
+            else:
+                if extra != b"":
+                    invalid_reason = _REASON_READ_FAILED
+
+        if invalid_reason is None:
+            assert fd is not None
+            try:
+                fst_after = os.fstat(fd)
+            except OSError:
+                invalid_reason = _REASON_READ_FAILED
+
+        if invalid_reason is None:
+            if (
+                fst_after.st_dev != fst_before.st_dev
+                or fst_after.st_ino != fst_before.st_ino
+                or fst_after.st_size != fst_before.st_size
+            ):
+                invalid_reason = _REASON_READ_FAILED
     finally:
         if fd is not None:
             try:
                 os.close(fd)
             except OSError:
-                pass
+                invalid_reason = _REASON_READ_FAILED
+
+    if invalid_reason is not None:
+        return _read_invalid(invalid_reason)
 
     assert payload_bytes is not None
 
@@ -616,10 +697,12 @@ def _fsync_fd(fd: int) -> bool:
 
 def _fsync_directory(directory: Path) -> bool:
     dir_fd: int | None = None
+    fsync_complete = False
+    close_complete = False
     try:
         dir_fd = os.open(directory, os.O_RDONLY)
         os.fsync(dir_fd)
-        return True
+        fsync_complete = True
     except OSError:
         return False
     finally:
@@ -627,7 +710,10 @@ def _fsync_directory(directory: Path) -> bool:
             try:
                 os.close(dir_fd)
             except OSError:
-                pass
+                close_complete = False
+            else:
+                close_complete = True
+    return fsync_complete and close_complete
 
 
 def _write_not_written(reason: str) -> EligibilityArtifactFileWriteResult:
