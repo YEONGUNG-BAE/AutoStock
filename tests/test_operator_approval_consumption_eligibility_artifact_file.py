@@ -1372,6 +1372,212 @@ def test_write_link_eexist_external_destination_mismatch_is_not_written_destinat
     assert dest.read_bytes() == b"external"
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        (FileNotFoundError(), EligibilityArtifactFileWriteOutcome.NOT_WRITTEN),
+        (OSError(errno.ENOTDIR, "notdir"), EligibilityArtifactFileWriteOutcome.NOT_WRITTEN),
+        (PermissionError(errno.EACCES, "denied"), EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN),
+        (OSError(errno.EIO, "io"), EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN),
+        (RuntimeError("SECRET_runtime"), EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN),
+    ],
+)
+def test_write_link_recovery_errno_taxonomy(
+    raised: BaseException,
+    expected: EligibilityArtifactFileWriteOutcome,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+    recovering = {"active": False}
+
+    def _fail_link(_src: str | bytes, _dst: str | bytes) -> None:
+        recovering["active"] = True
+        raise OSError(errno.EIO, "link failed")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if recovering["active"] and Path(path) == dest:
+            raise raised
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _fail_link)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is expected
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+def test_write_link_recovery_fatal_preserves_original_fatal_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+    calls = {"dest_lstat": 0}
+    recovering = {"active": False}
+
+    def _link_fatal(_src: str | bytes, _dst: str | bytes) -> None:
+        recovering["active"] = True
+        raise KeyboardInterrupt()
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if recovering["active"] and Path(path) == dest:
+            calls["dest_lstat"] += 1
+            raise MemoryError()
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _link_fatal)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+
+    with pytest.raises(KeyboardInterrupt):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert calls["dest_lstat"] == 1
+
+
+def test_write_link_side_effect_recovery_eio_is_publication_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    real_lstat = os.lstat
+    sync_calls: list[Path] = []
+
+    def _link_then_raise(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise RuntimeError("SECRET_link")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest and dest.exists():
+            raise OSError(errno.EIO, "SECRET_eio")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _link_then_raise)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda directory: sync_calls.append(directory) or True)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert res.bytes_written == len(encode(_valid_snapshot()).payload_bytes)
+    assert dest.exists()
+    assert sync_calls == [tmp_path]
+
+
+def test_write_external_destination_recovery_eacces_is_publication_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+
+    def _external_then_eexist(_src: str | bytes, _dst: str | bytes) -> None:
+        dest.write_bytes(b"external")
+        raise OSError(errno.EEXIST, "SECRET_exists")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest and dest.exists():
+            raise PermissionError(errno.EACCES, "SECRET_denied")
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _external_then_eexist)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert dest.read_bytes() == b"external"
+
+
+def test_write_no_link_side_effect_recovery_enoent_is_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+
+    def _fail_link(_src: str | bytes, _dst: str | bytes) -> None:
+        raise OSError("link failed")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest:
+            raise FileNotFoundError()
+        return real_lstat(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _fail_link)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert not dest.exists()
+
+
+def test_write_temp_create_recovery_eio_attempts_cleanup_and_records_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_lstat = os.lstat
+
+    def _create_then_raise(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        real_close(fd)
+        raise RuntimeError("SECRET_temp_create")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if _is_temp_path(path, tmp_path):
+            raise OSError(errno.EIO, "SECRET_eio")
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            raise OSError("SECRET_unlink")
+        os.unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _create_then_raise)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == (
+        "eligibility_artifact_file_temp_create_failed",
+        "eligibility_artifact_file_temp_cleanup_failed",
+    )
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+def test_write_temp_create_recovery_eacces_unlink_enoent_cleanup_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+
+    def _raise_after_unknown_create(_path: Path) -> int | None:
+        raise RuntimeError("SECRET_temp_create")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if _is_temp_path(path, tmp_path):
+            raise PermissionError(errno.EACCES, "SECRET_denied")
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            raise FileNotFoundError()
+        os.unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _raise_after_unknown_create)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_temp_create_failed",)
+
+
 def test_write_call_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[str] = []
     real_encode = file_mod.encode_verified_operator_approval_consumption_eligibility_artifact
@@ -1683,6 +1889,135 @@ def test_read_close_fatal_propagates(
         real_close(read_fds[0])
 
 
+@pytest.mark.parametrize(
+    ("read_stage", "read_exc", "close_exc"),
+    [
+        ("fstat", MemoryError, RuntimeError),
+        ("read", KeyboardInterrupt, OSError),
+        ("read", SystemExit, MemoryError),
+    ],
+)
+def test_read_phase_fatal_takes_precedence_over_close_exception(
+    read_stage: str,
+    read_exc: type[BaseException],
+    close_exc: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_open = file_mod._open_readonly_no_follow
+    real_close = os.close
+    real_fstat = os.fstat
+    real_read = os.read
+    read_fds: list[int] = []
+
+    def _open(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        read_fds.append(fd)
+        return fd
+
+    def _fstat(fd: int) -> os.stat_result:
+        if read_stage == "fstat" and read_fds and fd == read_fds[0]:
+            raise read_exc()
+        return real_fstat(fd)
+
+    def _read(fd: int, size: int) -> bytes:
+        if read_stage == "read" and read_fds and fd == read_fds[0]:
+            raise read_exc()
+        return real_read(fd, size)
+
+    def _close(fd: int) -> None:
+        if read_fds and fd == read_fds[0]:
+            raise close_exc("SECRET_close")
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod, "_open_readonly_no_follow", _open)
+    monkeypatch.setattr(file_mod.os, "fstat", _fstat)
+    monkeypatch.setattr(file_mod.os, "read", _read)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+
+    with pytest.raises(read_exc):
+        read_file(source=dest)
+    if read_fds:
+        real_close(read_fds[0])
+
+
+def test_read_normal_phase_close_ordinary_failure_invalid_decoder_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_open = file_mod._open_readonly_no_follow
+    real_close = os.close
+    read_fds: list[int] = []
+    decode_calls: list[str] = []
+
+    def _open(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        read_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if read_fds and fd == read_fds[0]:
+            raise RuntimeError("SECRET_close")
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod, "_open_readonly_no_follow", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(
+        file_mod,
+        "decode_operator_approval_consumption_eligibility_artifact_payload",
+        lambda payload: decode_calls.append("decode"),
+    )
+
+    res = read_file(source=dest)
+    if read_fds:
+        real_close(read_fds[0])
+
+    assert res.outcome is EligibilityArtifactFileReadOutcome.INVALID
+    assert res.reason_codes == ("eligibility_artifact_file_read_failed",)
+    assert decode_calls == []
+
+
+def test_read_normal_phase_close_fatal_propagates_decoder_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    dest.write_bytes(encode(_valid_snapshot()).payload_bytes)
+    real_open = file_mod._open_readonly_no_follow
+    real_close = os.close
+    read_fds: list[int] = []
+    decode_calls: list[str] = []
+
+    def _open(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        read_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if read_fds and fd == read_fds[0]:
+            raise KeyboardInterrupt()
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod, "_open_readonly_no_follow", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(
+        file_mod,
+        "decode_operator_approval_consumption_eligibility_artifact_payload",
+        lambda payload: decode_calls.append("decode"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        read_file(source=dest)
+    if read_fds:
+        real_close(read_fds[0])
+    assert decode_calls == []
+
+
 def test_read_does_not_modify_source(tmp_path: Path) -> None:
     dest = tmp_path / "artifact.json"
     snap = _valid_snapshot()
@@ -1702,6 +2037,7 @@ def test_write_parent_directory_close_failure_is_sync_failed(
     dest = tmp_path / "artifact.json"
     real_open = os.open
     real_close = os.close
+    real_fsync = os.fsync
     dir_fds: list[int] = []
 
     def _open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
@@ -1725,6 +2061,105 @@ def test_write_parent_directory_close_failure_is_sync_failed(
     assert res.reason_codes == ("eligibility_artifact_file_sync_failed",)
     assert dest.exists()
     assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+@pytest.mark.parametrize(
+    ("fsync_exc", "close_exc", "expected"),
+    [
+        (MemoryError, RuntimeError, MemoryError),
+        (KeyboardInterrupt, SystemExit, KeyboardInterrupt),
+    ],
+)
+def test_fsync_directory_preserves_fsync_fatal_over_close_exception(
+    fsync_exc: type[BaseException],
+    close_exc: type[BaseException],
+    expected: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_open = os.open
+    real_close = os.close
+    dir_fds: list[int] = []
+
+    def _open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        dir_fds.append(fd)
+        return fd
+
+    def _fsync(fd: int) -> None:
+        if dir_fds and fd == dir_fds[0]:
+            raise fsync_exc()
+        real_fsync(fd)
+
+    def _close(fd: int) -> None:
+        if dir_fds and fd == dir_fds[0]:
+            raise close_exc("SECRET_close")
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod.os, "open", _open)
+    monkeypatch.setattr(file_mod.os, "fsync", _fsync)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+
+    with pytest.raises(expected):
+        file_mod._fsync_directory(tmp_path)
+    if dir_fds:
+        real_close(dir_fds[0])
+
+
+def test_fsync_directory_ordinary_fsync_failure_close_success_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(file_mod.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("SECRET_fsync")))
+    assert file_mod._fsync_directory(tmp_path) is False
+
+
+def test_fsync_directory_success_close_ordinary_failure_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+    real_close = os.close
+    dir_fds: list[int] = []
+
+    def _open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        dir_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if dir_fds and fd == dir_fds[0]:
+            raise RuntimeError("SECRET_close")
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod.os, "open", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    assert file_mod._fsync_directory(tmp_path) is False
+    if dir_fds:
+        real_close(dir_fds[0])
+
+
+def test_fsync_directory_success_close_fatal_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+    real_close = os.close
+    dir_fds: list[int] = []
+
+    def _open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+        fd = real_open(path, flags, mode)
+        dir_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if dir_fds and fd == dir_fds[0]:
+            raise SystemExit()
+        real_close(fd)
+
+    monkeypatch.setattr(file_mod.os, "open", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    with pytest.raises(SystemExit):
+        file_mod._fsync_directory(tmp_path)
+    if dir_fds:
+        real_close(dir_fds[0])
 
 
 # --- reader: fatal / sanitization / call counts ---

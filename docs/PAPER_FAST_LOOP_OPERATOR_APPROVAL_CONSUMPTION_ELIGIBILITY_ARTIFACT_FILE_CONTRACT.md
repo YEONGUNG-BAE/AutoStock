@@ -21,7 +21,7 @@ Code:
 `write(*, snapshot, destination) -> EligibilityArtifactFileWriteResult`
 
 ```
-outcome: WRITTEN | PUBLISHED_INCOMPLETE | NOT_WRITTEN | INVALID
+outcome: WRITTEN | PUBLISHED_INCOMPLETE | PUBLICATION_UNCERTAIN | NOT_WRITTEN | INVALID
 reason_codes: tuple[str, ...]
 eligibility_artifact_sha256: str | None
 bytes_written: int | None
@@ -35,6 +35,9 @@ Invariants:
   `reason_codes` canonical nonempty tuple (primary operation reason, temp close failure, temp cleanup
   failure, parent-sync failure, in that order when present). Does **not** mean activation-authorized
   or durable consumption-ready.
+- `PUBLICATION_UNCERTAIN`: publication side effect could not be confirmed absent or present after a
+  link/recovery failure; digest lowercase hex64 and `bytes_written > 0` may be retained; no
+  destination rollback/unlink is attempted; not consumption-ready or activation-authorized.
 - `NOT_WRITTEN`: destination was **not** published; digest `None`; `bytes_written None`; one or two
   stable reasons (pre-publish primary + optional temp close/cleanup failure)
 - `INVALID`: invalid input/snapshot; filesystem publication **not attempted**; digest `None`;
@@ -43,6 +46,11 @@ Invariants:
 **Post-publish invariant:** once destination is published, the writer **never** returns
 `NOT_WRITTEN`. Parent-directory `fsync` failure and temp cleanup failure after successful `link` leave
 the complete destination bytes in place — no automatic unlink/rollback.
+
+**Publication-uncertainty invariant:** when recovery cannot distinguish an absent destination from a
+possible side effect, the writer returns `PUBLICATION_UNCERTAIN` rather than falsely claiming
+`NOT_WRITTEN` or confirmed `PUBLISHED_INCOMPLETE`. Parent sync is best effort and rollback is
+forbidden.
 
 Stable writer reasons:
 
@@ -95,12 +103,12 @@ Processing order:
     `eligibility_artifact_file_temp_close_failed` (no same-integer retry, no no-leak claim). Temp
     `unlink` uses exactly two bounded attempts (failure recorded, not swallowed; successful retry
     produces no failure reason)
-13. parent-directory `fsync` after every published path, including post-publish identity defects
-    (failure ⇒ `PUBLISHED_INCOMPLETE`, destination unchanged)
+13. parent-directory `fsync` after every published or publication-uncertain path, including
+    post-publish identity defects (failure ⇒ visible `sync_failed`, destination unchanged)
 14. result from explicit publication-state locals (`temp_created`, `temp_fd_open`,
     `temp_close_attempted`, `temp_close_complete`, `temp_cleanup_attempted`,
-    `temp_cleanup_complete`, `destination_published`, `parent_sync_attempted`,
-    `parent_sync_confirmed`, `primary_reasons`)
+    `temp_cleanup_complete`, `destination_published`, `publication_uncertain`,
+    `parent_sync_attempted`, `parent_sync_confirmed`, `primary_reasons`)
 
 Core invariants:
 
@@ -115,6 +123,7 @@ Core invariants:
   reason
 - no automatic ``runtime/`` path selection
 - published destination never reported `NOT_WRITTEN`
+- publication-uncertain destination never reported `NOT_WRITTEN` or confirmed `PUBLISHED_INCOMPLETE`
 
 ## Reader contract
 
@@ -151,8 +160,9 @@ Processing:
 7. read exactly `fstat_before.st_size` bytes (short read ⇒ fail-closed)
 8. 1-byte EOF probe — must be `b""` (extra trailing byte / growth ⇒ fail-closed)
 9. `fstat_after` — dev/ino/size unchanged vs `fstat_before`
-10. close; close ordinary failure ⇒ `INVALID` / `eligibility_artifact_file_read_failed` before
-    decoder, close fatal re-raised
+10. close in an independent boundary; read-phase fatal takes precedence over close ordinary/fatal;
+    absent read fatal, close fatal re-raised; absent fatal, close ordinary failure ⇒ `INVALID` /
+    `eligibility_artifact_file_read_failed` before decoder
 11. persistence decoder exactly once after close is confirmed; malformed decoder dependency result ⇒
     `eligibility_artifact_file_read_failed` (never `VALID`)
 
@@ -192,13 +202,16 @@ inferred for an unattempted step. `sync_failed` is used for a real failed temp f
 failed parent-directory `fsync`; an unattempted parent sync contributes no parent-sync reason.
 
 Ordinary filesystem exceptions map to stable outcomes — no raw path/errno/exception in reason codes.
+Recovery treats only `ENOENT` and `ENOTDIR` as absent. `PermissionError`, `EIO`, other `OSError`,
+and ordinary non-`OSError` exceptions during recovery do **not** prove absence.
 Post-publish ordinary exceptions preserve publication state and return `PUBLISHED_INCOMPLETE`, never
 `NOT_WRITTEN`. If a temp-create helper creates a temp path then raises, the writer checks the
-post-condition and unlinks any observed temp residue before returning `NOT_WRITTEN` /
-`temp_create_failed`. If a publish helper creates the hard link then raises, the writer compares
-destination `lstat` with temp `fstat`; a match is recovered as `destination_published=True`,
-followed by temp cleanup and parent sync, and the result is `PUBLISHED_INCOMPLETE` /
-`publish_failed`.
+post-condition and unlinks observed or uncertain temp residue before returning `NOT_WRITTEN` /
+`temp_create_failed` with cleanup state reflected. If a publish helper creates the hard link then
+raises, the writer compares destination `lstat` with temp `fstat`; a match is recovered as
+`destination_published=True`, followed by temp cleanup and parent sync, and the result is
+`PUBLISHED_INCOMPLETE` / `publish_failed`. If recovery cannot observe the destination because of a
+non-absent recovery failure, the result is `PUBLICATION_UNCERTAIN` / `publish_failed`.
 
 If `os.link` creates the hard link and then raises `OSError(EEXIST)`, dev/ino recovery takes
 precedence over the errno: matching destination ⇒ `PUBLISHED_INCOMPLETE` /
@@ -213,6 +226,10 @@ close fatal does not skip unlink or parent sync, unlink fatal does not skip pare
 cleanup-time fatal exceptions do not replace an original operation fatal. If there is no operation
 fatal and cleanup raises fatal, the first cleanup fatal is preserved while later cleanup steps still
 run.
+
+Directory sync preserves fsync fatal over close ordinary/fatal exceptions. If fsync succeeds and
+directory close fails ordinarily, sync is false/stable `sync_failed`; if fsync succeeds and directory
+close is fatal, the close fatal propagates unless an original operation fatal already has precedence.
 
 ## Dependency result invariants
 
@@ -356,6 +373,27 @@ authentication, or activation:
   dev/ino is classified as recovered publish (`PUBLISHED_INCOMPLETE` / `publish_failed`), not
   `destination_exists`; a mismatched external destination remains `NOT_WRITTEN` /
   `destination_exists`.
+
+## RTM-7c.4x recovery-uncertainty and fatal-preservation closure
+
+Closes the recovery-uncertainty review items without adding CLI, consumption, replay, signing,
+authentication, or activation:
+
+- **Recovery errno taxonomy:** only `ENOENT` and `ENOTDIR` are absent. `PermissionError`, `EIO`,
+  other `OSError`, ordinary recovery exceptions, and recovery fatal exceptions with an original
+  pending fatal do not prove absence.
+- **Publication uncertainty:** uncertain link recovery is represented as `PUBLICATION_UNCERTAIN` /
+  `publish_failed` with digest/bytes retained, best-effort parent sync, and no rollback. It is not
+  consumption-ready or activation-authorized.
+- **Temp cleanup uncertainty:** uncertain temp-create recovery marks temp cleanup as attempted.
+  `unlink` `ENOENT` completes cleanup; bounded unlink failure returns `temp_cleanup_failed`.
+- **Reader fatal precedence:** read/open/fstat/read fatal outranks close ordinary/fatal; absent read
+  fatal, close fatal outranks close ordinary; decoder runs only after close is confirmed.
+- **Directory sync fatal precedence:** directory fsync fatal outranks close exception; absent fsync
+  fatal, close fatal propagates; ordinary fsync/close failures return false and surface as
+  `sync_failed` through the writer.
+- **Single recovery owner:** link fatal recovery is run exactly once from the outer fatal boundary;
+  destination lstat is attempted at most once and cleanup stays within fixed close/unlink/sync bounds.
 
 **Still OPEN (unchanged posture):** file-path CLI, automatic path selection, actual approval
 consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

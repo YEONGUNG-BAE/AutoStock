@@ -513,8 +513,10 @@ touch network/credentials/DB/clock and never activate runtime:
 - RTM-7c.4x `operator_approval_consumption_eligibility_artifact_file` — atomic **create-new** file
   publish + read-only file verification over the 4w canonical payload. Explicit caller-provided
   exact concrete `pathlib.Path` only (no ``runtime/`` auto-selection, no CLI). Writer outcomes:
-  `WRITTEN` / `PUBLISHED_INCOMPLETE` / `NOT_WRITTEN` / `INVALID`; published destination never
-  reported `NOT_WRITTEN`; temp close, temp cleanup, and parent sync failures visible in reason tuple.
+  `WRITTEN` / `PUBLISHED_INCOMPLETE` / `PUBLICATION_UNCERTAIN` / `NOT_WRITTEN` / `INVALID`;
+  published destination never reported `NOT_WRITTEN`; uncertain publication never reported
+  confirmed written/not-written; temp close, temp cleanup, and parent sync failures visible in
+  reason tuple.
   Resource-finalization closure builds the result once after one-shot temp fd close, bounded temp
   unlink, and published parent-sync attempt; unattempted lifecycle steps do not synthesize failure
   reasons. Path validation → encode → temp-name generation → same-directory temp (`O_EXCL`,
@@ -526,9 +528,12 @@ touch network/credentials/DB/clock and never activate runtime:
   acquired temp/published state; recovery exceptions never replace the original fatal.
   Side-effecting temp-create/link helper exceptions are recovered by post-condition checks, including
   `EEXIST` after a successful hard link (matching dev/ino ⇒ `PUBLISHED_INCOMPLETE` /
-  `publish_failed`, not `destination_exists`). Reader: `lstat`/`open`/`fstat` identity + bounded
-  read + 1-byte EOF probe + post-read `fstat` → close confirmed → persistence decoder exactly once.
+  `publish_failed`, not `destination_exists`) and non-absent recovery failures
+  (`PermissionError`/`EIO`/ordinary exception ⇒ `PUBLICATION_UNCERTAIN`). Reader:
+  `lstat`/`open`/`fstat` identity + bounded read + 1-byte EOF probe + post-read `fstat` → close
+  confirmed → persistence decoder exactly once, with read fatal precedence over close exceptions.
   Read/decode VALID = schema·semantic·hash consistency only — not authenticity, consumption,
-  replay, signing, or activation. Directory sync is complete only when directory fd close also succeeds.
+  replay, signing, or activation. Directory sync preserves fsync fatal over close exceptions and is
+  complete only when directory fd close also succeeds.
   TOCTOU/parent-symlink/platform limits documented. See
   `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`.
