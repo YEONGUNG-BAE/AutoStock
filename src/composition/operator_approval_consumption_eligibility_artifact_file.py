@@ -47,6 +47,8 @@ __all__ = [
 _FILE_MODE = 0o600
 _TEMP_PREFIX = ".tmp_eligibility_artifact_"
 _CONCRETE_PATH_TYPE = type(Path())
+_TEMP_CLOSE_ATTEMPTS = 2
+_TEMP_UNLINK_ATTEMPTS = 2
 
 _REASON_INVALID_INPUT = "eligibility_artifact_file_invalid_input"
 _REASON_INVALID_SNAPSHOT = "eligibility_artifact_file_invalid_snapshot"
@@ -58,6 +60,7 @@ _REASON_TEMP_CREATE_FAILED = "eligibility_artifact_file_temp_create_failed"
 _REASON_WRITE_FAILED = "eligibility_artifact_file_write_failed"
 _REASON_PUBLISH_FAILED = "eligibility_artifact_file_publish_failed"
 _REASON_SYNC_FAILED = "eligibility_artifact_file_sync_failed"
+_REASON_TEMP_CLOSE_FAILED = "eligibility_artifact_file_temp_close_failed"
 _REASON_TEMP_CLEANUP_FAILED = "eligibility_artifact_file_temp_cleanup_failed"
 _REASON_MISSING = "eligibility_artifact_file_missing"
 _REASON_NOT_REGULAR = "eligibility_artifact_file_not_regular"
@@ -105,12 +108,7 @@ def write_verified_operator_approval_consumption_eligibility_artifact_create_new
 
     destination parent는 이미 존재해야 하며 writer는 directory를 생성하지 않는다. 기존 destination
     overwrite 금지. INVALID snapshot이면 filesystem 접근 0."""
-    try:
-        return _write(snapshot=snapshot, destination=destination)
-    except (MemoryError, KeyboardInterrupt, SystemExit):
-        raise
-    except Exception:
-        return _write_not_written(_REASON_WRITE_FAILED)
+    return _write(snapshot=snapshot, destination=destination)
 
 
 def read_operator_approval_consumption_eligibility_artifact_file(
@@ -129,12 +127,30 @@ def read_operator_approval_consumption_eligibility_artifact_file(
 
 
 def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileWriteResult:
+    path_error = _validate_exact_path(destination)
+    if path_error is not None:
+        return _write_invalid(path_error)
+
+    dest = destination
+    assert isinstance(dest, Path)
+
     try:
         encode_result = encode_verified_operator_approval_consumption_eligibility_artifact(snapshot)
     except (MemoryError, KeyboardInterrupt, SystemExit):
         raise
+    except Exception:
+        return _write_not_written(_REASON_WRITE_FAILED)
 
-    if not validate_eligibility_artifact_persistence_payload_encode_result_invariants(encode_result):
+    try:
+        encode_result_valid = validate_eligibility_artifact_persistence_payload_encode_result_invariants(
+            encode_result
+        )
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        encode_result_valid = False
+
+    if not encode_result_valid:
         return EligibilityArtifactFileWriteResult(
             outcome=EligibilityArtifactFileWriteOutcome.INVALID,
             reason_codes=(_REASON_INVALID_SNAPSHOT,),
@@ -156,13 +172,6 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     assert digest is not None
     bytes_written = len(payload_bytes)
 
-    path_error = _validate_exact_path(destination)
-    if path_error is not None:
-        return _write_not_written(path_error)
-
-    dest = destination
-    assert isinstance(dest, Path)
-
     parent_error = _validate_existing_parent_directory(dest.parent)
     if parent_error is not None:
         return _write_not_written(parent_error)
@@ -173,36 +182,91 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
 
     temp_path = dest.parent / f"{_TEMP_PREFIX}{secrets.token_hex(16)}"
     temp_fd: int | None = None
+    temp_created = False
+    temp_fd_open = False
+    temp_close_attempted = False
+    temp_close_complete = False
+    temp_cleanup_attempted = False
     destination_published = False
     temp_cleanup_complete = False
+    parent_sync_attempted = False
     parent_sync_confirmed = False
     primary_reasons: list[str] = []
 
+    def _append_primary(reason: str) -> None:
+        if reason not in primary_reasons:
+            primary_reasons.append(reason)
+
+    def _attempt_temp_close() -> None:
+        nonlocal temp_fd, temp_fd_open, temp_close_attempted, temp_close_complete
+        if not temp_fd_open or temp_fd is None or temp_close_complete:
+            return
+        temp_close_attempted = True
+        for _ in range(_TEMP_CLOSE_ATTEMPTS):
+            try:
+                os.close(temp_fd)
+            except (MemoryError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                continue
+            temp_fd = None
+            temp_fd_open = False
+            temp_close_complete = True
+            return
+        temp_close_complete = False
+
     def _attempt_temp_cleanup() -> None:
-        nonlocal temp_cleanup_complete
-        if temp_cleanup_complete:
+        nonlocal temp_cleanup_attempted, temp_cleanup_complete
+        if not temp_created or temp_cleanup_complete:
             return
-        if not temp_path.exists():
+        temp_cleanup_attempted = True
+        for _ in range(_TEMP_UNLINK_ATTEMPTS):
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                temp_cleanup_complete = True
+                return
+            except (MemoryError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                continue
             temp_cleanup_complete = True
             return
+        temp_cleanup_complete = False
+
+    def _attempt_parent_sync() -> None:
+        nonlocal parent_sync_attempted, parent_sync_confirmed
+        if not destination_published or parent_sync_confirmed:
+            return
+        parent_sync_attempted = True
         try:
-            os.unlink(temp_path)
-            temp_cleanup_complete = True
-        except OSError:
-            temp_cleanup_complete = False
+            parent_sync_confirmed = _fsync_directory(dest.parent)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            parent_sync_confirmed = False
 
     def _build_reason_codes() -> tuple[str, ...]:
         reasons: list[str] = []
-        if destination_published:
-            reasons.extend(primary_reasons)
-            if not temp_cleanup_complete:
-                reasons.append(_REASON_TEMP_CLEANUP_FAILED)
-            if not parent_sync_confirmed:
-                reasons.append(_REASON_SYNC_FAILED)
-        else:
-            reasons.extend(primary_reasons)
-            if not temp_cleanup_complete:
-                reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+        reasons.extend(primary_reasons)
+        if temp_close_attempted and not temp_close_complete:
+            reasons.append(_REASON_TEMP_CLOSE_FAILED)
+        if temp_cleanup_attempted and not temp_cleanup_complete:
+            reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+        if destination_published and parent_sync_attempted and not parent_sync_confirmed:
+            reasons.append(_REASON_SYNC_FAILED)
+        return _dedupe_reason_codes(reasons)
+
+    def _fallback_reason_codes() -> tuple[str, ...]:
+        reasons: list[str] = list(primary_reasons)
+        if not reasons:
+            reasons.append(_REASON_PUBLISH_FAILED if destination_published else _REASON_WRITE_FAILED)
+        if temp_close_attempted and not temp_close_complete:
+            reasons.append(_REASON_TEMP_CLOSE_FAILED)
+        if temp_cleanup_attempted and not temp_cleanup_complete:
+            reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+        if destination_published and parent_sync_attempted and not parent_sync_confirmed:
+            reasons.append(_REASON_SYNC_FAILED)
         seen: set[str] = set()
         deduped: list[str] = []
         for reason in reasons:
@@ -215,7 +279,8 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
         if destination_published:
             reason_codes = _build_reason_codes()
             if (
-                temp_cleanup_complete
+                temp_close_complete
+                and temp_cleanup_complete
                 and parent_sync_confirmed
                 and not primary_reasons
             ):
@@ -238,86 +303,91 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
             bytes_written=None,
         )
 
+    def _safe_finalize() -> EligibilityArtifactFileWriteResult:
+        try:
+            return _finalize()
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            if destination_published:
+                _append_primary(_REASON_PUBLISH_FAILED)
+                return EligibilityArtifactFileWriteResult(
+                    outcome=EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE,
+                    reason_codes=_fallback_reason_codes(),
+                    eligibility_artifact_sha256=digest,
+                    bytes_written=bytes_written,
+                )
+            if not primary_reasons:
+                _append_primary(_REASON_WRITE_FAILED)
+            return EligibilityArtifactFileWriteResult(
+                outcome=EligibilityArtifactFileWriteOutcome.NOT_WRITTEN,
+                reason_codes=_fallback_reason_codes(),
+                eligibility_artifact_sha256=None,
+                bytes_written=None,
+            )
+
     try:
         temp_fd = _open_exclusive_temp(temp_path)
         if temp_fd is None:
-            primary_reasons.append(_REASON_TEMP_CREATE_FAILED)
-            return _finalize()
-
-        if not _write_all(temp_fd, payload_bytes):
-            primary_reasons.append(_REASON_WRITE_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        if not _fsync_fd(temp_fd):
-            primary_reasons.append(_REASON_SYNC_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        try:
-            temp_stat = os.fstat(temp_fd)
-        except OSError:
-            primary_reasons.append(_REASON_PUBLISH_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        try:
-            os.link(temp_path, dest)
-        except OSError as exc:
-            if exc.errno in (errno.EEXIST, errno.ENOTDIR):
-                primary_reasons.append(_REASON_DESTINATION_EXISTS)
-            else:
-                primary_reasons.append(_REASON_PUBLISH_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        destination_published = True
-
-        try:
-            dest_stat = os.lstat(dest)
-        except OSError:
-            primary_reasons.append(_REASON_PUBLISH_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        if not stat.S_ISREG(dest_stat.st_mode):
-            primary_reasons.append(_REASON_DESTINATION_NOT_REGULAR)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        if (
-            dest_stat.st_dev != temp_stat.st_dev
-            or dest_stat.st_ino != temp_stat.st_ino
-        ):
-            primary_reasons.append(_REASON_PUBLISH_FAILED)
-            _attempt_temp_cleanup()
-            return _finalize()
-
-        try:
-            os.close(temp_fd)
-        except OSError:
-            pass
-        temp_fd = None
-
-        _attempt_temp_cleanup()
-
-        if not _fsync_directory(dest.parent):
-            parent_sync_confirmed = False
+            _append_primary(_REASON_TEMP_CREATE_FAILED)
         else:
-            parent_sync_confirmed = True
+            temp_created = True
+            temp_fd_open = True
 
-        return _finalize()
-    finally:
-        if temp_fd is not None:
+        if temp_created and not primary_reasons:
+            if not _write_all(temp_fd, payload_bytes):
+                _append_primary(_REASON_WRITE_FAILED)
+
+        if temp_created and not primary_reasons:
+            if not _fsync_fd(temp_fd):
+                _append_primary(_REASON_SYNC_FAILED)
+
+        temp_stat: os.stat_result | None = None
+        if temp_created and not primary_reasons:
             try:
-                os.close(temp_fd)
+                temp_stat = os.fstat(temp_fd)
             except OSError:
-                pass
-        if not destination_published and temp_path.exists():
+                _append_primary(_REASON_PUBLISH_FAILED)
+
+        if temp_created and not primary_reasons:
             try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+                os.link(temp_path, dest)
+            except OSError as exc:
+                if exc.errno in (errno.EEXIST, errno.ENOTDIR):
+                    _append_primary(_REASON_DESTINATION_EXISTS)
+                else:
+                    _append_primary(_REASON_PUBLISH_FAILED)
+            else:
+                destination_published = True
+
+        if destination_published:
+            try:
+                dest_stat = os.lstat(dest)
+            except (MemoryError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                _append_primary(_REASON_PUBLISH_FAILED)
+            else:
+                if not stat.S_ISREG(dest_stat.st_mode):
+                    _append_primary(_REASON_DESTINATION_NOT_REGULAR)
+                elif (
+                    temp_stat is None
+                    or dest_stat.st_dev != temp_stat.st_dev
+                    or dest_stat.st_ino != temp_stat.st_ino
+                ):
+                    _append_primary(_REASON_PUBLISH_FAILED)
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        if destination_published:
+            _append_primary(_REASON_PUBLISH_FAILED)
+        else:
+            _append_primary(_REASON_WRITE_FAILED)
+
+    _attempt_temp_close()
+    _attempt_temp_cleanup()
+    _attempt_parent_sync()
+    return _safe_finalize()
 
 
 def _read(*, source: object) -> EligibilityArtifactFileReadResult:
@@ -526,6 +596,16 @@ def _read_exact(fd: int, size: int) -> bytes | None:
     return result
 
 
+def _dedupe_reason_codes(reasons: list[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in seen:
+            seen.add(reason)
+            deduped.append(reason)
+    return tuple(deduped)
+
+
 def _fsync_fd(fd: int) -> bool:
     try:
         os.fsync(fd)
@@ -553,6 +633,15 @@ def _fsync_directory(directory: Path) -> bool:
 def _write_not_written(reason: str) -> EligibilityArtifactFileWriteResult:
     return EligibilityArtifactFileWriteResult(
         outcome=EligibilityArtifactFileWriteOutcome.NOT_WRITTEN,
+        reason_codes=(reason,),
+        eligibility_artifact_sha256=None,
+        bytes_written=None,
+    )
+
+
+def _write_invalid(reason: str) -> EligibilityArtifactFileWriteResult:
+    return EligibilityArtifactFileWriteResult(
+        outcome=EligibilityArtifactFileWriteOutcome.INVALID,
         reason_codes=(reason,),
         eligibility_artifact_sha256=None,
         bytes_written=None,

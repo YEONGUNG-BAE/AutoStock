@@ -514,9 +514,12 @@ touch network/credentials/DB/clock and never activate runtime:
   publish + read-only file verification over the 4w canonical payload. Explicit caller-provided
   exact concrete `pathlib.Path` only (no ``runtime/`` auto-selection, no CLI). Writer outcomes:
   `WRITTEN` / `PUBLISHED_INCOMPLETE` / `NOT_WRITTEN` / `INVALID`; published destination never
-  reported `NOT_WRITTEN`; temp cleanup and parent sync failures visible in reason tuple. Encode →
+  reported `NOT_WRITTEN`; temp close, temp cleanup, and parent sync failures visible in reason tuple.
+  Final writer-state closure builds the result once after bounded close/unlink retries and published
+  parent-sync attempt; unattempted lifecycle steps do not synthesize failure reasons. Encode →
   same-directory temp (`O_EXCL`, `O_NOFOLLOW` when available, mode `0o600`) → write/fsync →
-  `fstat(temp)` → `os.link` create-new → dev/ino check → temp unlink → parent fsync; no overwrite.
+  `fstat(temp)` → `os.link` create-new → dev/ino check → temp fd close → temp unlink → parent
+  fsync; no overwrite.
   Reader: `lstat`/`open`/`fstat` identity + bounded read + 1-byte EOF probe + post-read `fstat` →
   persistence decoder exactly once. Read/decode VALID = schema·semantic·hash consistency only — not
   authenticity, consumption, replay, signing, or activation. TOCTOU/parent-symlink/platform limits

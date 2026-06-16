@@ -1,5 +1,30 @@
 # Technical Debt / P2·P3 Backlog
 
+## Reference — RTM-7c.4x Final Writer-State Closure
+
+- RTM-7c.4x file-lane final closure is an offline API-only hardening pass for
+  `operator_approval_consumption_eligibility_artifact_file`; it adds no file-path CLI, automatic
+  runtime path, actual approval consumption, replay/nonce/idempotency, signing/HMAC, operator
+  authentication, provenance verification, TTL/freshness, activation caller/token, KIS/network,
+  broker/order, operational DB write, daemon, or scheduler.
+- Writer lifecycle state is explicit: `temp_created`, `temp_fd_open`, `temp_close_attempted`,
+  `temp_close_complete`, `temp_cleanup_attempted`, `temp_cleanup_complete`,
+  `destination_published`, `parent_sync_attempted`, `parent_sync_confirmed`, and
+  `primary_reasons`.
+- Result construction happens once after operation, bounded temp fd close retry, bounded temp unlink
+  retry, and published-parent sync attempt. No failure reason is inferred for an unattempted step.
+- Fixed taxonomy: invalid snapshot / invalid destination type / malformed dependency result →
+  `INVALID`; missing parent / parent not directory / existing destination → `NOT_WRITTEN`;
+  complete publish → `WRITTEN`; published destination with incomplete close/cleanup/durability or
+  identity bookkeeping → `PUBLISHED_INCOMPLETE`.
+- Temp fd close failure is recorded as `eligibility_artifact_file_temp_close_failed`; temp unlink and
+  close each use two fixed attempts. Successful retry does not leave a failure reason. `WRITTEN`
+  requires proven fd close, temp path removal, parent sync confirmation, and no primary reason.
+- Post-publish ordinary exceptions preserve published state (`PUBLISHED_INCOMPLETE`, digest/bytes
+  retained). Fatal process-control exceptions still propagate.
+- Runtime activation posture remains NO-GO; read/decode `VALID` remains consistency-only, not
+  authenticity, provenance, approval consumption, replay protection, signing, or activation.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live

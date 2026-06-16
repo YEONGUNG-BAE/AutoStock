@@ -32,10 +32,11 @@ Invariants:
 - `WRITTEN`: `reason_codes == ()`, digest lowercase hex64, `bytes_written > 0`, destination
   published, temp cleanup complete, parent directory sync confirmed
 - `PUBLISHED_INCOMPLETE`: destination published, digest lowercase hex64, `bytes_written > 0`,
-  `reason_codes` canonical nonempty tuple (may contain **two** stable reasons — see cleanup/sync
-  ordering below). Does **not** mean activation-authorized or durable consumption-ready.
+  `reason_codes` canonical nonempty tuple (primary operation reason, temp close failure, temp cleanup
+  failure, parent-sync failure, in that order when present). Does **not** mean activation-authorized
+  or durable consumption-ready.
 - `NOT_WRITTEN`: destination was **not** published; digest `None`; `bytes_written None`; one or two
-  stable reasons (pre-publish primary + optional temp cleanup failure)
+  stable reasons (pre-publish primary + optional temp close/cleanup failure)
 - `INVALID`: invalid input/snapshot; filesystem publication **not attempted**; digest `None`;
   `bytes_written None`; exactly one stable reason
 
@@ -56,21 +57,22 @@ eligibility_artifact_file_temp_create_failed
 eligibility_artifact_file_write_failed
 eligibility_artifact_file_publish_failed
 eligibility_artifact_file_sync_failed
+eligibility_artifact_file_temp_close_failed
 eligibility_artifact_file_temp_cleanup_failed
 ```
 
 Canonical reason order (deduped, no duplicates):
 
-- Pre-publish failure + temp cleanup failure:
-  `(primary_reason, eligibility_artifact_file_temp_cleanup_failed)`
+- Pre-publish failure + temp close/cleanup failure:
+  `(primary_reason, eligibility_artifact_file_temp_close_failed, eligibility_artifact_file_temp_cleanup_failed)`
 - Post-publish temp cleanup failure only:
   `(eligibility_artifact_file_temp_cleanup_failed,)`
 - Post-publish parent sync failure only:
   `(eligibility_artifact_file_sync_failed,)`
-- Post-publish temp cleanup + parent sync failure:
-  `(eligibility_artifact_file_temp_cleanup_failed, eligibility_artifact_file_sync_failed)`
+- Post-publish temp close + cleanup + parent sync failure:
+  `(eligibility_artifact_file_temp_close_failed, eligibility_artifact_file_temp_cleanup_failed, eligibility_artifact_file_sync_failed)`
 - Post-publish identity/publish defect + cleanup/sync failures: primary reason first, then cleanup,
-  then sync (same dedupe rules)
+  then sync (same dedupe rules). Temp close failure is ordered between primary and cleanup.
 
 Processing order:
 
@@ -85,9 +87,13 @@ Processing order:
 8. `fstat(temp_fd)` — temp identity capture (temp fd kept open until after publish)
 9. atomic publish: `os.link(temp, destination)` (create-new — no overwrite)
 10. `lstat(destination)` — dev/ino must match temp `fstat`; destination must be regular file
-11. close temp fd; temp `unlink` (failure recorded, not swallowed)
-12. parent-directory `fsync` (failure ⇒ `PUBLISHED_INCOMPLETE`, destination unchanged)
-13. result from explicit publication-state locals (`destination_published`, `temp_cleanup_complete`,
+11. close temp fd with exactly two bounded attempts; temp `unlink` with exactly two bounded attempts
+    (failure recorded, not swallowed; successful retry produces no failure reason)
+12. parent-directory `fsync` after every published path, including post-publish identity defects
+    (failure ⇒ `PUBLISHED_INCOMPLETE`, destination unchanged)
+13. result from explicit publication-state locals (`temp_created`, `temp_fd_open`,
+    `temp_close_attempted`, `temp_close_complete`, `temp_cleanup_attempted`,
+    `temp_cleanup_complete`, `destination_published`, `parent_sync_attempted`,
     `parent_sync_confirmed`, `primary_reasons`)
 
 Core invariants:
@@ -99,6 +105,8 @@ Core invariants:
 - destination invisible until publish completes
 - publish exposes complete canonical bytes only
 - temp removed after success when possible; cleanup failure visible in reason tuple
+- `WRITTEN` requires proven temp fd close, temp path cleanup, parent sync confirmed, and no primary
+  reason
 - no automatic ``runtime/`` path selection
 - published destination never reported `NOT_WRITTEN`
 
@@ -161,15 +169,25 @@ Reader creates/modifies/deletes **nothing** — no sidecar/temp/reconcile files.
 
 ## Failure cleanup
 
-On write failure **before** publish: destination unchanged; temp removed when possible. If temp
-cleanup itself fails after a primary failure, both reasons are returned in canonical order — cleanup
-error does **not** mask the root cause (`NOT_WRITTEN`).
+On write failure **before** publish: destination unchanged; temp removed when possible. If temp was
+never created, no cleanup reason is inferred. If temp close or cleanup itself fails after a primary
+failure, reasons are returned in canonical order — lifecycle errors do **not** mask the root cause
+(`NOT_WRITTEN`).
 
 On write failure **after** publish: destination bytes remain; outcome `PUBLISHED_INCOMPLETE`; digest
-and `bytes_written` preserved; temp cleanup and/or parent sync failures appear in `reason_codes`.
+and `bytes_written` preserved; temp close, temp cleanup, parent sync, and post-publish identity
+defects appear in `reason_codes`.
+
+The writer does not build a result before filesystem lifecycle cleanup is complete. Operation phase
+records publication state, cleanup/close phase completes bounded attempts, parent sync phase runs
+when destination was published, and final result construction happens once from that final state.
+No failure reason is inferred for an unattempted step. `sync_failed` is used for a real failed temp
+file `fsync` or a real failed parent-directory `fsync`; an unattempted parent sync contributes no
+parent-sync reason.
 
 Ordinary filesystem exceptions map to stable outcomes — no raw path/errno/exception in reason codes.
-`MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised.
+Post-publish ordinary exceptions preserve publication state and return `PUBLISHED_INCOMPLETE`, never
+`NOT_WRITTEN`. `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised.
 
 ## Dependency result invariants
 
@@ -237,6 +255,32 @@ replay, signing, or activation:
 - **Reader identity and complete-read:** `lstat`/`fstat` dev/ino match; bounded read +
   mandatory 1-byte EOF probe; post-read `fstat` size/identity unchanged; decoder called exactly once
   only after stable complete read.
+
+## RTM-7c.4x final writer-state and cleanup-truth closure
+
+Closes the final writer-state review items without adding CLI, consumption, replay, signing, or
+activation:
+
+- Temp lifecycle state is explicit: `temp_created`, `temp_fd_open`, `temp_close_attempted`,
+  `temp_close_complete`, `temp_cleanup_attempted`, `temp_cleanup_complete`,
+  `destination_published`, `parent_sync_attempted`, `parent_sync_confirmed`, and
+  `primary_reasons`.
+- Temp create failure (`_open_exclusive_temp(...) -> None`) returns `NOT_WRITTEN` /
+  `eligibility_artifact_file_temp_create_failed` only; `temp_cleanup_failed` is not inferred and no
+  residue is expected.
+- Temp fd close failures are visible as `eligibility_artifact_file_temp_close_failed`. A successful
+  close retry produces no failure reason. `WRITTEN` is impossible unless close completion is proven.
+- Temp unlink uses a fixed two-attempt retry. A transient first failure followed by success returns
+  the final successful cleanup state; all failed attempts return `temp_cleanup_failed`.
+- Published paths attempt parent-directory fsync even when a post-publish identity check fails.
+  `parent_sync_attempted` and `parent_sync_confirmed` are separate; unattempted parent sync is not
+  reported as failed.
+- Ordinary exceptions after publish preserve `destination_published=True` and return
+  `PUBLISHED_INCOMPLETE` with digest/bytes preserved; raw exception/path/errno is not surfaced.
+- Result taxonomy is fixed: invalid snapshot, invalid destination type, and malformed dependency
+  result are `INVALID`; missing parent, parent not directory, and existing destination are
+  `NOT_WRITTEN`; complete publish is `WRITTEN`; published-but-incomplete lifecycle is
+  `PUBLISHED_INCOMPLETE`.
 
 **Still OPEN (unchanged posture):** file-path CLI, automatic path selection, actual approval
 consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity
