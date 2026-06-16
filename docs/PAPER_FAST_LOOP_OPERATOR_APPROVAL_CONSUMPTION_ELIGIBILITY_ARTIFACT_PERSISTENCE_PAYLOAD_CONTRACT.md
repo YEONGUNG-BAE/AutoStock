@@ -189,9 +189,10 @@ activation caller/token; `--run`; KIS/network; broker/order; operational DB writ
 File persistence is implemented in RTM-7c.4x
 (`PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`) — atomic
 create-new writer + read-only reader over this byte format; **no CLI** in that lane. The 4x
-resource-finalization closure keeps this payload contract unchanged while requiring the file writer
-to validate exact path before encode, classify ordinary encoder failures as `INVALID`, build results
-only after one-shot temp fd close, bounded temp unlink, and published-parent sync attempts complete,
-recover temp-create/link side effects by post-condition checks, and require reader/directory fd close
-truth. Read/decode `VALID` remains consistency-only, not
-authenticity/provenance/consumption/activation.
+resource-finalization and fatal-cleanup closures keep this payload contract unchanged while requiring
+the file writer to validate exact path before encode, classify ordinary encoder failures as
+`INVALID`, put temp-name generation inside the lifecycle boundary, build results only after one-shot
+temp fd close, bounded temp unlink, and published-parent sync attempts complete, recover
+temp-create/link side effects by post-condition checks, run fatal cleanup through a single
+per-step-isolated coordinator, and require reader/directory fd close truth. Read/decode `VALID`
+remains consistency-only, not authenticity/provenance/consumption/activation.

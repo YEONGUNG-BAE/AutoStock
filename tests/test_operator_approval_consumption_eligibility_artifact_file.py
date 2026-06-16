@@ -1019,6 +1019,359 @@ def test_write_fatal_after_link_side_effect_preserves_original_and_cleans(
     assert sync_calls == [tmp_path]
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_unlink_calls"),
+    [
+        ("none", 1),
+        ("close", 1),
+        ("unlink", 2),
+        ("sync", 1),
+    ],
+)
+def test_write_link_fatal_cleanup_single_pass_exact_counts(
+    failure: str,
+    expected_unlink_calls: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open_temp = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    real_link = os.link
+    real_lstat = os.lstat
+    temp_fds: list[int] = []
+    calls = {"close": 0, "unlink": 0, "sync": 0, "recovery_lstat": 0}
+
+    def _open(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        temp_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if temp_fds and fd == temp_fds[0]:
+            calls["close"] += 1
+            if failure == "close":
+                raise OSError("SECRET_close")
+        real_close(fd)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+            if failure == "unlink":
+                raise OSError("SECRET_unlink")
+        real_unlink(path)
+
+    def _link_then_fatal(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise MemoryError()
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest and dest.exists():
+            calls["recovery_lstat"] += 1
+        return real_lstat(path)
+
+    def _sync(_directory: Path) -> bool:
+        calls["sync"] += 1
+        return failure != "sync"
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod.os, "link", _link_then_fatal)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod, "_fsync_directory", _sync)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+    if failure == "close" and temp_fds:
+        real_close(temp_fds[0])
+
+    assert calls == {
+        "close": 1,
+        "unlink": expected_unlink_calls,
+        "sync": 1,
+        "recovery_lstat": 1,
+    }
+    assert dest.exists()
+    if failure != "unlink":
+        assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+
+
+def test_write_temp_create_recovery_fatal_preserves_original_and_unlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open_temp = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    real_lstat = os.lstat
+    calls = {"unlink": 0}
+
+    def _create_then_fatal(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        real_close(fd)
+        raise MemoryError()
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if _is_temp_path(path, tmp_path):
+            raise KeyboardInterrupt()
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _create_then_fatal)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert calls["unlink"] == 1
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
+
+
+@pytest.mark.parametrize(
+    ("original", "recovery"),
+    [(KeyboardInterrupt, MemoryError), (SystemExit, RuntimeError)],
+)
+def test_write_link_recovery_exception_preserves_original_and_continues_cleanup(
+    original: type[BaseException],
+    recovery: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    real_lstat = os.lstat
+    sync_calls: list[Path] = []
+    unlink_calls = {"n": 0}
+    real_unlink = os.unlink
+
+    def _link_then_original(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise original()
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest and dest.exists():
+            raise recovery("SECRET_recovery")
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            unlink_calls["n"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod.os, "link", _link_then_original)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda directory: sync_calls.append(directory) or True)
+
+    with pytest.raises(original):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert unlink_calls["n"] == 1
+    assert sync_calls == [tmp_path]
+
+
+@pytest.mark.parametrize("cleanup_failure", ["close", "unlink", "sync"])
+def test_write_cleanup_fatal_preserves_original_and_runs_later_steps(
+    cleanup_failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open_temp = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    real_link = os.link
+    temp_fds: list[int] = []
+    calls = {"close": 0, "unlink": 0, "sync": 0}
+
+    def _open(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        temp_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if temp_fds and fd == temp_fds[0]:
+            calls["close"] += 1
+            if cleanup_failure == "close":
+                raise KeyboardInterrupt()
+        real_close(fd)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+            if cleanup_failure == "unlink":
+                raise KeyboardInterrupt()
+        real_unlink(path)
+
+    def _link_then_fatal(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise MemoryError()
+
+    def _sync(_directory: Path) -> bool:
+        calls["sync"] += 1
+        if cleanup_failure == "sync":
+            raise KeyboardInterrupt()
+        return True
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod.os, "link", _link_then_fatal)
+    monkeypatch.setattr(file_mod, "_fsync_directory", _sync)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+    if cleanup_failure == "close" and temp_fds:
+        real_close(temp_fds[0])
+
+    assert calls["close"] == 1
+    assert calls["unlink"] == 1
+    assert calls["sync"] == 1
+
+
+def test_write_cleanup_fatal_without_operation_fatal_runs_later_steps_and_raises_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open_temp = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    temp_fds: list[int] = []
+    calls = {"close": 0, "unlink": 0, "sync": 0}
+
+    def _open(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        temp_fds.append(fd)
+        return fd
+
+    def _close(fd: int) -> None:
+        if temp_fds and fd == temp_fds[0]:
+            calls["close"] += 1
+            raise KeyboardInterrupt()
+        real_close(fd)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda _directory: calls.__setitem__("sync", calls["sync"] + 1) or True)
+
+    with pytest.raises(KeyboardInterrupt):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+    if temp_fds:
+        real_close(temp_fds[0])
+
+    assert calls == {"close": 1, "unlink": 1, "sync": 1}
+
+
+@pytest.mark.parametrize("exc", [RuntimeError, OSError])
+def test_write_temp_name_ordinary_exception_is_temp_create_failed_no_publication_fs(
+    exc: type[Exception],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    calls: list[str] = []
+
+    def _poison(*_args: object, **_kwargs: object) -> object:
+        calls.append("fs")
+        raise AssertionError("publication fs should not run")
+
+    monkeypatch.setattr(file_mod.secrets, "token_hex", lambda _n: (_ for _ in ()).throw(exc("SECRET_token")))
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _poison)
+    monkeypatch.setattr(file_mod.os, "write", _poison)
+    monkeypatch.setattr(file_mod.os, "link", _poison)
+    monkeypatch.setattr(file_mod.os, "fsync", _poison)
+
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_temp_create_failed",)
+    assert calls == []
+    assert _count_files(tmp_path) == 0
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+@pytest.mark.parametrize("exc", [MemoryError, KeyboardInterrupt, SystemExit])
+def test_write_temp_name_fatal_propagates_no_publication_fs(
+    exc: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def _poison(*_args: object, **_kwargs: object) -> object:
+        calls.append("fs")
+        raise AssertionError("publication fs should not run")
+
+    monkeypatch.setattr(file_mod.secrets, "token_hex", lambda _n: (_ for _ in ()).throw(exc()))
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _poison)
+    monkeypatch.setattr(file_mod.os, "write", _poison)
+    monkeypatch.setattr(file_mod.os, "link", _poison)
+    monkeypatch.setattr(file_mod.os, "fsync", _poison)
+
+    with pytest.raises(exc):
+        write_file(snapshot=_valid_snapshot(), destination=tmp_path / "artifact.json")
+
+    assert calls == []
+    assert _count_files(tmp_path) == 0
+
+
+def test_write_link_side_effect_eexist_recovered_as_publish_failed_not_destination_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    sync_calls: list[Path] = []
+
+    def _link_then_eexist(src: str | bytes, dst: str | bytes) -> None:
+        real_link(src, dst)
+        raise OSError(errno.EEXIST, "SECRET_exists")
+
+    monkeypatch.setattr(file_mod.os, "link", _link_then_eexist)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda directory: sync_calls.append(directory) or True)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE
+    assert res.reason_codes == ("eligibility_artifact_file_publish_failed",)
+    assert "eligibility_artifact_file_destination_exists" not in res.reason_codes
+    assert res.bytes_written == len(encode(_valid_snapshot()).payload_bytes)
+    assert dest.exists()
+    assert sync_calls == [tmp_path]
+
+
+def test_write_link_eexist_external_destination_mismatch_is_not_written_destination_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+
+    def _external_then_eexist(_src: str | bytes, _dst: str | bytes) -> None:
+        dest.write_bytes(b"external")
+        raise OSError(errno.EEXIST, "SECRET_exists")
+
+    monkeypatch.setattr(file_mod.os, "link", _external_then_eexist)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_destination_exists",)
+    assert dest.read_bytes() == b"external"
+
+
 def test_write_call_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[str] = []
     real_encode = file_mod.encode_verified_operator_approval_consumption_eligibility_artifact

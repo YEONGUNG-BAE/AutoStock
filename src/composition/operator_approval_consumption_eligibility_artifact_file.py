@@ -179,7 +179,7 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     if dest_error is not None:
         return _write_not_written(dest_error)
 
-    temp_path = dest.parent / f"{_TEMP_PREFIX}{secrets.token_hex(16)}"
+    temp_path: Path | None = None
     temp_fd: int | None = None
     temp_created = False
     temp_fd_open = False
@@ -215,7 +215,7 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
 
     def _attempt_temp_cleanup() -> None:
         nonlocal temp_cleanup_attempted, temp_cleanup_complete
-        if not temp_created or temp_cleanup_complete:
+        if temp_path is None or not temp_created or temp_cleanup_complete:
             return
         temp_cleanup_attempted = True
         for _ in range(_TEMP_UNLINK_ATTEMPTS):
@@ -324,59 +324,98 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                 bytes_written=None,
             )
 
-    def _recover_temp_create_side_effect() -> None:
+    def _recover_temp_create_side_effect(*, preserve_pending_fatal: bool) -> None:
         nonlocal temp_created
-        if temp_created:
+        if temp_path is None or temp_created:
             return
         try:
             os.lstat(temp_path)
         except (FileNotFoundError, OSError):
             return
         except (MemoryError, KeyboardInterrupt, SystemExit):
+            if preserve_pending_fatal:
+                temp_created = True
+                return
             raise
         except Exception:
+            if preserve_pending_fatal:
+                temp_created = True
             return
         temp_created = True
 
-    def _recover_publish_side_effect(temp_stat: os.stat_result | None) -> None:
+    def _recover_publish_side_effect(
+        temp_stat: os.stat_result | None,
+        *,
+        preserve_pending_fatal: bool,
+    ) -> bool:
         nonlocal destination_published
         if destination_published or temp_stat is None:
-            return
+            return destination_published
         try:
             dest_stat = os.lstat(dest)
         except (FileNotFoundError, OSError):
-            return
+            return False
         except (MemoryError, KeyboardInterrupt, SystemExit):
+            if preserve_pending_fatal:
+                destination_published = True
+                return False
             raise
         except Exception:
-            return
+            if preserve_pending_fatal:
+                destination_published = True
+            return False
         if (
             stat.S_ISREG(dest_stat.st_mode)
             and dest_stat.st_dev == temp_stat.st_dev
             and dest_stat.st_ino == temp_stat.st_ino
         ):
             destination_published = True
+        return destination_published
 
-    def _cleanup_after_fatal(original: BaseException) -> None:
+    def _cleanup_lifecycle(*, pending_fatal: BaseException | None) -> BaseException | None:
+        fatal_to_raise = pending_fatal
         try:
             _attempt_temp_close()
-            _attempt_temp_cleanup()
-            _attempt_parent_sync()
-        except (MemoryError, KeyboardInterrupt, SystemExit):
-            pass
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            if fatal_to_raise is None:
+                fatal_to_raise = exc
         except Exception:
             pass
-        raise original
+        try:
+            _attempt_temp_cleanup()
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            if fatal_to_raise is None:
+                fatal_to_raise = exc
+        except Exception:
+            pass
+        try:
+            _attempt_parent_sync()
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            if fatal_to_raise is None:
+                fatal_to_raise = exc
+        except Exception:
+            pass
+        return fatal_to_raise
 
     temp_stat: os.stat_result | None = None
     try:
-        operation_stage = "temp_create"
-        temp_fd = _open_exclusive_temp(temp_path)
-        if temp_fd is None:
+        operation_stage = "temp_name"
+        try:
+            temp_path = dest.parent / f"{_TEMP_PREFIX}{secrets.token_hex(16)}"
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
             _append_primary(_REASON_TEMP_CREATE_FAILED)
-        else:
-            temp_created = True
-            temp_fd_open = True
+
+        operation_stage = "temp_create"
+        if not primary_reasons:
+            assert temp_path is not None
+            temp_fd = _open_exclusive_temp(temp_path)
+            if temp_fd is None:
+                _append_primary(_REASON_TEMP_CREATE_FAILED)
+            else:
+                temp_created = True
+                temp_fd_open = True
 
         if temp_created and not primary_reasons:
             operation_stage = "write"
@@ -400,14 +439,19 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                 operation_stage = "link"
                 os.link(temp_path, dest)
             except OSError as exc:
-                _recover_publish_side_effect(temp_stat)
-                if exc.errno in (errno.EEXIST, errno.ENOTDIR):
+                recovered = _recover_publish_side_effect(
+                    temp_stat,
+                    preserve_pending_fatal=False,
+                )
+                if recovered:
+                    _append_primary(_REASON_PUBLISH_FAILED)
+                elif exc.errno in (errno.EEXIST, errno.ENOTDIR):
                     _append_primary(_REASON_DESTINATION_EXISTS)
                 else:
                     _append_primary(_REASON_PUBLISH_FAILED)
             except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
-                _recover_publish_side_effect(temp_stat)
-                _cleanup_after_fatal(exc)
+                _recover_publish_side_effect(temp_stat, preserve_pending_fatal=True)
+                raise exc
             else:
                 destination_published = True
 
@@ -430,25 +474,30 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                     _append_primary(_REASON_PUBLISH_FAILED)
     except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
         if operation_stage == "temp_create":
-            _recover_temp_create_side_effect()
+            _recover_temp_create_side_effect(preserve_pending_fatal=True)
         elif operation_stage == "link":
-            _recover_publish_side_effect(temp_stat)
-        _cleanup_after_fatal(exc)
+            _recover_publish_side_effect(temp_stat, preserve_pending_fatal=True)
+        pending_fatal = _cleanup_lifecycle(pending_fatal=exc)
+        assert pending_fatal is not None
+        raise pending_fatal
     except Exception:
         if operation_stage == "temp_create":
-            _recover_temp_create_side_effect()
+            _recover_temp_create_side_effect(preserve_pending_fatal=False)
             _append_primary(_REASON_TEMP_CREATE_FAILED)
         elif operation_stage == "link":
-            _recover_publish_side_effect(temp_stat)
+            recovered = _recover_publish_side_effect(
+                temp_stat,
+                preserve_pending_fatal=False,
+            )
             _append_primary(_REASON_PUBLISH_FAILED)
         elif destination_published:
             _append_primary(_REASON_PUBLISH_FAILED)
         else:
             _append_primary(_REASON_WRITE_FAILED)
 
-    _attempt_temp_close()
-    _attempt_temp_cleanup()
-    _attempt_parent_sync()
+    pending_fatal = _cleanup_lifecycle(pending_fatal=None)
+    if pending_fatal is not None:
+        raise pending_fatal
     return _safe_finalize()
 
 

@@ -517,14 +517,18 @@ touch network/credentials/DB/clock and never activate runtime:
   reported `NOT_WRITTEN`; temp close, temp cleanup, and parent sync failures visible in reason tuple.
   Resource-finalization closure builds the result once after one-shot temp fd close, bounded temp
   unlink, and published parent-sync attempt; unattempted lifecycle steps do not synthesize failure
-  reasons. Path validation → encode → same-directory temp (`O_EXCL`, `O_NOFOLLOW` when available,
-  mode `0o600`) → write/fsync → `fstat(temp)` → `os.link` create-new → dev/ino check → temp fd
-  close → temp unlink → parent fsync; no overwrite. Ordinary encoder exceptions are `INVALID` with
-  filesystem publication calls **0**; fatal operation exceptions propagate after best-effort cleanup
-  for acquired temp/published state. Side-effecting temp-create/link helper exceptions are recovered
-  by post-condition checks. Reader: `lstat`/`open`/`fstat` identity + bounded read + 1-byte EOF
-  probe + post-read `fstat` → close confirmed → persistence decoder exactly once. Read/decode VALID
-  = schema·semantic·hash consistency only — not authenticity, consumption, replay, signing, or
-  activation. Directory sync is complete only when directory fd close also succeeds.
+  reasons. Path validation → encode → temp-name generation → same-directory temp (`O_EXCL`,
+  `O_NOFOLLOW` when available, mode `0o600`) → write/fsync → `fstat(temp)` → `os.link` create-new →
+  dev/ino check → temp fd close → temp unlink → parent fsync; no overwrite. Ordinary encoder
+  exceptions are `INVALID` with filesystem publication calls **0**; ordinary temp-name exceptions are
+  `NOT_WRITTEN` / `temp_create_failed` with temp open/write/link/fsync calls **0**. Fatal operation
+  exceptions propagate after one central per-step-isolated cleanup coordinator runs exactly once for
+  acquired temp/published state; recovery exceptions never replace the original fatal.
+  Side-effecting temp-create/link helper exceptions are recovered by post-condition checks, including
+  `EEXIST` after a successful hard link (matching dev/ino ⇒ `PUBLISHED_INCOMPLETE` /
+  `publish_failed`, not `destination_exists`). Reader: `lstat`/`open`/`fstat` identity + bounded
+  read + 1-byte EOF probe + post-read `fstat` → close confirmed → persistence decoder exactly once.
+  Read/decode VALID = schema·semantic·hash consistency only — not authenticity, consumption,
+  replay, signing, or activation. Directory sync is complete only when directory fd close also succeeds.
   TOCTOU/parent-symlink/platform limits documented. See
   `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`.

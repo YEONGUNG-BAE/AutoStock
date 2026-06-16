@@ -83,19 +83,21 @@ Processing order:
    `MemoryError` / `KeyboardInterrupt` / `SystemExit` re-raised)
 3. parent exists and is a directory (writer does **not** create directories)
 4. destination create-new gate (`lstat`, no symlink follow on final component)
-5. same-directory temp create (`O_CREAT | O_EXCL`, `O_NOFOLLOW` when available, mode `0o600`)
-6. complete byte write (short-write loop)
-7. file `fsync` on temp fd
-8. `fstat(temp_fd)` — temp identity capture (temp fd kept open until after publish)
-9. atomic publish: `os.link(temp, destination)` (create-new — no overwrite)
-10. `lstat(destination)` — dev/ino must match temp `fstat`; destination must be regular file
-11. close temp fd exactly once; ordinary close failure makes close status uncertain and records
+5. temp-name generation (`secrets.token_hex`); ordinary exception ⇒ `NOT_WRITTEN` /
+   `temp_create_failed` with temp open/write/link/fsync calls **0**; fatal exception re-raised
+6. same-directory temp create (`O_CREAT | O_EXCL`, `O_NOFOLLOW` when available, mode `0o600`)
+7. complete byte write (short-write loop)
+8. file `fsync` on temp fd
+9. `fstat(temp_fd)` — temp identity capture (temp fd kept open until after publish)
+10. atomic publish: `os.link(temp, destination)` (create-new — no overwrite)
+11. `lstat(destination)` — dev/ino must match temp `fstat`; destination must be regular file
+12. close temp fd exactly once; ordinary close failure makes close status uncertain and records
     `eligibility_artifact_file_temp_close_failed` (no same-integer retry, no no-leak claim). Temp
     `unlink` uses exactly two bounded attempts (failure recorded, not swallowed; successful retry
     produces no failure reason)
-12. parent-directory `fsync` after every published path, including post-publish identity defects
+13. parent-directory `fsync` after every published path, including post-publish identity defects
     (failure ⇒ `PUBLISHED_INCOMPLETE`, destination unchanged)
-13. result from explicit publication-state locals (`temp_created`, `temp_fd_open`,
+14. result from explicit publication-state locals (`temp_created`, `temp_fd_open`,
     `temp_close_attempted`, `temp_close_complete`, `temp_cleanup_attempted`,
     `temp_cleanup_complete`, `destination_published`, `parent_sync_attempted`,
     `parent_sync_confirmed`, `primary_reasons`)
@@ -184,11 +186,10 @@ and `bytes_written` preserved; temp close, temp cleanup, parent sync, and post-p
 defects appear in `reason_codes`.
 
 The writer does not build a result before filesystem lifecycle cleanup is complete. Operation phase
-records publication state, cleanup/close phase completes bounded attempts, parent sync phase runs
-when destination was published, and final result construction happens once from that final state.
-No failure reason is inferred for an unattempted step. `sync_failed` is used for a real failed temp
-file `fsync` or a real failed parent-directory `fsync`; an unattempted parent sync contributes no
-parent-sync reason.
+records publication state, one central cleanup coordinator owns temp close, temp unlink, and parent
+sync, and final result construction happens once from that final state. No failure reason is
+inferred for an unattempted step. `sync_failed` is used for a real failed temp file `fsync` or a real
+failed parent-directory `fsync`; an unattempted parent sync contributes no parent-sync reason.
 
 Ordinary filesystem exceptions map to stable outcomes — no raw path/errno/exception in reason codes.
 Post-publish ordinary exceptions preserve publication state and return `PUBLISHED_INCOMPLETE`, never
@@ -199,10 +200,19 @@ destination `lstat` with temp `fstat`; a match is recovered as `destination_publ
 followed by temp cleanup and parent sync, and the result is `PUBLISHED_INCOMPLETE` /
 `publish_failed`.
 
+If `os.link` creates the hard link and then raises `OSError(EEXIST)`, dev/ino recovery takes
+precedence over the errno: matching destination ⇒ `PUBLISHED_INCOMPLETE` /
+`publish_failed` with digest/bytes retained, and **not** `destination_exists`. If a raced external
+destination does not match the temp identity, the result remains `NOT_WRITTEN` /
+`destination_exists`.
+
 `MemoryError` / `KeyboardInterrupt` / `SystemExit` from the operation phase are re-raised as the
-original fatal. When temp or destination state already exists, the writer first runs bounded
-best-effort close/unlink and published-parent sync; ordinary cleanup failures and cleanup-time fatal
-exceptions do not replace the original operation fatal.
+original fatal. When temp or destination state already exists, the writer runs the central cleanup
+coordinator exactly once for that operation fatal. Cleanup has independent per-step fatal boundaries:
+close fatal does not skip unlink or parent sync, unlink fatal does not skip parent sync, and
+cleanup-time fatal exceptions do not replace an original operation fatal. If there is no operation
+fatal and cleanup raises fatal, the first cleanup fatal is preserved while later cleanup steps still
+run.
 
 ## Dependency result invariants
 
@@ -321,6 +331,31 @@ signing, authentication, or activation:
   / `read_failed` and calls the decoder **0**; close fatal exceptions propagate.
 - **Parent-directory close truth:** directory fsync success is complete only when directory fd close
   also succeeds. Directory close failure after publish is `PUBLISHED_INCOMPLETE` / `sync_failed`.
+
+## RTM-7c.4x fatal-cleanup single-pass closure
+
+Closes the fatal-cleanup single-pass review items without adding CLI, consumption, replay, signing,
+authentication, or activation:
+
+- **Single cleanup owner:** operation fatal paths never run cleanup in an inner handler. Side-effect
+  recovery records temp/publish state, then the outer fatal boundary calls one cleanup coordinator
+  exactly once.
+- **Exact cleanup bounds:** for one operation fatal, temp close is attempted at most once, temp
+  unlink at most two times, and parent sync at most once. Link-fatal tests pin the exact counts for
+  successful cleanup, close failure, unlink failure, and parent-sync failure.
+- **Original fatal precedence:** recovery ordinary/fatal exceptions never replace the original
+  operation fatal. Recovery failure still allows best-effort close/unlink/parent-sync to continue.
+- **Per-step cleanup isolation:** cleanup close, unlink, and parent sync each have an independent
+  fatal boundary. With an original operation fatal, cleanup fatal is suppressed in favor of the
+  original; without an operation fatal, the first cleanup fatal is preserved after later cleanup
+  steps run.
+- **Temp-name boundary:** temp-name generation belongs to the temp lifecycle boundary. Ordinary
+  `token_hex` failure returns `NOT_WRITTEN` / `temp_create_failed` with temp open/write/link/fsync
+  calls **0**; fatal `token_hex` failure propagates with filesystem residue **0**.
+- **Recovered `EEXIST`:** if `os.link` creates the destination and then raises `EEXIST`, matching
+  dev/ino is classified as recovered publish (`PUBLISHED_INCOMPLETE` / `publish_failed`), not
+  `destination_exists`; a mismatched external destination remains `NOT_WRITTEN` /
+  `destination_exists`.
 
 **Still OPEN (unchanged posture):** file-path CLI, automatic path selection, actual approval
 consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity
