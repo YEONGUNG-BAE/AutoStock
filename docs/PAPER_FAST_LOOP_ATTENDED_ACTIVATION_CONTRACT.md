@@ -15,8 +15,11 @@ but it does not consume approval, send live orders, or make the 1-day pilot
 ready without a separate Reviewer PASS. RTM-7c.5a/5b closes the diagnostic lane's
 output ownership, fatal lifecycle, lock-release state, and publication four-state model
 (admission failures write zero files; cleanup/operation fatal blocks PASS summary;
-returned/persisted equality only for `WRITTEN`; lock release is structured and always
-attempted last; startup probe surfaces `source_close_failed` and preserves fatals) —
+persisted mechanical summary is separated from the returned envelope and `persisted_summary`
+byte-equals the file only for `WRITTEN`; a single-owner `is_clean_pass` predicate owns exit 0;
+lock acquire/release is partial-side-effect-safe and identity-safe — no stale lock/fd, foreign
+lock never unlinked; every publisher exception still releases the lock exactly once; an
+uncancellable startup consumer is bounded as `source_close_timeout`) —
 none of which authorizes activation. Actual KIS startup/run and the 1-day pilot remain
 **NO-GO** until Reviewer PASS.
 
@@ -219,8 +222,17 @@ reverse order while preserving the original exception. A completed market loop i
 fixed-precedence completion verdict that downgrades to a stable NO_GO reason. Path admission
 rejects dangling final-component symlinks and rollback-journal sidecars. Transport
 `connect_attempts`/`disconnects` are single-owner (lifecycle only). The live startup probe returns
-on subscription ACK (asyncio `FIRST_COMPLETED`) without waiting for a market event. The actual
-live KIS run and the 1-day pilot have not been performed and remain NO-GO until Reviewer PASS.
+on subscription ACK (asyncio `FIRST_COMPLETED`) without waiting for a market event. The further
+clean-pass/lock-identity/publication-boundary closure separates the persisted mechanical summary
+from the returned envelope (`persisted_summary` byte-equals the file only for `WRITTEN`, else
+`null`; cleanup/publication/lock keys are never written to disk); makes a single-owner
+`is_clean_pass` predicate (PASS + WRITTEN + `runtime_lock_fd_closed` + `runtime_lock_absent_confirmed`
++ no release reason + `cleanup_outcome == CLEAN`) own exit 0; bounds lock acquire/release so a
+partial acquire leaves no stale lock/fd and a replaced/foreign lock is never unlinked
+(`runtime_lock_identity_mismatch`); routes every publisher exception through the lock release exactly
+once; treats `MemoryError` as fatal at every boundary; and bounds an uncancellable startup consumer
+(`source_close_timeout`). The actual live KIS run and the 1-day pilot have not been performed and
+remain NO-GO until Reviewer PASS.
 
 ## Orphan sidecar observation limit
 

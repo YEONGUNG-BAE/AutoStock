@@ -89,15 +89,54 @@ and `PUBLICATION_UNCERTAIN`:
 
 Anything other than `WRITTEN` downgrades the returned run to `FAIL` with stable
 reasons (`summary_failed`, `summary_published_incomplete`,
-`summary_publication_uncertain`). **Persisted/returned byte equality is claimed
-only when `summary_publication_outcome == WRITTEN`.** For
-`PUBLICATION_UNCERTAIN` or lock-release uncertainty the operator must manually
-inspect/isolate the on-disk file.
+`summary_publication_uncertain`). For `PUBLICATION_UNCERTAIN` or lock-release
+uncertainty the operator must manually inspect/isolate the on-disk file.
+
+Persisted summary vs returned envelope: the **persisted file** holds only the
+immutable mechanical summary (`_build_summary` scalars). The **returned envelope**
+is a superset that wraps that mechanical summary with cleanup/publication/lock
+observations (`persisted_summary`, `summary_publication_outcome`,
+`summary_publication_reason_codes`, `runtime_lock_fd_closed`,
+`runtime_lock_unlinked`, `runtime_lock_absent_confirmed`,
+`runtime_lock_identity_matched`, `runtime_lock_release_reason_code`,
+`cleanup_outcome`). These envelope-only keys are **never written to the persisted
+file**. `persisted_summary` carries the exact object serialized to disk **only
+when `summary_publication_outcome == WRITTEN`** (byte-for-byte equality is
+asserted only then); otherwise it is `null`. The persisted file may therefore
+read `PASS` while the envelope's final `outcome` is downgraded — the persisted
+mechanical observation and the operator verdict are distinct artifacts.
+
+Clean-exit predicate (single owner `is_clean_pass`, shared by CLI and runtime):
+a run is a clean `PASS` (exit `0`) only when **every** clause holds —
+`outcome == PASS`, `summary_publication_outcome == WRITTEN`,
+`runtime_lock_fd_closed == true`, `runtime_lock_absent_confirmed == true`,
+`runtime_lock_release_reason_code is None`, and `cleanup_outcome == CLEAN`.
+Any failing clause downgrades the returned `outcome` to `FAIL` with a stable
+block reason while the persisted mechanical file is left untouched.
 
 **Cleanup or operation fatal blocks PASS summary publish (Choice A):** when an
 operation fatal (`MemoryError`, `KeyboardInterrupt`, `SystemExit`) or cleanup
 fatal is pending, no summary file is written; lock release is still attempted;
 the original fatal is re-raised after finalize.
+
+Publication exception boundary: the publish step is wrapped so that **no
+publisher exception can skip the lock release**. An ordinary exception escaping
+the publisher (including its own `parent.mkdir`/serialization/directory-sync
+paths) becomes a stable `NOT_WRITTEN`/`summary_publish_failed` result and marks
+cleanup `INCOMPLETE`; a fatal is captured as a pending cleanup fatal
+(`NOT_WRITTEN`/`operation_fatal`). Either way control falls through to the lock
+release, which runs **exactly once**. The parent-directory fsync is a structured
+`DirectorySyncResult` (open/fsync/close never let an `OSError` escape; a fatal is
+carried in the result and re-raised by the caller), so a directory-sync failure
+can no longer bypass lock release the way a raw `os.close` in a `finally` once
+did.
+
+Fatal boundary consistency: every operation boundary distinguishes fatals from
+ordinary failures with `except (MemoryError, KeyboardInterrupt, SystemExit):
+raise` ahead of `except Exception:`. This holds uniformly at `recorder.open`,
+the diagnostic-stack builder, the source factory (probe path), the summary
+publisher's `parent.mkdir`, and the directory-sync helper — a `MemoryError` is
+never absorbed as an ordinary failure at any of them.
 
 Evidence/summary consistency: the final evidence record is written and the
 evidence recorder is closed **before** the summary is built and published.
@@ -114,12 +153,41 @@ is retained. Fatal identity is preserved (re-raised) with precedence:
 operation > source cleanup > stack/resource cleanup > recorder cleanup > summary
 publication > lock cleanup.
 
+Cleanup outcome: finalize computes a single `cleanup_outcome` over the whole
+bounded cleanup (stack close, recorder close, summary publish, lock release):
+
+- `FATAL`: any pending operation or cleanup fatal — no PASS, fatal re-raised.
+- `INCOMPLETE`: an ordinary (non-fatal) cleanup failure — a stack/recorder close
+  failure, an ordinary publisher exception, or a lock release that did not close
+  the fd / produced a release reason. Forbids a clean PASS.
+- `CLEAN`: every bounded cleanup step succeeded. A `PUBLISHED_INCOMPLETE` /
+  `PUBLICATION_UNCERTAIN` publication is **not** an `INCOMPLETE` cleanup (the
+  cleanup itself succeeded); the publication clause of the clean-exit predicate
+  denies PASS independently.
+
+Lock acquire is partial-side-effect-safe: after the `O_EXCL` open, any failure
+of `fstat`/`write` rolls back — the fd is closed and the inode is unlinked **only
+when its `(st_dev, st_ino)` still matches the one we created**. A fatal during
+write is re-raised after rollback; an ordinary failure yields
+`runtime_lock_acquire_failed` (rollback confirmed) or
+`runtime_lock_acquire_uncertain` (rollback could not be confirmed). The fd and
+identity are recorded only on a fully successful acquire, so a failed acquire
+leaves no stale lock and no leaked fd.
+
 Lock release returns structured state (`runtime_lock_fd_closed`,
 `runtime_lock_unlinked`, `runtime_lock_absent_confirmed`,
-`runtime_lock_release_reason_code`). `unlink` `ENOENT` confirms absent;
-`EACCES`/`EIO` yield `runtime_lock_release_uncertain`; other failures yield
-`runtime_lock_release_failed`. Lock residue or uncertain release forbids PASS
-return. No automatic stale-lock deletion after release failure.
+`runtime_lock_identity_matched`, `runtime_lock_release_reason_code`). It is
+identity-safe: it `lstat`s the path and unlinks **only** when the inode still
+matches the acquired identity. A replaced/foreign inode is left intact and
+reported `runtime_lock_identity_mismatch` (never unlinked). `unlink` `ENOENT`
+confirms absent; `EACCES`/`EIO` yield `runtime_lock_release_uncertain`; other
+failures yield `runtime_lock_release_failed`. fd-close and unlink are observed
+independently: an fd-close `OSError` sets `runtime_lock_fd_closed == false` and a
+release reason even when the subsequent unlink succeeds. A fatal during release
+is not raised from `release()` — it is returned in the result and re-raised by
+the outer owner. Lock residue, fd-close failure, identity mismatch, or uncertain
+release forbids PASS return. No automatic stale-lock deletion after release
+failure.
 
 Transport readiness counters are owned by source lifecycle events only:
 connect attempts, connected state, subscription requests, ACKs, rejects, and
@@ -146,9 +214,15 @@ subscription ACK rejected              -> NO_GO/subscription_rejected
 consumer exhausts before readiness     -> NO_GO/transport_not_ready
 consumer/source raises                 -> FAIL/source_failed
 generator close raises (non-cancel)    -> FAIL/source_close_failed
+consumer ignores cancel (no close)     -> FAIL/source_close_timeout
 generator close fatal                  -> fatal preserved (no PASS summary)
 receive timeout without readiness      -> NO_GO/health_not_ready
 ```
+
+Bounded cancellation: after the consumer is cancelled, the cleanup await is
+bounded by `asyncio.wait_for(asyncio.shield(consumer), PROBE_CLEANUP_TIMEOUT_SECONDS)`.
+A consumer that ignores `CancelledError` cannot hang the probe — the timeout
+yields `FAIL/source_close_timeout`.
 
 The probe inspects the consumer task's exception explicitly rather than
 suppressing it; suppressing a consumer exception and then reporting
@@ -171,16 +245,21 @@ NO_GO: transport_not_ready, subscription_rejected, trade_not_observed,
        quote_not_observed, health_not_ready, trigger_not_evaluated,
        journal_uncertain, reconcile_required, nonterminal_journal,
        resource_close_failure, runtime_lock_exists
-FAIL: invalid_input, source_failed, source_close_failed, evidence_failed,
-      summary_failed, summary_published_incomplete, summary_publication_uncertain,
-      runtime_lock_release_failed, runtime_lock_release_uncertain,
+FAIL: invalid_input, source_failed, source_close_failed, source_close_timeout,
+      evidence_failed, summary_failed, summary_published_incomplete,
+      summary_publication_uncertain, runtime_lock_acquire_failed,
+      runtime_lock_acquire_uncertain, runtime_lock_release_failed,
+      runtime_lock_release_uncertain, runtime_lock_identity_mismatch,
       db_failed, internal_runtime_error
 ```
 
-CLI exit: clean `PASS` + `summary_publication_outcome == WRITTEN` +
-`runtime_lock_absent_confirmed == true` → `0`; `NO_GO`/`FAIL`/`PUBLISHED_INCOMPLETE`/
-`PUBLICATION_UNCERTAIN`/lock-release failure → `1`; fatal propagates per policy.
-Existing `ops/run_paper_fast_loop.py --run` remains `NO_GO` with exit `2`.
+CLI exit: exit `0` only on the shared `is_clean_pass` predicate (`PASS` +
+`summary_publication_outcome == WRITTEN` + `runtime_lock_fd_closed == true` +
+`runtime_lock_absent_confirmed == true` + `runtime_lock_release_reason_code is
+None` + `cleanup_outcome == CLEAN`). `NO_GO`/`FAIL`/`PUBLISHED_INCOMPLETE`/
+`PUBLICATION_UNCERTAIN`/any lock fd-close, identity, or release failure → `1`;
+fatal propagates per policy. Existing `ops/run_paper_fast_loop.py --run` remains
+`NO_GO` with exit `2`.
 
 Completion verdict: a `completed` market loop is only confirmed `PASS` after a
 fixed-precedence re-check of the lifecycle counters. The verdict is evaluated

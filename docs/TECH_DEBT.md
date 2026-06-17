@@ -131,6 +131,31 @@
   `_close_partial_resources` structured precedence: operation fatal > cleanup fatal > constructor
   ordinary > cleanup ordinary. Resource `close()` preserves `MemoryError`/`KeyboardInterrupt`/
   `SystemExit` across all attempted closes.
+- RTM-7c.5a/5b clean-pass / lock-identity / publication-boundary closure (reproduced each
+  finding before fixing): (F1) persisted summary and returned envelope are now **distinct
+  artifacts** — the persisted file holds only the mechanical `_build_summary` scalars while the
+  envelope wraps it with `persisted_summary` + cleanup/publication/lock keys (envelope-only keys are
+  never written to disk). `persisted_summary` carries the on-disk object byte-for-byte **only** when
+  `summary_publication_outcome == WRITTEN` (else `null`); the subset-equality test that hid this was
+  replaced with an exact persisted/envelope contract test. (F2) An fd-close `OSError` during release
+  surfaces `runtime_lock_fd_closed == false` + a release reason even when unlink succeeds, so it can
+  no longer yield exit 0. (F3) The publish step is wrapped so **no publisher exception skips lock
+  release** — ordinary → stable `NOT_WRITTEN`/`summary_publish_failed` + cleanup `INCOMPLETE`; fatal →
+  pending cleanup fatal; lock release runs **exactly once** either way. `_fsync_directory` returns a
+  `DirectorySyncResult` (open/fsync/close never let `OSError` escape; fatal carried in result), fixing
+  the prior raw `os.close`-in-`finally` that bypassed release. (F4) `PilotRuntimeLock.acquire` is
+  partial-side-effect-safe: a post-`O_EXCL`-open `fstat`/`write` failure closes the fd and unlinks the
+  inode **only when `(st_dev, st_ino)` still matches**, leaving no stale lock/fd
+  (`runtime_lock_acquire_failed`/`_uncertain`); `release` is identity-safe and refuses to unlink a
+  replaced/foreign inode (`runtime_lock_identity_mismatch`, adds `runtime_lock_identity_matched`). (F5)
+  `MemoryError` is treated as fatal at every boundary (`recorder.open`, stack builder, source factory,
+  publisher `parent.mkdir`, directory-sync) via `except (MemoryError, KeyboardInterrupt, SystemExit):
+  raise` ahead of `except Exception:`. New `cleanup_outcome` (`CLEAN`/`INCOMPLETE`/`FATAL`) and a
+  single-owner `is_clean_pass` predicate (PASS + WRITTEN + fd_closed + lock_absent_confirmed +
+  no-release-reason + CLEAN) own the exit-0 decision shared by CLI and runtime. `DiagnosticStack.close`
+  closes in reverse construction order (journal → ledger → active_store). Bounded startup cancellation:
+  a consumer that ignores `CancelledError` is bounded by `PROBE_CLEANUP_TIMEOUT_SECONDS`
+  (`FAIL/source_close_timeout`).
 - Still NO-GO: actual KIS startup/run and the 1-day pilot have **not** been performed and remain
   NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures, and
   lifecycle-aware fakes; no commit is made until the Operator authorizes it.

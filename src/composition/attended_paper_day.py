@@ -18,7 +18,7 @@ import sqlite3
 import stat
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -99,6 +99,9 @@ PILOT_SYMBOL = "005930"
 PILOT_UNIVERSE = "KR_LARGE"
 SCHEMA_VERSION = "paper_day_diagnostic.v1"
 HEARTBEAT_SECONDS = 60
+# Upper bound on awaiting the startup-probe consumer's cancellation/cleanup so a
+# source that ignores cancellation cannot block the probe indefinitely.
+PROBE_CLEANUP_TIMEOUT_SECONDS = 5.0
 PILOT_DB_FILES = frozenset({"active.sqlite3", "ledger.sqlite3", "trigger_journal.sqlite3"})
 PILOT_DB_SIDECAR_SUFFIXES = (".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal")
 
@@ -127,7 +130,9 @@ class RuntimeLockReleaseResult:
     fd_closed: bool
     lock_unlinked: bool
     lock_absent_confirmed: bool
+    identity_matched: bool | None = None
     reason_code: str | None = None
+    fatal: BaseException | None = None
 
 
 @dataclass(frozen=True)
@@ -312,7 +317,9 @@ class DiagnosticStack:
         """모든 리소스 close를 시도하고, 첫 cleanup fatal을 보존한다."""
         failures = 0
         pending_fatal: BaseException | None = None
-        for resource in (self.active_store, self.journal, self.ledger):
+        # Reverse construction order (active_store, ledger, journal): the journal is
+        # closed first and the active_store last.
+        for resource in (self.journal, self.ledger, self.active_store):
             close = getattr(resource, "close", None)
             if callable(close):
                 try:
@@ -330,23 +337,80 @@ class PilotRuntimeLock:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._fd: int | None = None
+        # dev/ino of the inode we created; recorded only on a fully successful
+        # acquire so release can refuse to unlink a replaced/foreign lock.
+        self._identity: tuple[int, int] | None = None
 
     def acquire(self) -> None:
+        """Partial-side-effect-safe 취득.
+
+        ``os.open``(O_EXCL) 이후의 어떤 실패(fstat/write)도 우리가 만든 inode를
+        close하고, 그 inode가 여전히 우리 것일 때만 unlink하여 stale lock/fd leak을
+        남기지 않는다. fd와 identity는 완전 성공에서만 보존한다.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(self._fd, b"locked\n")
+            fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
             raise AttendedPaperDayRuntimeError("lock", "runtime_lock_exists") from exc
         except OSError as exc:
             raise AttendedPaperDayRuntimeError("lock", "runtime_lock_failed") from exc
 
+        identity: tuple[int, int] | None = None
+        try:
+            st = os.fstat(fd)
+            identity = (st.st_dev, st.st_ino)
+            os.write(fd, b"locked\n")
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            self._abort_partial_acquire(fd, identity)
+            raise
+        except BaseException as exc:
+            uncertain = self._abort_partial_acquire(fd, identity)
+            reason = (
+                "runtime_lock_acquire_uncertain" if uncertain else "runtime_lock_acquire_failed"
+            )
+            cause = exc if isinstance(exc, Exception) else None
+            raise AttendedPaperDayRuntimeError("lock", reason) from cause
+
+        self._fd = fd
+        self._identity = identity
+
+    def _abort_partial_acquire(self, fd: int, identity: tuple[int, int] | None) -> bool:
+        """부분 취득 롤백: fd close + (우리 inode일 때만) unlink. 미확정이면 True."""
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        try:
+            st = os.lstat(self._path)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        # Only remove the lock file when we can confirm it is still the inode we
+        # created. A replaced/foreign lock (or an unverifiable one) is left intact.
+        if identity is None or (st.st_dev, st.st_ino) != identity:
+            return True
+        try:
+            os.unlink(self._path)
+            return False
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+
     def release(self) -> RuntimeLockReleaseResult:
-        """fd close와 unlink를 별도 관찰하고, lock 부재를 확정할 수 없으면 reason을 반환한다."""
+        """fd close와 identity-safe unlink를 분리 관찰한다.
+
+        fd close가 실패해도 unlink identity 검사를 계속 시도한다. 취득한 inode와 다른
+        lock(replaced/foreign)은 unlink하지 않고 ``runtime_lock_identity_mismatch``로
+        보고한다. fatal은 raise하지 않고 결과에 담아 outer owner가 처리하게 한다.
+        """
         fd_closed = self._fd is None
         lock_unlinked = False
         lock_absent_confirmed = False
+        identity_matched: bool | None = None
         reason_code: str | None = None
+        fatal: BaseException | None = None
+
         if self._fd is not None:
             fd = self._fd
             self._fd = None
@@ -356,13 +420,14 @@ class PilotRuntimeLock:
             except OSError:
                 fd_closed = False
                 reason_code = "runtime_lock_release_failed"
+
         try:
-            self._path.unlink()
-            lock_unlinked = True
-            lock_absent_confirmed = True
+            st = os.lstat(self._path)
         except FileNotFoundError:
             lock_unlinked = True
             lock_absent_confirmed = True
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            fatal = exc
         except PermissionError:
             reason_code = reason_code or "runtime_lock_release_uncertain"
         except OSError as exc:
@@ -370,17 +435,38 @@ class PilotRuntimeLock:
                 reason_code = reason_code or "runtime_lock_release_uncertain"
             else:
                 reason_code = reason_code or "runtime_lock_release_failed"
-        except (MemoryError, KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            reason_code = reason_code or "runtime_lock_release_failed"
-        if not lock_absent_confirmed and reason_code is None:
+        else:
+            if self._identity is not None and (st.st_dev, st.st_ino) != self._identity:
+                identity_matched = False
+                reason_code = reason_code or "runtime_lock_identity_mismatch"
+            else:
+                identity_matched = self._identity is not None or None
+                try:
+                    os.unlink(self._path)
+                    lock_unlinked = True
+                    lock_absent_confirmed = True
+                except FileNotFoundError:
+                    lock_unlinked = True
+                    lock_absent_confirmed = True
+                except PermissionError:
+                    reason_code = reason_code or "runtime_lock_release_uncertain"
+                except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                    fatal = exc
+                except OSError as exc:
+                    if exc.errno in (errno.EACCES, errno.EIO):
+                        reason_code = reason_code or "runtime_lock_release_uncertain"
+                    else:
+                        reason_code = reason_code or "runtime_lock_release_failed"
+
+        if not lock_absent_confirmed and reason_code is None and fatal is None:
             reason_code = "runtime_lock_release_failed"
         return RuntimeLockReleaseResult(
             fd_closed=fd_closed,
             lock_unlinked=lock_unlinked,
             lock_absent_confirmed=lock_absent_confirmed,
+            identity_matched=identity_matched,
             reason_code=reason_code,
+            fatal=fatal,
         )
 
 
@@ -837,6 +923,8 @@ def run_attended_paper_day(
             recorder.open()
         except AttendedPaperDayRuntimeError:
             raise
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
         except Exception as exc:
             raise AttendedPaperDayRuntimeError("evidence", "evidence_failed") from exc
         evidence_owned = True
@@ -874,6 +962,8 @@ def run_attended_paper_day(
                 config=config, counters=counters, on_execution_evidence=on_execution_evidence
             )
         except AttendedPaperDayRuntimeError:
+            raise
+        except (MemoryError, KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
             raise AttendedPaperDayRuntimeError("startup", "db_failed") from exc
@@ -1061,6 +1151,22 @@ def _build_summary(
     }
 
 
+def is_clean_pass(result: Mapping[str, object]) -> bool:
+    """Single owner of the clean exit-0 predicate (CLI and runtime share it).
+
+    Exit 0 requires every clause: mechanical PASS, summary WRITTEN, lock fd closed,
+    lock absence confirmed, no lock-release reason, and a CLEAN cleanup outcome.
+    """
+    return (
+        result.get("outcome") == RuntimeOutcome.PASS
+        and result.get("summary_publication_outcome") == SummaryPublicationOutcome.WRITTEN
+        and result.get("runtime_lock_fd_closed") is True
+        and result.get("runtime_lock_absent_confirmed") is True
+        and result.get("runtime_lock_release_reason_code") is None
+        and result.get("cleanup_outcome") == CleanupOutcome.CLEAN
+    )
+
+
 def _finalize_run(
     *,
     config: AttendedPaperDayConfig,
@@ -1084,6 +1190,9 @@ def _finalize_run(
     """
     nonterminal_journal: int | None = None
     cleanup_fatal: BaseException | None = None
+    # Any ordinary (non-fatal) cleanup failure — stack/recorder/lock — marks the
+    # cleanup INCOMPLETE and forbids a clean PASS/exit 0.
+    ordinary_cleanup_failure = False
 
     # 1. Stack reverse-close — 모든 리소스 close 시도, 첫 fatal 보존.
     if stack is not None:
@@ -1101,6 +1210,7 @@ def _finalize_run(
             counters.inc("resource_close_failures", failures)
             stop_reason = "resource_close_failure"
             outcome = RuntimeOutcome.NO_GO
+            ordinary_cleanup_failure = True
     counters.stamp("shutdown_completed_at", now_fn())
 
     # 2. Completion verdict — cleanup fatal 전 mechanical outcome만 정제.
@@ -1121,11 +1231,13 @@ def _finalize_run(
         except Exception:
             outcome = RuntimeOutcome.FAIL
             stop_reason = "evidence_failed"
+            ordinary_cleanup_failure = True
     try:
         recorder.close()
     except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
         cleanup_fatal = cleanup_fatal or exc
     except Exception:
+        ordinary_cleanup_failure = True
         if outcome != RuntimeOutcome.FAIL:
             outcome = RuntimeOutcome.FAIL
             stop_reason = "evidence_failed"
@@ -1141,36 +1253,66 @@ def _finalize_run(
     )
     publication_outcome: str | None = None
     publication_reason_codes: tuple[str, ...] = ()
+    # The exact object serialized to the summary file, set only when the publish
+    # outcome is WRITTEN. This is the persisted mechanical observation; it is
+    # distinct from the final operator envelope returned to the caller.
+    persisted_summary: dict[str, object] | None = None
 
     if summary_path_owned:
         publish_blocked = cleanup_fatal is not None or pending_fatal is not None
         if not publish_blocked:
-            publish = _publish_summary_create_new(
-                config.summary_out, json.dumps(summary, sort_keys=True, indent=2)
-            )
-            publication_outcome = publish.outcome
-            publication_reason_codes = publish.reason_codes
-            if publish.outcome == SummaryPublicationOutcome.WRITTEN:
-                pass
-            elif publish.outcome == SummaryPublicationOutcome.PUBLISHED_INCOMPLETE:
-                summary = _build_summary(
-                    config=config,
-                    run_id=run_id,
-                    counters=counters,
-                    nonterminal_journal=nonterminal_journal,
-                    stop_reason="summary_published_incomplete",
-                    outcome=RuntimeOutcome.FAIL,
+            # Independent publication lifecycle boundary: any ordinary exception
+            # becomes a stable publication result; a fatal is preserved as a pending
+            # cleanup fatal. Either way control falls through to the lock release —
+            # no publisher exception may skip it.
+            persisted_candidate = summary
+            publish: SummaryPublishResult | None = None
+            try:
+                publish = _publish_summary_create_new(
+                    config.summary_out,
+                    json.dumps(persisted_candidate, sort_keys=True, indent=2),
                 )
-            elif publish.outcome == SummaryPublicationOutcome.PUBLICATION_UNCERTAIN:
-                summary = _build_summary(
-                    config=config,
-                    run_id=run_id,
-                    counters=counters,
-                    nonterminal_journal=nonterminal_journal,
-                    stop_reason="summary_publication_uncertain",
-                    outcome=RuntimeOutcome.FAIL,
-                )
-            else:
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                cleanup_fatal = cleanup_fatal or exc
+                publication_outcome = SummaryPublicationOutcome.NOT_WRITTEN
+                publication_reason_codes = ("operation_fatal",)
+            except Exception:
+                publication_outcome = SummaryPublicationOutcome.NOT_WRITTEN
+                publication_reason_codes = (_REASON_PUBLISH_FAILED,)
+                ordinary_cleanup_failure = True
+            if publish is not None:
+                publication_outcome = publish.outcome
+                publication_reason_codes = publish.reason_codes
+                if publish.outcome == SummaryPublicationOutcome.WRITTEN:
+                    persisted_summary = persisted_candidate
+                elif publish.outcome == SummaryPublicationOutcome.PUBLISHED_INCOMPLETE:
+                    summary = _build_summary(
+                        config=config,
+                        run_id=run_id,
+                        counters=counters,
+                        nonterminal_journal=nonterminal_journal,
+                        stop_reason="summary_published_incomplete",
+                        outcome=RuntimeOutcome.FAIL,
+                    )
+                elif publish.outcome == SummaryPublicationOutcome.PUBLICATION_UNCERTAIN:
+                    summary = _build_summary(
+                        config=config,
+                        run_id=run_id,
+                        counters=counters,
+                        nonterminal_journal=nonterminal_journal,
+                        stop_reason="summary_publication_uncertain",
+                        outcome=RuntimeOutcome.FAIL,
+                    )
+                else:
+                    summary = _build_summary(
+                        config=config,
+                        run_id=run_id,
+                        counters=counters,
+                        nonterminal_journal=nonterminal_journal,
+                        stop_reason="summary_failed",
+                        outcome=RuntimeOutcome.FAIL,
+                    )
+            elif publication_outcome == SummaryPublicationOutcome.NOT_WRITTEN:
                 summary = _build_summary(
                     config=config,
                     run_id=run_id,
@@ -1186,41 +1328,57 @@ def _finalize_run(
                 ("cleanup_fatal",) if cleanup_fatal is not None else ("operation_fatal",)
             )
 
-    # 6. Runtime lock release — 마지막 bounded cleanup.
-    lock_result: RuntimeLockReleaseResult | None = None
-    try:
-        lock_result = lock.release()
-    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
-        cleanup_fatal = cleanup_fatal or exc
+    # 6. Runtime lock release — 마지막 bounded cleanup. Always reached.
+    lock_result = lock.release()
+    if lock_result.fatal is not None:
+        cleanup_fatal = cleanup_fatal or lock_result.fatal
+    if lock_result.reason_code is not None or not lock_result.fd_closed:
+        ordinary_cleanup_failure = True
 
-    if lock_result is not None and not lock_result.lock_absent_confirmed:
-        if summary.get("outcome") == RuntimeOutcome.PASS:
+    cleanup_outcome = (
+        CleanupOutcome.FATAL
+        if cleanup_fatal is not None or pending_fatal is not None
+        else CleanupOutcome.INCOMPLETE
+        if ordinary_cleanup_failure
+        else CleanupOutcome.CLEAN
+    )
+
+    # 6b. Final verdict — a mechanical PASS survives only if the whole clean-exit
+    #     predicate holds (publication WRITTEN, fd closed, lock absent confirmed,
+    #     no release reason, cleanup CLEAN). The persisted file may still read PASS.
+    if summary.get("outcome") == RuntimeOutcome.PASS:
+        block_reason: str | None = None
+        if publication_outcome != SummaryPublicationOutcome.WRITTEN:
+            block_reason = "summary_not_written"
+        elif not lock_result.fd_closed:
+            block_reason = lock_result.reason_code or "runtime_lock_release_failed"
+        elif not lock_result.lock_absent_confirmed:
+            block_reason = lock_result.reason_code or "runtime_lock_release_failed"
+        elif lock_result.reason_code is not None:
+            block_reason = lock_result.reason_code
+        elif cleanup_outcome != CleanupOutcome.CLEAN:
+            block_reason = stop_reason if stop_reason != "completed" else "resource_close_failure"
+        if block_reason is not None:
             summary = _build_summary(
                 config=config,
                 run_id=run_id,
                 counters=counters,
                 nonterminal_journal=nonterminal_journal,
-                stop_reason=lock_result.reason_code or "runtime_lock_release_failed",
+                stop_reason=block_reason,
                 outcome=RuntimeOutcome.FAIL,
             )
 
     result = {
         **summary,
+        "persisted_summary": persisted_summary,
         "summary_publication_outcome": publication_outcome,
         "summary_publication_reason_codes": list(publication_reason_codes),
-        "runtime_lock_fd_closed": lock_result.fd_closed if lock_result is not None else None,
-        "runtime_lock_unlinked": lock_result.lock_unlinked if lock_result is not None else None,
-        "runtime_lock_absent_confirmed": (
-            lock_result.lock_absent_confirmed if lock_result is not None else None
-        ),
-        "runtime_lock_release_reason_code": (
-            lock_result.reason_code if lock_result is not None else None
-        ),
-        "cleanup_outcome": (
-            CleanupOutcome.FATAL
-            if cleanup_fatal is not None or pending_fatal is not None
-            else CleanupOutcome.CLEAN
-        ),
+        "runtime_lock_fd_closed": lock_result.fd_closed,
+        "runtime_lock_unlinked": lock_result.lock_unlinked,
+        "runtime_lock_absent_confirmed": lock_result.lock_absent_confirmed,
+        "runtime_lock_identity_matched": lock_result.identity_matched,
+        "runtime_lock_release_reason_code": lock_result.reason_code,
+        "cleanup_outcome": cleanup_outcome,
     }
     return result, cleanup_fatal
 
@@ -1241,15 +1399,55 @@ def _summary_open_flags() -> int:
     return flags
 
 
-def _fsync_directory(directory: Path) -> bool:
-    dir_fd = os.open(str(directory), os.O_RDONLY)
+@dataclass(frozen=True)
+class DirectorySyncResult:
+    opened: bool
+    synced: bool
+    closed: bool
+    reason_code: str | None = None
+    fatal: BaseException | None = None
+
+
+def _fsync_directory(directory: Path) -> DirectorySyncResult:
+    """parent dir fsync을 structured result로 변환한다.
+
+    open/fsync/close의 어떤 ``OSError``도 호출자로 escape하지 않는다(이전 구현은
+    ``os.open``/``finally``의 ``os.close``가 lock release를 우회시켰다). fatal은
+    raise하지 않고 결과에 담는다.
+    """
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        return DirectorySyncResult(
+            opened=False, synced=False, closed=True, reason_code=_REASON_SYNC_FAILED, fatal=exc
+        )
+    except OSError:
+        return DirectorySyncResult(
+            opened=False, synced=False, closed=True, reason_code=_REASON_SYNC_FAILED
+        )
+    synced = False
+    closed = False
+    reason: str | None = None
+    fatal: BaseException | None = None
     try:
         os.fsync(dir_fd)
-        return True
+        synced = True
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        fatal = exc
     except OSError:
-        return False
-    finally:
+        reason = _REASON_SYNC_FAILED
+    try:
         os.close(dir_fd)
+        closed = True
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        fatal = fatal or exc
+    except OSError:
+        reason = reason or _REASON_SYNC_FAILED
+    if not (synced and closed) and reason is None and fatal is None:
+        reason = _REASON_SYNC_FAILED
+    return DirectorySyncResult(
+        opened=True, synced=synced, closed=closed, reason_code=reason, fatal=fatal
+    )
 
 
 
@@ -1259,6 +1457,8 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
     parent = path.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
     except Exception:
         return SummaryPublishResult(
             outcome=SummaryPublicationOutcome.NOT_WRITTEN,
@@ -1396,7 +1596,12 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                         primary_reasons.append(_REASON_PUBLISH_FAILED)
             if destination_published and not primary_reasons and not publication_uncertain:
                 parent_sync_attempted = True
-                parent_sync_confirmed = _fsync_directory(parent)
+                sync = _fsync_directory(parent)
+                if sync.fatal is not None:
+                    # Preserve as a pending publication fatal; the temp close/unlink
+                    # finally still runs, then the finalize boundary releases the lock.
+                    raise sync.fatal
+                parent_sync_confirmed = sync.synced and sync.closed
                 if not parent_sync_confirmed:
                     primary_reasons.append(_REASON_SYNC_FAILED)
     finally:
@@ -1458,6 +1663,8 @@ def _source_with_lifecycle(
         source = source_factory(lifecycle=lifecycle)
     except AttendedPaperDayRuntimeError:
         raise
+    except (MemoryError, KeyboardInterrupt, SystemExit):
+        raise
     except Exception as exc:
         # Any factory failure (including an internal TypeError) is a sanitized source
         # failure — never a signal to retry the call with a different signature.
@@ -1506,8 +1713,21 @@ def _run_live_startup_probe(
                 raise AttendedPaperDayRuntimeError("source", "source_failed") from consumer_exc
         else:
             consumer.cancel()
-            with contextlib.suppress(BaseException):
-                await consumer
+            # Bound the cancellation/cleanup await: a consumer that ignores
+            # CancelledError must not hang the probe. ``shield`` keeps the timeout
+            # from re-cancelling (and thus re-blocking on) the same task.
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(consumer), timeout=PROBE_CLEANUP_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError as exc:
+                raise AttendedPaperDayRuntimeError(
+                    "source", "source_close_timeout"
+                ) from exc
+            except (MemoryError, KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:
+                pass
             # Python 3.11+: ``Task.exception()`` on a cancelled task re-raises
             # ``CancelledError`` into the caller; check ``cancelled()`` first.
             if consumer.done() and not consumer.cancelled():
@@ -1794,6 +2014,7 @@ __all__ = [
     "AttendedPaperDayInputError",
     "AttendedPaperDayRuntimeError",
     "CleanupOutcome",
+    "DirectorySyncResult",
     "DiagnosticCounters",
     "DeterministicPaperDecisionPublisher",
     "EvidenceRecorder",
@@ -1802,6 +2023,7 @@ __all__ = [
     "SummaryPublicationOutcome",
     "SummaryPublishResult",
     "build_diagnostic_stack",
+    "is_clean_pass",
     "journal_state_counts",
     "run_attended_paper_day",
     "validate_attended_paper_day_inputs",

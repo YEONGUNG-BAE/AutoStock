@@ -58,11 +58,20 @@ Startup-only modes:
 Summary outcome and CLI exit:
 
 ```text
-PASS -> exit 0
+clean PASS (is_clean_pass predicate) -> exit 0
 NO_GO -> exit 1
-FAIL -> exit 1
+FAIL  -> exit 1
+PUBLISHED_INCOMPLETE / PUBLICATION_UNCERTAIN -> exit 1
+any lock fd-close / identity / release failure -> exit 1
 legacy ops/run_paper_fast_loop.py --run -> exit 2
 ```
+
+Exit 0 requires **every** clause of the shared `is_clean_pass` predicate:
+`outcome == PASS`, `summary_publication_outcome == WRITTEN`,
+`runtime_lock_fd_closed == true`, `runtime_lock_absent_confirmed == true`,
+`runtime_lock_release_reason_code is None`, and `cleanup_outcome == CLEAN`.
+A failing clause downgrades the returned `outcome` to `FAIL` (the persisted
+mechanical file is left untouched and may still read `PASS`).
 
 Use a fresh explicit `--db-dir`, `--evidence-out`, and `--summary-out` per run.
 The diagnostic runtime rejects output overlap, final symlink components (including
@@ -76,9 +85,16 @@ are written by the lock owner only. The summary is published create-new and
 atomically (same-dir temp, fsync, hard-link, no overwrite, no symlink follow); a
 publish failure yields `FAIL/summary_failed`/`summary_published_incomplete`/
 `summary_publication_uncertain` as appropriate; operation/cleanup fatal writes no
-summary file. **Returned/persisted equality holds only for `WRITTEN`.** The
-runtime lock is always released as the last bounded cleanup step (structured
-release state; lock residue forbids PASS return), including under a fatal.
+summary file. No publisher exception can skip lock release — it runs exactly once
+on every path. The persisted `summary.json` holds only the mechanical summary;
+the returned envelope adds `persisted_summary` + cleanup/publication/lock keys
+(never written to disk), and `persisted_summary` byte-equals the file **only for
+`WRITTEN`** (else `null`). The runtime lock is always released as the last bounded
+cleanup step (identity-safe: a replaced/foreign lock is never unlinked and is
+reported `runtime_lock_identity_mismatch`); lock residue, fd-close failure,
+identity mismatch, or uncertain release forbids PASS return, including under a
+fatal. A consumer that ignores cancellation during a startup probe is bounded and
+reported `FAIL/source_close_timeout`.
 
 Immediate stop conditions:
 

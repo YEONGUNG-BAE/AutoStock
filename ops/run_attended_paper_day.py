@@ -31,6 +31,7 @@ from composition.attended_paper_day import (
     KST,
     PILOT_MARKET,
     PILOT_SYMBOL,
+    is_clean_pass,
     run_attended_paper_day,
     validate_attended_paper_day_inputs,
 )
@@ -130,14 +131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _cli_exit_code(summary: dict[str, object]) -> int:
-    """PASS는 summary WRITTEN + lock absent confirmed에서만 exit 0."""
-    if summary.get("outcome") != "PASS":
-        return 1
-    if summary.get("summary_publication_outcome") != "WRITTEN":
-        return 1
-    if summary.get("runtime_lock_absent_confirmed") is not True:
-        return 1
-    return 0
+    """Exit 0 only on the shared clean-pass predicate (mechanical PASS + WRITTEN +
+    fd closed + lock absent confirmed + no release reason + CLEAN cleanup)."""
+    return 0 if is_clean_pass(summary) else 1
 
 
 def _config_from_args(args: argparse.Namespace) -> AttendedPaperDayConfig:

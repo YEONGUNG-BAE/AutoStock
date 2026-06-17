@@ -586,6 +586,22 @@ touch network/credentials/DB/clock and never activate runtime:
   ACK accepted → PASS; rejected → `subscription_rejected`; exhaustion before readiness →
   `transport_not_ready`; consumer/source error → `source_failed`; receive timeout →
   `health_not_ready`.
+  Clean-pass / lock-identity / publication-boundary closure (RTM-7c.5a/5b): the persisted
+  `summary.json` holds only the mechanical summary, while the returned **envelope** adds
+  `persisted_summary` + cleanup/publication/lock keys (never written to disk); `persisted_summary`
+  byte-equals the file **only for `WRITTEN`** (else `null`). A single-owner `is_clean_pass` predicate
+  (PASS + `WRITTEN` + `runtime_lock_fd_closed` + `runtime_lock_absent_confirmed` + no release reason +
+  `cleanup_outcome == CLEAN`) owns the exit-0 decision for CLI and runtime. `PilotRuntimeLock.acquire`
+  is partial-side-effect-safe (post-open `fstat`/`write` failure rolls back fd + identity-verified
+  unlink → `runtime_lock_acquire_failed`/`_uncertain`, no stale lock/fd); `release` is identity-safe
+  (a replaced/foreign inode is never unlinked → `runtime_lock_identity_mismatch`,
+  `runtime_lock_identity_matched`) and observes fd-close independently of unlink. Every publisher
+  exception is wrapped so the lock release runs **exactly once** (ordinary → `NOT_WRITTEN` +
+  `cleanup_outcome == INCOMPLETE`; fatal → pending cleanup fatal); `_fsync_directory` is a structured
+  `DirectorySyncResult` that never lets `OSError` escape. `MemoryError` is fatal at every boundary
+  (`recorder.open`, stack builder, source factory, publisher `parent.mkdir`, directory-sync).
+  `DiagnosticStack.close` closes in reverse construction order (journal → ledger → active_store). An
+  uncancellable startup consumer is bounded by `PROBE_CLEANUP_TIMEOUT_SECONDS` → `source_close_timeout`.
   Import-guard boundary: `ops/run_attended_paper_day.py` is the only attended CLI permitted to reach
   the live KIS read-only surface, and only through an exact module allowlist —
   `broker.kis_transport`, `data.kis_ws_auth`, `data.kis_ws_source`. No other `broker`/`data`

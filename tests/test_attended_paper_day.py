@@ -685,8 +685,25 @@ def test_returned_summary_matches_persisted_file(tmp_path: Path) -> None:
     assert summary["outcome"] == "PASS"
     assert summary["summary_publication_outcome"] == "WRITTEN"
     persisted = json.loads(cfg.summary_out.read_text(encoding="utf-8"))
-    # byte equality는 WRITTEN에서만 주장한다.
-    assert persisted == {k: v for k, v in summary.items() if k in persisted}
+    # F1: the persisted mechanical summary is captured verbatim in the envelope's
+    # persisted_summary field — exact equality, not a subset that could hide drift.
+    assert summary["persisted_summary"] == persisted
+    # Envelope-only keys describe cleanup/publication/lock state and must NOT leak
+    # into the persisted mechanical file.
+    envelope_only = {
+        "persisted_summary",
+        "summary_publication_outcome",
+        "summary_publication_reason_codes",
+        "runtime_lock_fd_closed",
+        "runtime_lock_unlinked",
+        "runtime_lock_absent_confirmed",
+        "runtime_lock_identity_matched",
+        "runtime_lock_release_reason_code",
+        "cleanup_outcome",
+    }
+    assert envelope_only.isdisjoint(persisted.keys())
+    # The persisted file is exactly the mechanical projection of the envelope.
+    assert persisted == {k: v for k, v in summary.items() if k not in envelope_only}
 
 
 @pytest.mark.parametrize("fatal_type", [MemoryError, SystemExit])
@@ -909,7 +926,13 @@ def test_lock_release_unlink_enoent_confirms_absent(tmp_path: Path) -> None:
 def test_publish_parent_fsync_failure_is_published_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(apd, "_fsync_directory", lambda _d: False)
+    monkeypatch.setattr(
+        apd,
+        "_fsync_directory",
+        lambda _d: apd.DirectorySyncResult(
+            opened=True, synced=False, closed=True, reason_code=apd._REASON_SYNC_FAILED
+        ),
+    )
     cfg = _config(tmp_path)
     summary = run_attended_paper_day(
         config=cfg,
@@ -1141,3 +1164,450 @@ def test_cli_exit_code_matrix(tmp_path: Path) -> None:
         "summary_publication_outcome": "PUBLISHED_INCOMPLETE",
     }
     assert cli._cli_exit_code(summary_incomplete) == 1
+
+
+# --- RTM-7c.5a/5b §11: persisted/envelope, lock lifecycle, publication, fatal,
+#     cleanup-outcome, and bounded-cancellation closure -------------------------
+
+
+def test_persisted_summary_is_null_when_publication_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F1 corollary: when the summary file is not WRITTEN, the envelope carries
+    # persisted_summary == None — the envelope never claims a persisted artifact
+    # that does not exist on disk.
+    real_link = os.link
+
+    def boom_link(src: Any, dst: Any, *a: Any, **k: Any):
+        if str(dst).endswith("summary.json"):
+            raise OSError("summary publish failed")
+        return real_link(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "link", boom_link)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="persist-null",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] == "NOT_WRITTEN"
+    assert summary["persisted_summary"] is None
+    assert not cfg.summary_out.exists()
+
+
+def test_lock_release_fd_close_failure_blocks_clean_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An fd-close failure during release must surface fd_closed=False and a release
+    # reason even when the unlink itself succeeds, so is_clean_pass/exit-0 is denied.
+    import contextlib
+
+    p = tmp_path / ".paper_day.lock"
+    lock = apd.PilotRuntimeLock(p)
+    lock.acquire()
+
+    real_close = os.close
+    closed: list[int] = []
+
+    def boom_close(fd: int) -> None:
+        closed.append(fd)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(os, "close", boom_close)
+    result = lock.release()
+    monkeypatch.undo()
+    for fd in closed:  # the spy never actually closed it; avoid the fd leak
+        with contextlib.suppress(OSError):
+            real_close(fd)
+
+    assert result.fd_closed is False
+    assert result.reason_code == "runtime_lock_release_failed"
+    # unlink still proceeds: absence is confirmed, lock file removed.
+    assert result.lock_unlinked is True
+    assert result.lock_absent_confirmed is True
+    assert not p.exists()
+
+    envelope = {
+        "outcome": "PASS",
+        "summary_publication_outcome": "WRITTEN",
+        "runtime_lock_fd_closed": result.fd_closed,
+        "runtime_lock_absent_confirmed": result.lock_absent_confirmed,
+        "runtime_lock_release_reason_code": result.reason_code,
+        "cleanup_outcome": "INCOMPLETE",
+    }
+    assert apd.is_clean_pass(envelope) is False
+    assert cli._cli_exit_code(envelope) == 1
+
+
+def test_lock_release_foreign_inode_is_not_unlinked(tmp_path: Path) -> None:
+    # If the lock file was replaced by a foreign inode after we acquired ours, the
+    # release must refuse to unlink it and report runtime_lock_identity_mismatch.
+    p = tmp_path / ".paper_day.lock"
+    lock = apd.PilotRuntimeLock(p)
+    lock.acquire()
+    # Replace our inode with a different one (foreign owner).
+    p.unlink()
+    p.write_text("foreign-owner\n", encoding="utf-8")
+
+    result = lock.release()
+
+    assert result.identity_matched is False
+    assert result.reason_code == "runtime_lock_identity_mismatch"
+    assert result.lock_unlinked is False
+    assert result.lock_absent_confirmed is False
+    assert p.exists()  # foreign lock left intact
+    assert p.read_text(encoding="utf-8") == "foreign-owner\n"
+
+
+def test_lock_acquire_write_failure_leaves_no_stale_lock_or_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A post-open write failure must roll back: close the fd and unlink the inode we
+    # created (identity verified), leaving no stale lock and no leaked fd.
+    p = tmp_path / ".paper_day.lock"
+    real_close = os.close
+    closed: list[int] = []
+
+    def spy_close(fd: int) -> None:
+        closed.append(fd)
+        return real_close(fd)
+
+    def boom_write(fd: int, data: bytes) -> int:
+        raise OSError("write failed")
+
+    monkeypatch.setattr(os, "close", spy_close)
+    monkeypatch.setattr(os, "write", boom_write)
+
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(apd.AttendedPaperDayRuntimeError) as ei:
+        lock.acquire()
+
+    assert ei.value.reason_code == "runtime_lock_acquire_failed"
+    assert not p.exists()  # our inode was unlinked
+    assert lock._fd is None  # type: ignore[attr-defined]
+    assert lock._identity is None  # type: ignore[attr-defined]
+    assert len(closed) >= 1  # the partial fd was closed exactly during rollback
+
+
+def test_lock_acquire_write_fatal_preserves_fatal_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fatal during the post-open write is re-raised (identity preserved) but the
+    # partial inode/fd are still rolled back first.
+    p = tmp_path / ".paper_day.lock"
+
+    def fatal_write(fd: int, data: bytes) -> int:
+        raise MemoryError("oom mid-write")
+
+    monkeypatch.setattr(os, "write", fatal_write)
+
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(MemoryError):
+        lock.acquire()
+
+    assert not p.exists()
+    assert lock._fd is None  # type: ignore[attr-defined]
+    assert lock._identity is None  # type: ignore[attr-defined]
+
+
+def _release_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count PilotRuntimeLock.release invocations across a full run."""
+    calls = {"n": 0}
+    real_release = apd.PilotRuntimeLock.release
+
+    def spy(self: Any) -> Any:
+        calls["n"] += 1
+        return real_release(self)
+
+    monkeypatch.setattr(apd.PilotRuntimeLock, "release", spy)
+    return calls
+
+
+def test_publisher_ordinary_exception_releases_lock_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An ordinary exception escaping the publisher must become a stable NOT_WRITTEN
+    # result, mark cleanup INCOMPLETE, and still release the lock exactly once.
+    calls = _release_spy(monkeypatch)
+
+    def boom_publish(path: Any, text: Any) -> Any:
+        raise RuntimeError("publisher exploded")
+
+    monkeypatch.setattr(apd, "_publish_summary_create_new", boom_publish)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="pub-ordinary",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "summary_failed"
+    assert summary["summary_publication_outcome"] == "NOT_WRITTEN"
+    assert summary["summary_publication_reason_codes"] == ["summary_publish_failed"]
+    assert summary["cleanup_outcome"] == "INCOMPLETE"
+    assert summary["persisted_summary"] is None
+    assert calls["n"] == 1  # lock released exactly once despite publisher exception
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_publisher_fatal_exception_releases_lock_exactly_once_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fatal escaping the publisher is preserved as a cleanup fatal (re-raised) but
+    # the lock is still released exactly once before the fatal propagates.
+    calls = _release_spy(monkeypatch)
+
+    def fatal_publish(path: Any, text: Any) -> Any:
+        raise MemoryError("publisher oom")
+
+    monkeypatch.setattr(apd, "_publish_summary_create_new", fatal_publish)
+    cfg = _config(tmp_path)
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="pub-fatal",
+            clock=_at,
+        )
+
+    assert calls["n"] == 1
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+    assert not cfg.summary_out.exists()
+
+
+def test_publisher_directory_sync_failure_releases_lock_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A parent-dir fsync failure is a PUBLISHED_INCOMPLETE result (file linked but
+    # durability unconfirmed); the lock is still released exactly once.
+    calls = _release_spy(monkeypatch)
+    monkeypatch.setattr(
+        apd,
+        "_fsync_directory",
+        lambda _d: apd.DirectorySyncResult(
+            opened=False, synced=False, closed=True, reason_code=apd._REASON_SYNC_FAILED
+        ),
+    )
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="pub-sync",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
+    # The cleanup itself succeeded (lock released, resources closed); only the
+    # publication is incomplete, which is_clean_pass denies via the WRITTEN clause.
+    assert summary["cleanup_outcome"] == "CLEAN"
+    assert apd.is_clean_pass(summary) is False
+    assert calls["n"] == 1
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_recorder_open_fatal_preserved_and_lock_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fatal_open(self: Any) -> None:
+        raise MemoryError("recorder open oom")
+
+    monkeypatch.setattr(apd.EvidenceRecorder, "open", _fatal_open)
+    cfg = _config(tmp_path)
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="recorder-open-fatal",
+            clock=_at,
+        )
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+    assert not cfg.summary_out.exists()
+
+
+def test_build_stack_fatal_preserved_and_lock_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fatal_build(**_kwargs: Any) -> Any:
+        raise MemoryError("stack build oom")
+
+    monkeypatch.setattr(apd, "build_diagnostic_stack", _fatal_build)
+    cfg = _config(tmp_path)
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="build-fatal",
+            clock=_at,
+        )
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+    assert not cfg.summary_out.exists()
+
+
+def test_source_factory_fatal_in_probe_preserved_and_lock_released(
+    tmp_path: Path,
+) -> None:
+    def fatal_factory(*, lifecycle: Any) -> Any:
+        raise MemoryError("source factory oom")
+
+    cfg = _live_startup_cfg(tmp_path)
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=fatal_factory,
+            run_id="factory-fatal",
+            clock=_at,
+        )
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+    assert not cfg.summary_out.exists()
+
+
+def test_publish_parent_mkdir_fatal_is_reraised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The publisher's own parent.mkdir fatal is re-raised by _publish_summary_create_new
+    # (never swallowed into a NOT_WRITTEN result).
+    real_mkdir = apd.Path.mkdir
+
+    def boom_mkdir(self: Any, *a: Any, **k: Any) -> None:
+        raise MemoryError("mkdir oom")
+
+    monkeypatch.setattr(apd.Path, "mkdir", boom_mkdir)
+    with pytest.raises(MemoryError):
+        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    monkeypatch.setattr(apd.Path, "mkdir", real_mkdir)
+
+
+def test_ordinary_resource_close_failure_is_incomplete_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An ordinary (non-fatal) resource close failure marks cleanup INCOMPLETE and
+    # forbids a clean PASS, while the summary is still published.
+    real_build = apd.build_diagnostic_stack
+
+    def _wrap_build(**kwargs: Any) -> Any:
+        stack = real_build(**kwargs)
+        real_journal = stack.journal
+
+        class _BoomJournal:
+            def list_nonterminal(self) -> list[Any]:
+                return real_journal.list_nonterminal()
+
+            def close(self) -> None:
+                raise RuntimeError("journal close failed")
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_journal, name)
+
+        stack.journal = _BoomJournal()  # type: ignore[assignment]
+        return stack
+
+    monkeypatch.setattr(apd, "build_diagnostic_stack", _wrap_build)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="ordinary-close",
+        clock=_at,
+    )
+
+    assert summary["cleanup_outcome"] == "INCOMPLETE"
+    assert summary["outcome"] == "NO_GO"
+    assert summary["stop_reason"] == "resource_close_failure"
+    assert apd.is_clean_pass(summary) is False
+
+
+def test_stack_close_order_is_journal_ledger_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DiagnosticStack.close must close in reverse construction order:
+    # journal -> ledger -> active_store.
+    order: list[str] = []
+    real_build = apd.build_diagnostic_stack
+
+    def _wrap_build(**kwargs: Any) -> Any:
+        stack = real_build(**kwargs)
+        for label, attr in (
+            ("journal", "journal"),
+            ("ledger", "ledger"),
+            ("active", "active_store"),
+        ):
+            real_obj = getattr(stack, attr)
+
+            def _make(real_obj: Any, label: str) -> Any:
+                class _Tracking:
+                    def close(self) -> None:
+                        order.append(label)
+                        real_obj.close()
+
+                    def __getattr__(self, name: str) -> Any:
+                        return getattr(real_obj, name)
+
+                return _Tracking()
+
+            setattr(stack, attr, _make(real_obj, label))
+        return stack
+
+    monkeypatch.setattr(apd, "build_diagnostic_stack", _wrap_build)
+    cfg = _config(tmp_path)
+    run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="close-order",
+        clock=_at,
+    )
+
+    assert order == ["journal", "ledger", "active"]
+
+
+class _IgnoreFirstCancelSource:
+    """ACKs, then swallows the first CancelledError so the probe must bound it.
+
+    The second cancel (during asyncio.run shutdown) is re-raised so the event loop
+    does not hang waiting on an uncancellable task.
+    """
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+        self._cancels = 0
+
+    async def events(self):
+        at = _at()
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_all_subscribed(at=at)
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self._cancels += 1
+                if self._cancels >= 2:
+                    raise
+                # swallow the first cancel; keep the task alive to force a timeout
+        yield _quote()
+
+
+def test_startup_probe_bounds_uncancellable_consumer_with_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(apd, "PROBE_CLEANUP_TIMEOUT_SECONDS", 0.2)
+    cfg = _live_startup_cfg(tmp_path)
+    started = time_module.monotonic()
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: _IgnoreFirstCancelSource(lifecycle),
+        run_id="cancel-bound",
+        clock=_at,
+    )
+    elapsed = time_module.monotonic() - started
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_close_timeout"
+    assert elapsed < float(cfg.duration_seconds)  # bounded by cleanup timeout, not duration
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
