@@ -97,7 +97,7 @@ PILOT_UNIVERSE = "KR_LARGE"
 SCHEMA_VERSION = "paper_day_diagnostic.v1"
 HEARTBEAT_SECONDS = 60
 PILOT_DB_FILES = frozenset({"active.sqlite3", "ledger.sqlite3", "trigger_journal.sqlite3"})
-PILOT_DB_SIDECAR_SUFFIXES = (".sqlite3-wal", ".sqlite3-shm")
+PILOT_DB_SIDECAR_SUFFIXES = (".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal")
 
 
 class RuntimeOutcome:
@@ -119,10 +119,6 @@ class AttendedPaperDayRuntimeError(Exception):
         self.reason_code = reason_code
 
 
-class CloseableSourceFactory(Protocol):
-    def __call__(self) -> MarketEventSource: ...
-
-
 class DiagnosticMarketSourceLifecycle(Protocol):
     def on_connect_attempt(self, *, at: datetime) -> None: ...
 
@@ -137,6 +133,18 @@ class DiagnosticMarketSourceLifecycle(Protocol):
     def on_all_subscribed(self, *, at: datetime) -> None: ...
 
     def on_disconnected(self, *, at: datetime) -> None: ...
+
+
+class DiagnosticSourceFactory(Protocol):
+    """Single source-construction contract.
+
+    The factory is invoked exactly once per connection attempt with a keyword-only
+    ``lifecycle``. There is no no-arg fallback and no exception-based arity probing:
+    a ``TypeError`` raised from inside the factory is a genuine source failure, never
+    a signal to retry with a different signature.
+    """
+
+    def __call__(self, *, lifecycle: DiagnosticMarketSourceLifecycle) -> MarketEventSource: ...
 
 
 @dataclass(frozen=True)
@@ -322,6 +330,13 @@ class DiagnosticLifecycle:
         self._clock = clock
         self.all_subscribed = False
         self.rejected = False
+        # Set by the startup probe within the running loop so readiness (ACK) can be
+        # awaited directly instead of blocking on the first market event.
+        self.ready_event: asyncio.Event | None = None
+
+    def _signal_ready(self) -> None:
+        if self.ready_event is not None:
+            self.ready_event.set()
 
     def on_connect_attempt(self, *, at: datetime) -> None:
         self._counters.inc("connect_attempts")
@@ -344,12 +359,15 @@ class DiagnosticLifecycle:
         else:
             self.rejected = True
             self._counters.inc("subscription_rejections")
+            self._signal_ready()
 
     def on_all_subscribed(self, *, at: datetime) -> None:
         self.all_subscribed = True
+        self._counters.inc("all_subscribed")
         self._counters.stamp("subscriptions_ready_at", at)
         if self._tracker is not None:
             self._tracker.record_transport_event(kind="all_subscribed", at=at, now=self._clock())
+        self._signal_ready()
 
     def on_disconnected(self, *, at: datetime) -> None:
         self._counters.inc("disconnects")
@@ -497,10 +515,13 @@ def _validate_runtime_paths(
         "db_dir": config.db_dir,
     }
     for name, path in paths.items():
-        if path.exists() and path.is_symlink():
+        # ``is_symlink()`` is checked without an ``exists()`` guard so that a dangling
+        # symlink (whose target is missing) is still rejected; ``exists()`` follows the
+        # link and would report False for a dangling one, silently admitting it.
+        if path.is_symlink():
             raise AttendedPaperDayInputError(f"{name} final component must not be a symlink.")
         parent = path.parent
-        if parent.exists() and parent.is_symlink():
+        if parent.is_symlink():
             raise AttendedPaperDayInputError(f"{name} parent must not be a symlink.")
     evidence_resolved = config.evidence_out.resolve(strict=False)
     summary_resolved = config.summary_out.resolve(strict=False)
@@ -546,62 +567,73 @@ def build_diagnostic_stack(
     on_execution_evidence: Callable[[object], None],
 ) -> DiagnosticStack:
     config.db_dir.mkdir(parents=True, exist_ok=True)
-    active_store = ActiveDecisionStore(config.db_dir / "active.sqlite3")
-    ledger = SQLiteLedger(config.db_dir / "ledger.sqlite3")
-    broker = PaperBrokerAdapter(
-        ledger,
-        initial_cash=CashSnapshot(
-            currency=Currency.KRW,
-            amount=Decimal("100000000"),
-            account_role=AccountRole.PAPER,
-            as_of=_session_at(config.session_date, time(8, 50)),
-        ),
-    )
-    journal = SqliteTriggerJournal(config.db_dir / "trigger_journal.sqlite3")
-    latest = LatestMarketStateStore()
-    rolling = RollingTradeHistoryStore(
-        retention=RollingRetentionPolicy(
-            hard_max_events=1000, hard_max_age_seconds=Decimal("86400")
+    # Track SQLite-backed resources in construction order so that, if any later
+    # constructor fails, the already-opened handles are closed in reverse order and
+    # the original exception is preserved (the temp db_dir stays deletable).
+    opened: list[object] = []
+    try:
+        active_store = ActiveDecisionStore(config.db_dir / "active.sqlite3")
+        opened.append(active_store)
+        ledger = SQLiteLedger(config.db_dir / "ledger.sqlite3")
+        opened.append(ledger)
+        journal = SqliteTriggerJournal(config.db_dir / "trigger_journal.sqlite3")
+        opened.append(journal)
+        broker = PaperBrokerAdapter(
+            ledger,
+            initial_cash=CashSnapshot(
+                currency=Currency.KRW,
+                amount=Decimal("100000000"),
+                account_role=AccountRole.PAPER,
+                as_of=_session_at(config.session_date, time(8, 50)),
+            ),
         )
-    )
-    tracker = MarketHealthTracker(_diagnostic_thresholds())
-    calendar = ExplicitMarketScheduleProvider(
-        timezone=KST,
-        schedule={
-            config.session_date: SessionWindow(
-                pre_open=time(8, 30),
-                open=time(9, 0),
-                close=time(15, 30),
-                post_close_end=time(16, 0),
+        latest = LatestMarketStateStore()
+        rolling = RollingTradeHistoryStore(
+            retention=RollingRetentionPolicy(
+                hard_max_events=1000, hard_max_age_seconds=Decimal("86400")
             )
-        },
-    )
-    bridge = TriggerOrderBridge(
-        journal=journal,
-        generator=OrderIntentGenerator(),
-        resolver=QuantityResolver(),
-        broker=broker,
-        ledger=ledger,
-    )
-    coordinator = PaperExecutionCoordinator(
-        engine=TriggerEngine(),
-        bridge=bridge,
-        portfolio_context_service=PaperPortfolioContextService(
-            ledger_source=ledger, market_state_source=_LatestStateAdapter(latest)
-        ),
-    )
-    orchestrator = FastLoopExecutionOrchestrator(
-        active_reader=active_store,
-        latest_store=latest,
-        rolling_store=rolling,
-        execution_gate=SessionHealthExecutionGate(calendar=calendar, tracker=tracker),
-        execution_inputs_provider=StaticExecutionInputsProvider(
-            allocator_decision=_allocator_decision(config.session_date),
-            portfolio_policy=PaperPortfolioPolicy(mode=RiskMode.REBALANCING),
-        ),
-        coordinator=coordinator,
-        on_evidence=on_execution_evidence,
-    )
+        )
+        tracker = MarketHealthTracker(_diagnostic_thresholds())
+        calendar = ExplicitMarketScheduleProvider(
+            timezone=KST,
+            schedule={
+                config.session_date: SessionWindow(
+                    pre_open=time(8, 30),
+                    open=time(9, 0),
+                    close=time(15, 30),
+                    post_close_end=time(16, 0),
+                )
+            },
+        )
+        bridge = TriggerOrderBridge(
+            journal=journal,
+            generator=OrderIntentGenerator(),
+            resolver=QuantityResolver(),
+            broker=broker,
+            ledger=ledger,
+        )
+        coordinator = PaperExecutionCoordinator(
+            engine=TriggerEngine(),
+            bridge=bridge,
+            portfolio_context_service=PaperPortfolioContextService(
+                ledger_source=ledger, market_state_source=_LatestStateAdapter(latest)
+            ),
+        )
+        orchestrator = FastLoopExecutionOrchestrator(
+            active_reader=active_store,
+            latest_store=latest,
+            rolling_store=rolling,
+            execution_gate=SessionHealthExecutionGate(calendar=calendar, tracker=tracker),
+            execution_inputs_provider=StaticExecutionInputsProvider(
+                allocator_decision=_allocator_decision(config.session_date),
+                portfolio_policy=PaperPortfolioPolicy(mode=RiskMode.REBALANCING),
+            ),
+            coordinator=coordinator,
+            on_evidence=on_execution_evidence,
+        )
+    except BaseException:
+        _close_partial_resources(opened)
+        raise
     counters.inc("startup_completed")
     return DiagnosticStack(
         active_store=active_store,
@@ -615,10 +647,18 @@ def build_diagnostic_stack(
     )
 
 
+def _close_partial_resources(resources: list[object]) -> None:
+    for resource in reversed(resources):
+        close = getattr(resource, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
 def run_attended_paper_day(
     *,
     config: AttendedPaperDayConfig,
-    source_factory: CloseableSourceFactory,
+    source_factory: DiagnosticSourceFactory,
     run_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
@@ -633,6 +673,11 @@ def run_attended_paper_day(
     execution_results: list[FastLoopExecutionResult] = []
     lock = PilotRuntimeLock(config.db_dir / ".paper_day.lock")
     lifecycle: DiagnosticLifecycle | None = None
+    # Only the stack owner observes the journal. ``None`` means "never evaluated"
+    # (e.g. lock conflict, path failure, factory failure before the stack exists),
+    # so the summary writer never re-opens the DB to recompute it.
+    nonterminal_journal: int | None = None
+    ran_market_loop = False
 
     def record(
         at: datetime,
@@ -661,7 +706,12 @@ def run_attended_paper_day(
     try:
         validate_attended_paper_day_inputs(config)
         lock.acquire()
-        recorder.open()
+        try:
+            recorder.open()
+        except AttendedPaperDayRuntimeError:
+            raise
+        except Exception as exc:
+            raise AttendedPaperDayRuntimeError("evidence", "evidence_failed") from exc
         record(now_fn(), "validate", "startup")
 
         def on_execution_evidence(ev: object) -> None:
@@ -675,11 +725,10 @@ def run_attended_paper_day(
                 counters.stamp("first_execution_request_at", getattr(ev, "timestamp"))
             elif status == FastLoopExecutionStatus.SUPPRESSED.value:
                 counters.inc("trigger_suppressed")
-            elif status in (
-                FastLoopExecutionStatus.UNCERTAIN.value,
-                FastLoopExecutionStatus.RECONCILE_REQUIRED.value,
-            ):
+            elif status == FastLoopExecutionStatus.UNCERTAIN.value:
                 counters.inc("journal_uncertain")
+            elif status == FastLoopExecutionStatus.RECONCILE_REQUIRED.value:
+                counters.inc("reconcile_required")
             elif status == FastLoopExecutionStatus.SKIPPED_TERMINAL.value:
                 counters.inc("journal_skipped_terminal")
             if reason_code:
@@ -692,9 +741,14 @@ def run_attended_paper_day(
                 snapshot={"status": str(status)},
             )
 
-        stack = build_diagnostic_stack(
-            config=config, counters=counters, on_execution_evidence=on_execution_evidence
-        )
+        try:
+            stack = build_diagnostic_stack(
+                config=config, counters=counters, on_execution_evidence=on_execution_evidence
+            )
+        except AttendedPaperDayRuntimeError:
+            raise
+        except Exception as exc:
+            raise AttendedPaperDayRuntimeError("startup", "db_failed") from exc
         lifecycle = DiagnosticLifecycle(counters=counters, tracker=stack.tracker, clock=now_fn)
         if stack.journal.list_nonterminal():
             raise AttendedPaperDayRuntimeError("preflight", "nonterminal_journal")
@@ -767,7 +821,8 @@ def run_attended_paper_day(
                     FastLoopExecutionStatus.UNCERTAIN,
                     FastLoopExecutionStatus.RECONCILE_REQUIRED,
                 ):
-                    counters.inc("journal_uncertain")
+                    # Counter ownership lives in on_execution_evidence; here we only
+                    # halt the run so a single applied update is not double-counted.
                     raise _CriticalStop(result.status.value)
                 heartbeat(update.applied_at)
 
@@ -788,19 +843,11 @@ def run_attended_paper_day(
             except Exception as exc:
                 critical = _critical_stop_from_exception(exc)
                 if critical is not None:
-                    stop_reason = critical.reason_code
+                    stop_reason = _normalize_critical_reason(critical.reason_code)
                     outcome = RuntimeOutcome.NO_GO
                 else:
                     raise
-            if stack.journal.list_nonterminal():
-                stop_reason = "nonterminal_journal"
-                outcome = RuntimeOutcome.NO_GO
-            if any(r.status is FastLoopExecutionStatus.UNCERTAIN for r in execution_results):
-                stop_reason = "journal_uncertain"
-                outcome = RuntimeOutcome.NO_GO
-            if any(r.status is FastLoopExecutionStatus.RECONCILE_REQUIRED for r in execution_results):
-                stop_reason = "reconcile_required"
-                outcome = RuntimeOutcome.NO_GO
+            ran_market_loop = True
     except AttendedPaperDayRuntimeError as exc:
         stop_reason = exc.reason_code
         outcome = _outcome_for_stop_reason(stop_reason)
@@ -824,18 +871,25 @@ def run_attended_paper_day(
             record(now_fn(), "runtime", "failed_closed", reason=stop_reason)
     finally:
         if stack is not None:
+            # Last journal observation by the owner, while the handle is still open.
+            with contextlib.suppress(Exception):
+                nonterminal_journal = len(stack.journal.list_nonterminal())
             failures = stack.close()
             if failures:
                 counters.inc("resource_close_failures", failures)
                 stop_reason = "resource_close_failure"
                 outcome = RuntimeOutcome.NO_GO
         counters.stamp("shutdown_completed_at", now_fn())
+
+    if ran_market_loop and outcome == RuntimeOutcome.PASS:
+        outcome, stop_reason = _completion_verdict(counters, nonterminal_journal)
+
     try:
         return _write_summary(
             config=config,
             run_id=actual_run_id,
             counters=counters,
-            stack=stack,
+            nonterminal_journal=nonterminal_journal,
             stop_reason=stop_reason,
             outcome=outcome,
             recorder=recorder,
@@ -850,13 +904,16 @@ def _write_summary(
     config: AttendedPaperDayConfig,
     run_id: str,
     counters: DiagnosticCounters,
-    stack: DiagnosticStack | None,
+    nonterminal_journal: int | None,
     stop_reason: str,
     outcome: str,
     recorder: EvidenceRecorder,
     at: datetime,
 ) -> dict[str, object]:
-    nonterminal = _nonterminal_count(config.db_dir / "trigger_journal.sqlite3")
+    # The summary writer serializes only immutable scalars handed to it. It never
+    # imports/opens SQLite, so a lock conflict (no stack) reports a null journal
+    # observation and performs zero DB opens against the lock owner's database.
+    nonterminal = nonterminal_journal
     summary = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -874,8 +931,8 @@ def _write_summary(
         "counters": counters.snapshot(),
         "source_kind": config.source_kind,
     }
-    config.summary_out.parent.mkdir(parents=True, exist_ok=True)
     try:
+        config.summary_out.parent.mkdir(parents=True, exist_ok=True)
         config.summary_out.write_text(
             json.dumps(summary, sort_keys=True, indent=2), encoding="utf-8"
         )
@@ -887,58 +944,70 @@ def _write_summary(
                 reason_code=stop_reason,
                 snapshot=summary,
             )
+    except Exception:
+        # A summary write failure must not leak a raw exception or a stale lock: the
+        # caller still releases the lock, and the recorder is closed below. We return
+        # a sanitized FAIL/summary_failed verdict instead of propagating.
+        summary["outcome"] = RuntimeOutcome.FAIL
+        summary["stop_reason"] = "summary_failed"
     finally:
         recorder.close()
     return summary
 
 
 def _source_with_lifecycle(
-    source_factory: Callable[..., MarketEventSource],
+    source_factory: DiagnosticSourceFactory,
     *,
     lifecycle: DiagnosticLifecycle,
     source_kind: str,
 ) -> MarketEventSource:
     lifecycle.on_connect_attempt(at=lifecycle.now())
-    if source_kind == "kis_live":
-        return _call_source_factory(source_factory, lifecycle)
-    source = _call_source_factory(source_factory, lifecycle)
-    if isinstance(source, ReplayMarketEventSource):
+    try:
+        source = source_factory(lifecycle=lifecycle)
+    except AttendedPaperDayRuntimeError:
+        raise
+    except Exception as exc:
+        # Any factory failure (including an internal TypeError) is a sanitized source
+        # failure — never a signal to retry the call with a different signature.
+        raise AttendedPaperDayRuntimeError("source", "source_failed") from exc
+    if source_kind != "kis_live" and isinstance(source, ReplayMarketEventSource):
         return DiagnosticReplayMarketEventSource(
             source, lifecycle=lifecycle, clock=lifecycle.now
         )
     return source
 
 
-def _call_source_factory(
-    source_factory: Callable[..., MarketEventSource], lifecycle: DiagnosticLifecycle
-) -> MarketEventSource:
-    try:
-        return source_factory(lifecycle)
-    except TypeError:
-        return source_factory()
-
-
 def _run_live_startup_probe(
     *,
-    source_factory: Callable[..., MarketEventSource],
+    source_factory: DiagnosticSourceFactory,
     lifecycle: DiagnosticLifecycle,
     timeout_seconds: float,
 ) -> None:
     async def probe() -> None:
+        lifecycle.ready_event = asyncio.Event()
         source = _source_with_lifecycle(
             source_factory, lifecycle=lifecycle, source_kind="kis_live"
         )
-        iterator = source.events().__aiter__()
+
+        async def consume() -> None:
+            async for _ in source.events():
+                if lifecycle.all_subscribed or lifecycle.rejected:
+                    return
+
+        # Return as soon as ACK readiness (or rejection) fires — do not block on the
+        # first market event. The consumer task is then cancelled and the source's
+        # async generator is closed exactly once.
+        consumer = asyncio.create_task(consume())
+        ready = asyncio.create_task(lifecycle.ready_event.wait())
         try:
-            while not lifecycle.all_subscribed and not lifecycle.rejected:
-                await iterator.__anext__()
-        except StopAsyncIteration:
-            return
+            await asyncio.wait({consumer, ready}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            close = getattr(iterator, "aclose", None)
-            if callable(close):
-                with contextlib.suppress(Exception):
-                    await close()
+            ready.cancel()
+            consumer.cancel()
+            with contextlib.suppress(BaseException):
+                await ready
+            with contextlib.suppress(BaseException):
+                await consumer
 
     try:
         asyncio.run(asyncio.wait_for(probe(), timeout=timeout_seconds))
@@ -946,6 +1015,43 @@ def _run_live_startup_probe(
         if lifecycle.all_subscribed and not lifecycle.rejected:
             return
         raise AttendedPaperDayRuntimeError("transport", "health_not_ready") from exc
+
+
+def _normalize_critical_reason(reason: str) -> str:
+    return "journal_uncertain" if reason == "uncertain" else reason
+
+
+def _completion_verdict(
+    counters: DiagnosticCounters, nonterminal_journal: int | None
+) -> tuple[str, str]:
+    """Mechanical PASS/NO_GO verdict for a completed market-loop run.
+
+    Precedence is fixed: critical journal/reconcile -> resource close -> transport
+    subscription -> trade/quote -> health -> trigger -> PASS. The first unmet
+    criterion wins, yielding a stable NO_GO reason.
+    """
+    c = counters.values
+    if nonterminal_journal:
+        return RuntimeOutcome.NO_GO, "nonterminal_journal"
+    if c.get("reconcile_required", 0) > 0:
+        return RuntimeOutcome.NO_GO, "reconcile_required"
+    if c.get("journal_uncertain", 0) > 0:
+        return RuntimeOutcome.NO_GO, "journal_uncertain"
+    if c.get("resource_close_failures", 0) > 0:
+        return RuntimeOutcome.NO_GO, "resource_close_failure"
+    if c.get("subscription_rejections", 0) > 0:
+        return RuntimeOutcome.NO_GO, "subscription_rejected"
+    if c.get("all_subscribed", 0) == 0:
+        return RuntimeOutcome.NO_GO, "transport_not_ready"
+    if c.get("normalized_trades", 0) == 0:
+        return RuntimeOutcome.NO_GO, "trade_not_observed"
+    if c.get("normalized_quotes", 0) == 0:
+        return RuntimeOutcome.NO_GO, "quote_not_observed"
+    if c.get("health_pass", 0) == 0:
+        return RuntimeOutcome.NO_GO, "health_not_ready"
+    if c.get("trigger_evaluations", 0) == 0:
+        return RuntimeOutcome.NO_GO, "trigger_not_evaluated"
+    return RuntimeOutcome.PASS, "completed"
 
 
 def _critical_stop_from_exception(exc: BaseException) -> _CriticalStop | None:
@@ -960,6 +1066,11 @@ def _critical_stop_from_exception(exc: BaseException) -> _CriticalStop | None:
 def _outcome_for_stop_reason(stop_reason: str) -> str:
     if stop_reason in {
         "health_not_ready",
+        "transport_not_ready",
+        "subscription_rejected",
+        "trade_not_observed",
+        "quote_not_observed",
+        "trigger_not_evaluated",
         "journal_uncertain",
         "reconcile_required",
         "nonterminal_journal",
@@ -991,10 +1102,9 @@ def _record_publication(
 def _record_monitor_evidence(
     record: Callable[..., None], counters: DiagnosticCounters, evidence: MonitorEvidence
 ) -> None:
-    if evidence.kind == "connect":
-        counters.inc("connect_attempts")
-    if evidence.kind == "drop":
-        counters.inc("disconnects")
+    # connect_attempts / disconnects are owned solely by the lifecycle (one event per
+    # connection attempt). The monitor still emits connect/drop evidence rows, but
+    # counting them here too would double-count the same physical attempt.
     if evidence.kind == "apply":
         if evidence.event_type == MarketEventType.TRADE.value:
             counters.inc("trade_frames")
@@ -1160,11 +1270,6 @@ def journal_state_counts(db_path: Path) -> dict[str, int]:
     finally:
         conn.close()
     return {str(state): int(count) for state, count in rows}
-
-
-def _nonterminal_count(db_path: Path) -> int:
-    counts = journal_state_counts(db_path)
-    return counts.get("reserved", 0) + counts.get("dispatching", 0)
 
 
 __all__ = [

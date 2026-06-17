@@ -556,3 +556,18 @@ touch network/credentials/DB/clock and never activate runtime:
   decision writer. This mode is paper-only, evidence-first, and does not change
   `run_paper_fast_loop.py --run`, does not construct a real-order adapter, does not enable
   daemon/restart behavior, and does not make runtime activation authorized.
+  Correctness closure: admission is two-phase (non-secret lock/evidence/path/DB ownership before any
+  live source preparation), so a duplicate runtime lock refuses as `runtime_lock_exists` with DB
+  open/create and credential env reads both **0**; the summary writer opens no DB (it reads the
+  post-close `nonterminal_journal` captured before `stack.close()`); the source factory is a single
+  keyword-only `lifecycle` contract invoked exactly once with no arity probing and factory errors
+  sanitized to `source_failed`; `build_diagnostic_stack` closes partial handles in reverse order
+  preserving the original exception; a completed loop is re-checked by a fixed-precedence completion
+  verdict; path admission rejects dangling final-component symlinks and rollback-journal sidecars;
+  transport `connect_attempts`/`disconnects` counters are single-owner (lifecycle only); the live
+  startup probe returns on subscription ACK without waiting for a market event.
+  Import-guard boundary: `ops/run_attended_paper_day.py` is the only attended CLI permitted to reach
+  the live KIS read-only surface, and only through an exact module allowlist —
+  `broker.kis_transport`, `data.kis_ws_auth`, `data.kis_ws_source`. No other `broker`/`data`
+  submodule (e.g. a live order adapter) may be imported, even lazily; `tests/test_composition_import_guard.py`
+  pins this. The actual live KIS run and the 1-day pilot remain NO-GO until Reviewer PASS.

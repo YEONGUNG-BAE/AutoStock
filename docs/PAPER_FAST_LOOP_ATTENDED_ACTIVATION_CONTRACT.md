@@ -201,6 +201,21 @@ VALID (consistency only); a mode conflict including the artifact flag emits a de
 conflict envelope. The 4t builder emits the hash + artifact from the validated content snapshot
 (carry-over, byte-equivalent output/digest).
 
+**RTM-7c.5a/5b** closes the attended paper-day diagnostic correctness findings while keeping
+runtime activation NO-GO and `activation_authorized=false`. Admission is two-phase: non-secret
+admission (lock acquire + evidence/path/DB ownership) runs before any live source preparation,
+so a duplicate runtime lock (`runtime_lock_exists`) opens/creates **zero** DBs and reads **zero**
+credential env vars. The summary writer no longer opens the DB — it reads the post-close
+`nonterminal_journal` count captured before `stack.close()`. The source factory is a single
+keyword-only `lifecycle` contract called exactly once (no arity probing); factory exceptions are
+sanitized to `source_failed`. `build_diagnostic_stack` closes partially-constructed handles in
+reverse order while preserving the original exception. A completed market loop is re-checked by a
+fixed-precedence completion verdict that downgrades to a stable NO_GO reason. Path admission
+rejects dangling final-component symlinks and rollback-journal sidecars. Transport
+`connect_attempts`/`disconnects` are single-owner (lifecycle only). The live startup probe returns
+on subscription ACK (asyncio `FIRST_COMPLETED`) without waiting for a market event. The actual
+live KIS run and the 1-day pilot have not been performed and remain NO-GO until Reviewer PASS.
+
 ## Orphan sidecar observation limit
 
 `composition.sqlite_inspector.fingerprint_artifact` probes sidecar suffixes only when

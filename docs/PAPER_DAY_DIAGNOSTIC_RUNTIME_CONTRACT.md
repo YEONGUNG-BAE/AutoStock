@@ -79,14 +79,40 @@ Runtime summary outcome taxonomy:
 
 ```text
 PASS: completed, startup_only
-NO_GO: health_not_ready, journal_uncertain, reconcile_required,
-       nonterminal_journal, resource_close_failure, runtime_lock_exists
+NO_GO: transport_not_ready, subscription_rejected, trade_not_observed,
+       quote_not_observed, health_not_ready, trigger_not_evaluated,
+       journal_uncertain, reconcile_required, nonterminal_journal,
+       resource_close_failure, runtime_lock_exists
 FAIL: invalid_input, source_failed, evidence_failed, summary_failed,
       db_failed, internal_runtime_error
 ```
 
 CLI exit: `PASS -> 0`, `NO_GO/FAIL -> 1`. Existing
 `ops/run_paper_fast_loop.py --run` remains `NO_GO` with exit `2`.
+
+Completion verdict: a `completed` market loop is only confirmed `PASS` after a
+fixed-precedence re-check of the lifecycle counters. The verdict is evaluated
+once, after resources close, and downgrades an otherwise-`PASS` run to `NO_GO`
+with a stable reason. Precedence (first failing gate wins):
+
+```text
+1. nonterminal_journal                       (journal left non-terminal)
+2. reconcile_required                         (critical journal state)
+3. journal_uncertain                          (critical journal state)
+4. resource_close_failure
+5. subscription_rejected                      (transport)
+6. transport_not_ready  (no all-subscribed)   (transport)
+7. trade_not_observed                         (market data)
+8. quote_not_observed                         (market data)
+9. health_not_ready
+10. trigger_not_evaluated
+-> otherwise PASS
+```
+
+A `PASS` therefore requires that at least one trade tick and one quote were
+observed, the subscription was accepted, health became ready, the trigger was
+evaluated, and the journal was left fully terminal with no uncertain/reconcile
+state.
 
 Lock/path ownership: `db_dir` is explicit, evidence and summary outputs must not
 overlap it, final symlink components are rejected, evidence is create-new, a

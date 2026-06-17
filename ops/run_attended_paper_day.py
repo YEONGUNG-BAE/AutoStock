@@ -83,7 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if bool(args.offline_fixture) == bool(args.live_kis):
             raise CliError("choose exactly one of --offline-fixture or --live-kis for run mode.")
         if args.offline_fixture:
-            source_factory = lambda: ReplayMarketEventSource(_fixture_events(config.session_date))
+            source_factory = lambda *, lifecycle: ReplayMarketEventSource(
+                _fixture_events(config.session_date)
+            )
             clock = _fixture_clock(config.session_date)
         else:
             source_factory = _live_source_factory(args.config, config)
@@ -190,29 +192,32 @@ def _fixture_events(session_date: date) -> list[object]:
 
 
 def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
-    import os
+    # Lazy by contract: settings load, credential-env reads, and approval issuance all
+    # happen inside the factory body, which the runtime invokes only AFTER admission
+    # (lock acquisition + path/DB ownership) succeeds. A lock/path/DB admission failure
+    # therefore reads zero secrets and opens zero network connections.
+    def factory(*, lifecycle) -> "object":
+        import os
 
-    from broker.kis_transport import StdlibKisHttpTransport
-    from config.settings import load_settings
-    from data.kis_ws_auth import KisWsApprovalProvider
-    from data.kis_ws_source import (
-        KisWsMarketEventSource,
-        KisWsSubscription,
-        open_kis_websocket,
-    )
+        from broker.kis_transport import StdlibKisHttpTransport
+        from config.settings import load_settings
+        from data.kis_ws_auth import KisWsApprovalProvider
+        from data.kis_ws_source import (
+            KisWsMarketEventSource,
+            KisWsSubscription,
+            open_kis_websocket,
+        )
 
-    settings = load_settings(config_path)
-    ws = settings.broker.kis_ws_read_only
-    if not ws.enabled:
-        raise CliError("broker.kis_ws_read_only.enabled must be true for --live-kis.")
-    app_key = os.environ.get(ws.app_key_env)
-    app_secret = os.environ.get(ws.app_secret_env)
-    if not app_key or not app_secret:
-        raise CliError("KIS app key/secret env vars are required for --live-kis.")
-    if config.symbol != PILOT_SYMBOL:
-        raise CliError("only symbol 005930 is allowed.")
-
-    def factory(lifecycle=None) -> KisWsMarketEventSource:
+        settings = load_settings(config_path)
+        ws = settings.broker.kis_ws_read_only
+        if not ws.enabled:
+            raise CliError("broker.kis_ws_read_only.enabled must be true for --live-kis.")
+        app_key = os.environ.get(ws.app_key_env)
+        app_secret = os.environ.get(ws.app_secret_env)
+        if not app_key or not app_secret:
+            raise CliError("KIS app key/secret env vars are required for --live-kis.")
+        if config.symbol != PILOT_SYMBOL:
+            raise CliError("only symbol 005930 is allowed.")
         approval = KisWsApprovalProvider(
             transport=StdlibKisHttpTransport(),
             approval_base_url=ws.approval_base_url,
@@ -231,9 +236,7 @@ def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
             ),
             clock=lambda: datetime.now(tz=KST),
             receive_timeout_seconds=ws.receive_timeout_seconds,
-            on_transport_event=(
-                None if lifecycle is None else lifecycle.on_kis_transport_event
-            ),
+            on_transport_event=lifecycle.on_kis_transport_event,
         )
 
     return factory

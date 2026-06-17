@@ -46,7 +46,9 @@ Startup-only modes:
 - `--live-kis --startup-only`: additionally obtains KIS approval, connects the
   websocket, waits for trade and quote subscription ACKs, closes the source, and
   writes the post-close summary. It must not execute paper decisions or broker
-  calls.
+  calls. The probe returns as soon as both subscription ACKs are observed (or the
+  receive timeout elapses, yielding `health_not_ready`); it does not wait out the
+  full `--duration-seconds` for a market event.
 
 Summary outcome and CLI exit:
 
@@ -58,9 +60,11 @@ legacy ops/run_paper_fast_loop.py --run -> exit 2
 ```
 
 Use a fresh explicit `--db-dir`, `--evidence-out`, and `--summary-out` per run.
-The diagnostic runtime rejects output overlap, final symlink components, DB
-sidecars, existing non-empty pilot DB directories without explicit reuse policy,
-and duplicate runtime locks.
+The diagnostic runtime rejects output overlap, final symlink components (including
+dangling symlinks), DB sidecars (`-wal`, `-shm`, `-journal`), existing non-empty
+pilot DB directories without explicit reuse policy, and duplicate runtime locks.
+When a duplicate runtime lock is detected the run is refused as `runtime_lock_exists`
+before any DB is opened or any credential env var is read.
 
 Immediate stop conditions:
 
@@ -79,3 +83,7 @@ activation_authorized=true
 
 After the day, review `summary.json` first, then the earliest evidence record
 whose stage/reason explains the first failure.
+
+The actual live KIS startup/run and the 1-day pilot have **not** been performed.
+A 1-day pilot remains **NO-GO** until Reviewer PASS; Cursor/test work is limited
+to validate-only, offline fixtures, and lifecycle-aware fakes.

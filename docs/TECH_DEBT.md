@@ -79,6 +79,31 @@
 - Scope exclusions remain: real-order adapter construction, live order submission, automatic
   restart, multi-symbol operation, implicit operational DB selection, daemon/scheduler deployment,
   signing/authentication, replay prevention claims, and runtime activation authorization.
+- RTM-7c.5a/5b correctness closure (admission + completion verdict): reproduced each Reviewer
+  finding in code before fixing. (P1-A) Admission is two-phase — non-secret lock/evidence/path/DB
+  ownership runs before any live source preparation, so a duplicate runtime lock refuses as
+  `runtime_lock_exists` with DB open/create **0** and credential env reads **0**, and the
+  lock-owner summary writer opens no DB (reads the post-close `nonterminal_journal` captured before
+  `stack.close()`). (P1-B) The source factory is a single keyword-only `lifecycle` contract
+  (`DiagnosticSourceFactory`) invoked exactly once with no arity probing; factory exceptions are
+  sanitized to `source_failed`. (P1-C) `build_diagnostic_stack` closes partially-constructed handles
+  in reverse order (`_close_partial_resources`) while preserving the original exception. (P1-D) A
+  completed market loop is re-checked by a fixed-precedence completion verdict (`_completion_verdict`)
+  that downgrades an otherwise-`PASS` run to a stable NO_GO reason: nonterminal_journal →
+  reconcile_required → journal_uncertain → resource_close_failure → subscription_rejected →
+  transport_not_ready → trade_not_observed → quote_not_observed → health_not_ready →
+  trigger_not_evaluated. (P1-E) Path admission rejects dangling final-component symlinks and
+  rollback-journal sidecars (`-wal`/`-shm`/`-journal`). (P1-F) Settings load + credential env reads
+  are deferred into the lazy source factory closure, which runs only after admission succeeds.
+  Failure taxonomy: `source_failed`/`db_failed`/`evidence_failed`/`summary_failed`/`internal_runtime_error`.
+- RTM-7c.5a/5b P2 closure: `connect_attempts`/`disconnects` are single-owner (lifecycle only; the
+  monitor no longer re-increments them). The live startup probe returns on subscription ACK via
+  asyncio `FIRST_COMPLETED` without waiting for a market event. The attended CLI import guard pins an
+  exact `broker`/`data` module allowlist (`broker.kis_transport`, `data.kis_ws_auth`,
+  `data.kis_ws_source`); any other submodule fails the guard.
+- Still NO-GO: the actual live KIS startup/run and the 1-day pilot have not been performed and
+  remain NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures,
+  and lifecycle-aware fakes; no commit is made until the Operator authorizes it.
 
 ## P3 — Ops / KIS / Paper Review Backlog
 

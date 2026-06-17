@@ -39,6 +39,12 @@ startup assumptions. Replay sources may emit an explicit synthetic replay
 lifecycle; live KIS readiness comes from KIS websocket transport events. Offline
 startup-only therefore reports `connected=0` and `subscription_acks=0`.
 
+Single-owner counters: `connect_attempts` and `disconnects` are incremented only
+by the source lifecycle (one increment per physical connection attempt/drop). The
+monitor still emits connect/drop evidence rows for the timeline, but it does not
+re-increment those counters — the lifecycle is the sole owner, so the completion
+verdict reads a non-double-counted value.
+
 Heartbeat records include:
 
 ```text

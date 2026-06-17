@@ -116,6 +116,19 @@ def test_composition_imports_no_network_or_credential_surface() -> None:
     assert offenders == [], f"composition reached a forbidden surface: {offenders}"
 
 
+def test_attended_cli_broker_imports_limited_to_exact_allowlist() -> None:
+    # The attended paper-day CLI may reach the live KIS read-only surface, but only
+    # through an exact module allowlist. No other broker submodule (e.g. a live order
+    # adapter) and no extra vendor data client may be imported, even lazily.
+    allowed = {"broker.kis_transport", "data.kis_ws_auth", "data.kis_ws_source"}
+    offenders: list[str] = []
+    for module in sorted(_imports(ATTENDED_PAPER_DAY_CLI)):
+        root = module.split(".")[0]
+        if root in {"broker", "data"} and module not in allowed:
+            offenders.append(module)
+    assert offenders == [], f"attended CLI reached a disallowed broker/data module: {offenders}"
+
+
 def test_composition_root_only_wires_allowed_first_party_packages() -> None:
     # First-party imports outside the documented allowlist would mean the
     # composition root grew an unexpected dependency; fail loudly so it is reviewed.
