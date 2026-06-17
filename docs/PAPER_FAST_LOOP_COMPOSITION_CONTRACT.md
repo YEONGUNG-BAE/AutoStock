@@ -572,17 +572,20 @@ touch network/credentials/DB/clock and never activate runtime:
   owner only. The summary is published **create-new/atomic** (same-dir temp opened
   `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, write+fsync, hard-link to the create-new destination, no
   overwrite, no symlink follow) reusing the RTM-7c.4x artifact-file publish pattern; outcomes are
-  `WRITTEN`/`NOT_WRITTEN`/`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN` and anything but `WRITTEN`
-  downgrades to `FAIL/summary_failed` with no summary file. The final evidence record is written and
-  the recorder closed **before** the summary is built/published, so the returned dict equals the
-  persisted `summary.json`. A single outer lifecycle owner runs cleanup (source cancel/close → stack
-  reverse-close → recorder close → summary publish if eligible → lock release) with lock release as
-  the **last bounded cleanup, always attempted** even under a fatal (`MemoryError`, `SystemExit`);
-  fatal identity is preserved (re-raised) and operation fatals outrank cleanup fatals. The live startup
-  probe inspects the consumer task's exception explicitly and classifies fully — ACK accepted → PASS;
-  rejected → `subscription_rejected`; exhaustion before readiness → `transport_not_ready`;
-  consumer/source error → `source_failed`; receive timeout → `health_not_ready` — never downgrading a
-  source error to `health_not_ready`.
+  `WRITTEN`/`NOT_WRITTEN`/`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN`; parent fsync
+  failure → `PUBLISHED_INCOMPLETE`; post-link unreadable destination →
+  `PUBLICATION_UNCERTAIN`; returned/persisted equality **only for `WRITTEN`**. Operation/cleanup
+  fatal blocks PASS summary publish (Choice A: no summary file). Lock release returns structured
+  state; residue/uncertainty forbids PASS return. The final evidence record is written and the
+  recorder closed **before** summary publish eligibility is decided. A single outer lifecycle owner
+  runs cleanup (source cancel/close → stack reverse-close → recorder close → cleanup fatal judgment
+  → summary publish if eligible → lock release) with lock release as the **last bounded cleanup,
+  always attempted** even under a fatal; resource `close()` preserves fatal types; operation fatals
+  outrank cleanup fatals. The live startup probe inspects `Task.exception()` only when
+  `done and not cancelled`; generator close `RuntimeError` → `source_close_failed`; fatal preserved.
+  ACK accepted → PASS; rejected → `subscription_rejected`; exhaustion before readiness →
+  `transport_not_ready`; consumer/source error → `source_failed`; receive timeout →
+  `health_not_ready`.
   Import-guard boundary: `ops/run_attended_paper_day.py` is the only attended CLI permitted to reach
   the live KIS read-only surface, and only through an exact module allowlist —
   `broker.kis_transport`, `data.kis_ws_auth`, `data.kis_ws_source`. No other `broker`/`data`

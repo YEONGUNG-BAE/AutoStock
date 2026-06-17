@@ -73,9 +73,11 @@ even opened. Evidence rows therefore exist only for runs that acquired the lock.
 
 Evidence/summary ordering: the final evidence record (`stage="shutdown"`,
 `event="finalized"`) is written and the recorder is flushed/closed **before** the
-immutable summary is built and published. The persisted `summary.json` is
-therefore byte-for-byte equal to the returned result. An evidence write failure
-yields `FAIL/evidence_failed` and no PASS summary file.
+immutable summary is built and published. **Byte-for-byte equality between the
+returned result and persisted `summary.json` is claimed only when
+`summary_publication_outcome == WRITTEN`.** Operation/cleanup fatal blocks PASS
+summary publish (Choice A: no summary file). An evidence write failure yields
+`FAIL/evidence_failed` and no PASS summary file.
 
 Failure-stage principle: after a failed attended pilot, inspect the first failed
 stage in evidence and run only the corresponding partial verification. Do not

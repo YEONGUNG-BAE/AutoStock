@@ -120,9 +120,20 @@
   write+fsync, hard-link, no overwrite/no symlink follow) reusing the RTM-7c.4x artifact-file pattern;
   outcomes `WRITTEN`/`NOT_WRITTEN`/`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN`, anything but
   `WRITTEN` → `FAIL/summary_failed` with no summary file. `Path.write_text()` overwrite removed.
-- Still NO-GO: the actual live KIS startup/run and the 1-day pilot have not been performed and
-  remain NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures,
-  and lifecycle-aware fakes; no commit is made until the Operator authorizes it.
+- RTM-7c.5a/5b cleanup-fatal / lock-release / publication-state closure (reproduced each
+  finding before fixing): (P1-A) cleanup or operation fatal blocks PASS summary publish (Choice A:
+  no summary file; lock release still attempted; fatal re-raised). (P1-B) `PilotRuntimeLock.release`
+  returns structured state; failures are not suppressed; lock residue/uncertainty forbids PASS return.
+  (P1-C) summary publication four-state model with parent fsync failure → `PUBLISHED_INCOMPLETE`,
+  post-link unreadable destination → `PUBLICATION_UNCERTAIN`; persisted/returned equality only for
+  `WRITTEN`. (P1-D) startup probe reads `Task.exception()` only when `done and not cancelled`
+  (Python 3.11+); generator close `RuntimeError` → `source_close_failed`; fatal preserved. (P2)
+  `_close_partial_resources` structured precedence: operation fatal > cleanup fatal > constructor
+  ordinary > cleanup ordinary. Resource `close()` preserves `MemoryError`/`KeyboardInterrupt`/
+  `SystemExit` across all attempted closes.
+- Still NO-GO: actual KIS startup/run and the 1-day pilot have **not** been performed and remain
+  NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures, and
+  lifecycle-aware fakes; no commit is made until the Operator authorizes it.
 
 ## P3 — Ops / KIS / Paper Review Backlog
 

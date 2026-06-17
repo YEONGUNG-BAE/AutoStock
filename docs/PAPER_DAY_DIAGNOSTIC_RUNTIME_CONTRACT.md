@@ -57,7 +57,8 @@ validate                       (admission phase 1)
 -> final evidence record
 -> evidence flush/close
 -> build immutable summary
--> summary create-new publish
+-> cleanup fatal/ordinary failure final judgment
+-> summary create-new publish (only when no operation/cleanup fatal)
 -> release lock                (last bounded cleanup)
 ```
 
@@ -76,22 +77,49 @@ same-directory temp opened `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, fsynced, then
 hard-linked to the create-new destination (link fails if the destination
 exists). `Path.write_text()` overwrite is not used. A partial summary is never
 visible. Publish outcomes are `WRITTEN`, `NOT_WRITTEN`, `PUBLISHED_INCOMPLETE`,
-and `PUBLICATION_UNCERTAIN`; anything other than `WRITTEN` downgrades the run to
-`FAIL/summary_failed` with no PASS summary file left behind.
+and `PUBLICATION_UNCERTAIN`:
+
+- `WRITTEN`: destination publication confirmed, temp cleanup confirmed, parent
+  directory sync confirmed.
+- `PUBLISHED_INCOMPLETE`: destination publication confirmed, but temp cleanup
+  and/or parent sync incomplete.
+- `PUBLICATION_UNCERTAIN`: destination publication cannot be confirmed absent or
+  present (e.g. post-link `lstat` `EIO`/`EACCES`).
+- `NOT_WRITTEN`: destination absence confirmed.
+
+Anything other than `WRITTEN` downgrades the returned run to `FAIL` with stable
+reasons (`summary_failed`, `summary_published_incomplete`,
+`summary_publication_uncertain`). **Persisted/returned byte equality is claimed
+only when `summary_publication_outcome == WRITTEN`.** For
+`PUBLICATION_UNCERTAIN` or lock-release uncertainty the operator must manually
+inspect/isolate the on-disk file.
+
+**Cleanup or operation fatal blocks PASS summary publish (Choice A):** when an
+operation fatal (`MemoryError`, `KeyboardInterrupt`, `SystemExit`) or cleanup
+fatal is pending, no summary file is written; lock release is still attempted;
+the original fatal is re-raised after finalize.
 
 Evidence/summary consistency: the final evidence record is written and the
-evidence recorder is closed **before** the summary is built and published, so the
-returned result dict is byte-for-byte equal to the persisted `summary.json`. An
-evidence failure yields `FAIL/evidence_failed` and no PASS summary; a summary
-publish failure yields `FAIL/summary_failed` with the file absent.
+evidence recorder is closed **before** the summary is built and published.
+An evidence failure yields `FAIL/evidence_failed` and no PASS summary.
 
 Fatal lifecycle ownership: a single outer owner runs cleanup in order
-(source cancel/close -> stack reverse-close -> recorder close -> summary publish
-if eligible -> lock release) with lock release as the **last bounded cleanup,
-always attempted** even under a fatal (`MemoryError`, `SystemExit`). Fatal
-identity is preserved (re-raised) and operation (body) fatals outrank cleanup
-fatals: operation > source cleanup > stack cleanup > recorder cleanup > lock
-cleanup.
+(source cancel/close → stack reverse-close → recorder close → cleanup fatal
+judgment → summary publish if eligible → lock release) with lock release as the
+**last bounded cleanup, always attempted** even under a fatal (`MemoryError`,
+`SystemExit`). Resource-level close uses exact fatal preservation:
+`MemoryError`/`KeyboardInterrupt`/`SystemExit` are never swallowed as ordinary
+close failures; all resources are still attempted and the first cleanup fatal
+is retained. Fatal identity is preserved (re-raised) with precedence:
+operation > source cleanup > stack/resource cleanup > recorder cleanup > summary
+publication > lock cleanup.
+
+Lock release returns structured state (`runtime_lock_fd_closed`,
+`runtime_lock_unlinked`, `runtime_lock_absent_confirmed`,
+`runtime_lock_release_reason_code`). `unlink` `ENOENT` confirms absent;
+`EACCES`/`EIO` yield `runtime_lock_release_uncertain`; other failures yield
+`runtime_lock_release_failed`. Lock residue or uncertain release forbids PASS
+return. No automatic stale-lock deletion after release failure.
 
 Transport readiness counters are owned by source lifecycle events only:
 connect attempts, connected state, subscription requests, ACKs, rejects, and
@@ -117,12 +145,23 @@ both subscription ACKs accepted        -> PASS/startup_only
 subscription ACK rejected              -> NO_GO/subscription_rejected
 consumer exhausts before readiness     -> NO_GO/transport_not_ready
 consumer/source raises                 -> FAIL/source_failed
+generator close raises (non-cancel)    -> FAIL/source_close_failed
+generator close fatal                  -> fatal preserved (no PASS summary)
 receive timeout without readiness      -> NO_GO/health_not_ready
 ```
 
 The probe inspects the consumer task's exception explicitly rather than
 suppressing it; suppressing a consumer exception and then reporting
-`health_not_ready` is forbidden.
+`health_not_ready` is forbidden. After consumer cancel, `Task.exception()` is
+read only when `task.done() and not task.cancelled()` (Python 3.11+ re-raises
+`CancelledError` otherwise). Allowed: `asyncio.CancelledError` caused by explicit
+consumer cancel. Failed: generator `finally`/`close` `RuntimeError` →
+`source_close_failed`. Fatal: `MemoryError`/`KeyboardInterrupt`/`SystemExit` →
+fatal precedence preserved.
+
+Partial stack construction: `_close_partial_resources` returns structured
+result; precedence is constructor operation fatal > cleanup fatal > constructor
+ordinary error > cleanup ordinary errors.
 
 Runtime summary outcome taxonomy:
 
@@ -132,12 +171,16 @@ NO_GO: transport_not_ready, subscription_rejected, trade_not_observed,
        quote_not_observed, health_not_ready, trigger_not_evaluated,
        journal_uncertain, reconcile_required, nonterminal_journal,
        resource_close_failure, runtime_lock_exists
-FAIL: invalid_input, source_failed, evidence_failed, summary_failed,
+FAIL: invalid_input, source_failed, source_close_failed, evidence_failed,
+      summary_failed, summary_published_incomplete, summary_publication_uncertain,
+      runtime_lock_release_failed, runtime_lock_release_uncertain,
       db_failed, internal_runtime_error
 ```
 
-CLI exit: `PASS -> 0`, `NO_GO/FAIL -> 1`. Existing
-`ops/run_paper_fast_loop.py --run` remains `NO_GO` with exit `2`.
+CLI exit: clean `PASS` + `summary_publication_outcome == WRITTEN` +
+`runtime_lock_absent_confirmed == true` → `0`; `NO_GO`/`FAIL`/`PUBLISHED_INCOMPLETE`/
+`PUBLICATION_UNCERTAIN`/lock-release failure → `1`; fatal propagates per policy.
+Existing `ops/run_paper_fast_loop.py --run` remains `NO_GO` with exit `2`.
 
 Completion verdict: a `completed` market loop is only confirmed `PASS` after a
 fixed-precedence re-check of the lifecycle counters. The verdict is evaluated

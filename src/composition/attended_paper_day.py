@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import secrets
@@ -106,6 +107,39 @@ class RuntimeOutcome:
     PASS = "PASS"
     NO_GO = "NO_GO"
     FAIL = "FAIL"
+
+
+class CleanupOutcome:
+    CLEAN = "CLEAN"
+    INCOMPLETE = "INCOMPLETE"
+    FATAL = "FATAL"
+
+
+class SummaryPublicationOutcome:
+    WRITTEN = "WRITTEN"
+    NOT_WRITTEN = "NOT_WRITTEN"
+    PUBLISHED_INCOMPLETE = "PUBLISHED_INCOMPLETE"
+    PUBLICATION_UNCERTAIN = "PUBLICATION_UNCERTAIN"
+
+
+@dataclass(frozen=True)
+class RuntimeLockReleaseResult:
+    fd_closed: bool
+    lock_unlinked: bool
+    lock_absent_confirmed: bool
+    reason_code: str | None = None
+
+
+@dataclass(frozen=True)
+class PartialCleanupResult:
+    ordinary_failures: int
+    fatal: BaseException | None
+
+
+@dataclass(frozen=True)
+class SummaryPublishResult:
+    outcome: str
+    reason_codes: tuple[str, ...] = ()
 
 
 class AttendedPaperDayInputError(Exception):
@@ -274,17 +308,22 @@ class DiagnosticStack:
     orchestrator: FastLoopExecutionOrchestrator
     close_failures: int = 0
 
-    def close(self) -> int:
+    def close(self) -> tuple[int, BaseException | None]:
+        """모든 리소스 close를 시도하고, 첫 cleanup fatal을 보존한다."""
         failures = 0
+        pending_fatal: BaseException | None = None
         for resource in (self.active_store, self.journal, self.ledger):
             close = getattr(resource, "close", None)
             if callable(close):
                 try:
                     close()
+                except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                    if pending_fatal is None:
+                        pending_fatal = exc
                 except Exception:
                     failures += 1
         self.close_failures += failures
-        return failures
+        return failures, pending_fatal
 
 
 class PilotRuntimeLock:
@@ -302,15 +341,47 @@ class PilotRuntimeLock:
         except OSError as exc:
             raise AttendedPaperDayRuntimeError("lock", "runtime_lock_failed") from exc
 
-    def release(self) -> None:
-        if self._fd is None:
-            return
+    def release(self) -> RuntimeLockReleaseResult:
+        """fd close와 unlink를 별도 관찰하고, lock 부재를 확정할 수 없으면 reason을 반환한다."""
+        fd_closed = self._fd is None
+        lock_unlinked = False
+        lock_absent_confirmed = False
+        reason_code: str | None = None
         if self._fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(self._fd)
+            fd = self._fd
             self._fd = None
-        with contextlib.suppress(FileNotFoundError):
+            try:
+                os.close(fd)
+                fd_closed = True
+            except OSError:
+                fd_closed = False
+                reason_code = "runtime_lock_release_failed"
+        try:
             self._path.unlink()
+            lock_unlinked = True
+            lock_absent_confirmed = True
+        except FileNotFoundError:
+            lock_unlinked = True
+            lock_absent_confirmed = True
+        except PermissionError:
+            reason_code = reason_code or "runtime_lock_release_uncertain"
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EIO):
+                reason_code = reason_code or "runtime_lock_release_uncertain"
+            else:
+                reason_code = reason_code or "runtime_lock_release_failed"
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            reason_code = reason_code or "runtime_lock_release_failed"
+        if not lock_absent_confirmed and reason_code is None:
+            reason_code = "runtime_lock_release_failed"
+        return RuntimeLockReleaseResult(
+            fd_closed=fd_closed,
+            lock_unlinked=lock_unlinked,
+            lock_absent_confirmed=lock_absent_confirmed,
+            reason_code=reason_code,
+        )
 
 
 class _CriticalStop(Exception):
@@ -633,9 +704,13 @@ def build_diagnostic_stack(
             coordinator=coordinator,
             on_evidence=on_execution_evidence,
         )
-    except BaseException:
-        _close_partial_resources(opened)
-        raise
+    except BaseException as operation_exc:
+        cleanup = _close_partial_resources(opened)
+        if isinstance(operation_exc, (MemoryError, KeyboardInterrupt, SystemExit)):
+            raise operation_exc
+        if cleanup.fatal is not None:
+            raise cleanup.fatal
+        raise operation_exc
     counters.inc("startup_completed")
     return DiagnosticStack(
         active_store=active_store,
@@ -649,12 +724,21 @@ def build_diagnostic_stack(
     )
 
 
-def _close_partial_resources(resources: list[object]) -> None:
+def _close_partial_resources(resources: list[object]) -> PartialCleanupResult:
+    """역순 close를 시도하고, operation fatal과 cleanup fatal 우선순위를 보존한다."""
+    ordinary_failures = 0
+    pending_fatal: BaseException | None = None
     for resource in reversed(resources):
         close = getattr(resource, "close", None)
         if callable(close):
-            with contextlib.suppress(Exception):
+            try:
                 close()
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                if pending_fatal is None:
+                    pending_fatal = exc
+            except Exception:
+                ordinary_failures += 1
+    return PartialCleanupResult(ordinary_failures=ordinary_failures, fatal=pending_fatal)
 
 
 def run_attended_paper_day(
@@ -938,6 +1022,7 @@ def run_attended_paper_day(
         evidence_owned=evidence_owned,
         summary_path_owned=summary_path_owned,
         now_fn=now_fn,
+        pending_fatal=body_fatal,
     )
     # Fatal precedence: an operation (body) fatal outranks any cleanup fatal.
     fatal = body_fatal if body_fatal is not None else cleanup_fatal
@@ -990,44 +1075,39 @@ def _finalize_run(
     evidence_owned: bool,
     summary_path_owned: bool,
     now_fn: Callable[[], datetime],
+    pending_fatal: BaseException | None = None,
 ) -> tuple[dict[str, object], BaseException | None]:
-    """Single outer lifecycle owner: decide the final result, persist it, release.
+    """단일 outer lifecycle owner: cleanup 판정 → summary publish → lock release.
 
-    Cleanup order is fixed: stack reverse-close -> final journal observation ->
-    completion verdict -> final evidence record -> recorder close -> create-new
-    summary publish -> runtime lock release. The runtime lock release is always the
-    last bounded cleanup. The returned summary dict is byte-identical to any persisted
-    summary file. Cleanup-step fatals are captured (not masked) and the first one is
-    returned for the caller to re-raise after lock release; ordinary cleanup failures
-    are normalized into the runtime result (resource_close_failure / evidence_failed /
-    summary_failed).
+    cleanup fatal이 있으면 PASS summary publish를 하지 않는다(Choice A).
+    persisted/returned byte equality는 ``WRITTEN``에서만 주장한다.
     """
     nonterminal_journal: int | None = None
     cleanup_fatal: BaseException | None = None
 
-    # 1. Stack reverse-close (DiagnosticStack.close swallows ordinary per-resource
-    #    errors into a failure count; a fatal there is captured as a cleanup fatal).
+    # 1. Stack reverse-close — 모든 리소스 close 시도, 첫 fatal 보존.
     if stack is not None:
         with contextlib.suppress(Exception):
             nonterminal_journal = len(stack.journal.list_nonterminal())
         try:
-            failures = stack.close()
+            failures, stack_fatal = stack.close()
         except BaseException as exc:  # noqa: BLE001
-            cleanup_fatal = cleanup_fatal or exc
+            cleanup_fatal = exc
             failures = 0
+        else:
+            if stack_fatal is not None:
+                cleanup_fatal = stack_fatal
         if failures:
             counters.inc("resource_close_failures", failures)
             stop_reason = "resource_close_failure"
             outcome = RuntimeOutcome.NO_GO
     counters.stamp("shutdown_completed_at", now_fn())
 
-    # 2. Completion verdict only refines a still-PASS market-loop run.
-    if ran_market_loop and outcome == RuntimeOutcome.PASS:
+    # 2. Completion verdict — cleanup fatal 전 mechanical outcome만 정제.
+    if ran_market_loop and outcome == RuntimeOutcome.PASS and cleanup_fatal is None:
         outcome, stop_reason = _completion_verdict(counters, nonterminal_journal)
 
-    # 3. Final evidence record + 4. recorder close. An evidence failure here downgrades
-    #    to FAIL/evidence_failed BEFORE the summary is built, so no PASS summary is ever
-    #    persisted after an evidence failure.
+    # 3. Final evidence record + 4. recorder close.
     if evidence_owned:
         try:
             recorder.record(
@@ -1050,10 +1130,7 @@ def _finalize_run(
             outcome = RuntimeOutcome.FAIL
             stop_reason = "evidence_failed"
 
-    # 5. Build the immutable summary from the now-final outcome and publish it
-    #    create-new/atomically. Only the lock owner with confirmed path ownership
-    #    writes the file. A publish failure yields FAIL/summary_failed with the file
-    #    absent (or another owner's file untouched) — never a partial/visible summary.
+    # 5. Mechanical summary — cleanup fatal 판정 후 publish 여부 결정.
     summary = _build_summary(
         config=config,
         run_id=run_id,
@@ -1062,28 +1139,98 @@ def _finalize_run(
         stop_reason=stop_reason,
         outcome=outcome,
     )
-    if summary_path_owned:
-        publish = _publish_summary_create_new(
-            config.summary_out, json.dumps(summary, sort_keys=True, indent=2)
-        )
-        if publish != _SUMMARY_WRITTEN:
-            summary = {**summary, "outcome": RuntimeOutcome.FAIL, "stop_reason": "summary_failed"}
+    publication_outcome: str | None = None
+    publication_reason_codes: tuple[str, ...] = ()
 
-    # 6. Runtime lock release — the last bounded cleanup on every path.
+    if summary_path_owned:
+        publish_blocked = cleanup_fatal is not None or pending_fatal is not None
+        if not publish_blocked:
+            publish = _publish_summary_create_new(
+                config.summary_out, json.dumps(summary, sort_keys=True, indent=2)
+            )
+            publication_outcome = publish.outcome
+            publication_reason_codes = publish.reason_codes
+            if publish.outcome == SummaryPublicationOutcome.WRITTEN:
+                pass
+            elif publish.outcome == SummaryPublicationOutcome.PUBLISHED_INCOMPLETE:
+                summary = _build_summary(
+                    config=config,
+                    run_id=run_id,
+                    counters=counters,
+                    nonterminal_journal=nonterminal_journal,
+                    stop_reason="summary_published_incomplete",
+                    outcome=RuntimeOutcome.FAIL,
+                )
+            elif publish.outcome == SummaryPublicationOutcome.PUBLICATION_UNCERTAIN:
+                summary = _build_summary(
+                    config=config,
+                    run_id=run_id,
+                    counters=counters,
+                    nonterminal_journal=nonterminal_journal,
+                    stop_reason="summary_publication_uncertain",
+                    outcome=RuntimeOutcome.FAIL,
+                )
+            else:
+                summary = _build_summary(
+                    config=config,
+                    run_id=run_id,
+                    counters=counters,
+                    nonterminal_journal=nonterminal_journal,
+                    stop_reason="summary_failed",
+                    outcome=RuntimeOutcome.FAIL,
+                )
+        else:
+            # Choice A: operation/cleanup fatal — summary 파일 미작성.
+            publication_outcome = SummaryPublicationOutcome.NOT_WRITTEN
+            publication_reason_codes = (
+                ("cleanup_fatal",) if cleanup_fatal is not None else ("operation_fatal",)
+            )
+
+    # 6. Runtime lock release — 마지막 bounded cleanup.
+    lock_result: RuntimeLockReleaseResult | None = None
     try:
-        lock.release()
+        lock_result = lock.release()
     except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
         cleanup_fatal = cleanup_fatal or exc
-    except Exception:
-        pass
-    return summary, cleanup_fatal
+
+    if lock_result is not None and not lock_result.lock_absent_confirmed:
+        if summary.get("outcome") == RuntimeOutcome.PASS:
+            summary = _build_summary(
+                config=config,
+                run_id=run_id,
+                counters=counters,
+                nonterminal_journal=nonterminal_journal,
+                stop_reason=lock_result.reason_code or "runtime_lock_release_failed",
+                outcome=RuntimeOutcome.FAIL,
+            )
+
+    result = {
+        **summary,
+        "summary_publication_outcome": publication_outcome,
+        "summary_publication_reason_codes": list(publication_reason_codes),
+        "runtime_lock_fd_closed": lock_result.fd_closed if lock_result is not None else None,
+        "runtime_lock_unlinked": lock_result.lock_unlinked if lock_result is not None else None,
+        "runtime_lock_absent_confirmed": (
+            lock_result.lock_absent_confirmed if lock_result is not None else None
+        ),
+        "runtime_lock_release_reason_code": (
+            lock_result.reason_code if lock_result is not None else None
+        ),
+        "cleanup_outcome": (
+            CleanupOutcome.FATAL
+            if cleanup_fatal is not None or pending_fatal is not None
+            else CleanupOutcome.CLEAN
+        ),
+    }
+    return result, cleanup_fatal
 
 
-# Summary publication outcomes (minimal scope for the runtime summary).
-_SUMMARY_WRITTEN = "WRITTEN"
-_SUMMARY_NOT_WRITTEN = "NOT_WRITTEN"
-_SUMMARY_PUBLISHED_INCOMPLETE = "PUBLISHED_INCOMPLETE"
-_SUMMARY_PUBLICATION_UNCERTAIN = "PUBLICATION_UNCERTAIN"
+# Summary publication reason codes (stable, no raw errno/path).
+_REASON_TEMP_CLOSE_FAILED = "summary_temp_close_failed"
+_REASON_TEMP_CLEANUP_FAILED = "summary_temp_cleanup_failed"
+_REASON_SYNC_FAILED = "summary_parent_sync_failed"
+_REASON_PUBLISH_FAILED = "summary_publish_failed"
+_REASON_WRITE_FAILED = "summary_write_failed"
 _SUMMARY_TEMP_PREFIX = ".paper_day_summary."
 
 
@@ -1094,100 +1241,210 @@ def _summary_open_flags() -> int:
     return flags
 
 
-def _fsync_directory(directory: Path) -> None:
+def _fsync_directory(directory: Path) -> bool:
     dir_fd = os.open(str(directory), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
+        return True
+    except OSError:
+        return False
     finally:
         os.close(dir_fd)
 
 
-def _publish_summary_create_new(path: Path, text: str) -> str:
-    """Atomic create-new summary publish; no overwrite, no symlink follow.
 
-    Bytes are written to a same-directory temp opened ``O_EXCL|O_NOFOLLOW``, fsynced,
-    then hard-linked to the create-new destination (link fails if the destination
-    already exists). The destination therefore only ever appears fully written — a
-    partial summary is never visible. Reuses the RTM-7c.4x artifact-file publish
-    pattern, limited to the minimum the runtime summary needs.
-    """
+def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
+    """Atomic create-new summary publish; RTM-7c.4x artifact-file 패턴 재사용."""
     payload = text.encode("utf-8")
     parent = path.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except Exception:
-        return _SUMMARY_NOT_WRITTEN
+        return SummaryPublishResult(
+            outcome=SummaryPublicationOutcome.NOT_WRITTEN,
+            reason_codes=(_REASON_WRITE_FAILED,),
+        )
     temp_path = parent / f"{_SUMMARY_TEMP_PREFIX}{secrets.token_hex(16)}"
     fd: int | None = None
     temp_created = False
-    published = False
+    destination_published = False
+    publication_uncertain = False
+    temp_close_complete = False
+    temp_cleanup_complete = False
+    parent_sync_confirmed = False
+    parent_sync_attempted = False
     temp_stat: os.stat_result | None = None
+    primary_reasons: list[str] = []
+
+    def _finalize() -> SummaryPublishResult:
+        if destination_published:
+            reason_codes = _build_publish_reason_codes(
+                primary_reasons=primary_reasons,
+                temp_close_complete=temp_close_complete,
+                temp_cleanup_complete=temp_cleanup_complete,
+                parent_sync_attempted=parent_sync_attempted,
+                parent_sync_confirmed=parent_sync_confirmed,
+                destination_published=True,
+                publication_uncertain=False,
+            )
+            if (
+                temp_close_complete
+                and temp_cleanup_complete
+                and parent_sync_confirmed
+                and not primary_reasons
+            ):
+                return SummaryPublishResult(
+                    outcome=SummaryPublicationOutcome.WRITTEN,
+                    reason_codes=(),
+                )
+            return SummaryPublishResult(
+                outcome=SummaryPublicationOutcome.PUBLISHED_INCOMPLETE,
+                reason_codes=reason_codes,
+            )
+        if publication_uncertain:
+            return SummaryPublishResult(
+                outcome=SummaryPublicationOutcome.PUBLICATION_UNCERTAIN,
+                reason_codes=_build_publish_reason_codes(
+                    primary_reasons=primary_reasons,
+                    temp_close_complete=temp_close_complete,
+                    temp_cleanup_complete=temp_cleanup_complete,
+                    parent_sync_attempted=parent_sync_attempted,
+                    parent_sync_confirmed=parent_sync_confirmed,
+                    destination_published=False,
+                    publication_uncertain=True,
+                ),
+            )
+        return SummaryPublishResult(
+            outcome=SummaryPublicationOutcome.NOT_WRITTEN,
+            reason_codes=_build_publish_reason_codes(
+                primary_reasons=primary_reasons or [_REASON_WRITE_FAILED],
+                temp_close_complete=temp_close_complete,
+                temp_cleanup_complete=temp_cleanup_complete,
+                parent_sync_attempted=parent_sync_attempted,
+                parent_sync_confirmed=parent_sync_confirmed,
+                destination_published=False,
+                publication_uncertain=False,
+            ),
+        )
+
     try:
         try:
             fd = os.open(str(temp_path), _summary_open_flags(), 0o600)
         except OSError:
-            return _SUMMARY_NOT_WRITTEN
-        temp_created = True
-        view = memoryview(payload)
-        offset = 0
-        while offset < len(view):
-            try:
-                written = os.write(fd, view[offset:])
-            except OSError:
-                return _SUMMARY_NOT_WRITTEN
-            if written <= 0:
-                return _SUMMARY_NOT_WRITTEN
-            offset += written
-        try:
-            os.fsync(fd)
-            temp_stat = os.fstat(fd)
-        except OSError:
-            return _SUMMARY_NOT_WRITTEN
-        try:
-            os.link(temp_path, path)
-            published = True
-        except FileExistsError:
-            return _SUMMARY_NOT_WRITTEN
-        except OSError:
-            try:
-                dest_stat = os.lstat(path)
-            except FileNotFoundError:
-                return _SUMMARY_NOT_WRITTEN
-            except OSError:
-                return _SUMMARY_PUBLICATION_UNCERTAIN
-            if (
-                stat.S_ISREG(dest_stat.st_mode)
-                and temp_stat is not None
-                and dest_stat.st_dev == temp_stat.st_dev
-                and dest_stat.st_ino == temp_stat.st_ino
-            ):
-                published = True
-            else:
-                return _SUMMARY_PUBLICATION_UNCERTAIN
-        try:
-            dest_stat = os.lstat(path)
-        except OSError:
-            return _SUMMARY_PUBLICATION_UNCERTAIN
-        if (
-            not stat.S_ISREG(dest_stat.st_mode)
-            or temp_stat is None
-            or dest_stat.st_dev != temp_stat.st_dev
-            or dest_stat.st_ino != temp_stat.st_ino
-        ):
-            return _SUMMARY_PUBLICATION_UNCERTAIN
-        # Destination content is correct and durable on the inode; a parent-dir fsync
-        # failure affects only directory-entry durability, not the returned/persisted
-        # consistency, so it does not downgrade WRITTEN.
-        with contextlib.suppress(Exception):
-            _fsync_directory(parent)
-        return _SUMMARY_WRITTEN
+            primary_reasons.append(_REASON_WRITE_FAILED)
+        else:
+            temp_created = True
+            view = memoryview(payload)
+            offset = 0
+            while offset < len(view) and not primary_reasons:
+                try:
+                    written = os.write(fd, view[offset:])
+                except OSError:
+                    primary_reasons.append(_REASON_WRITE_FAILED)
+                    break
+                if written <= 0:
+                    primary_reasons.append(_REASON_WRITE_FAILED)
+                    break
+                offset += written
+            if not primary_reasons:
+                try:
+                    os.fsync(fd)
+                    temp_stat = os.fstat(fd)
+                except OSError:
+                    primary_reasons.append(_REASON_WRITE_FAILED)
+            if not primary_reasons:
+                try:
+                    os.link(temp_path, path)
+                    destination_published = True
+                except FileExistsError:
+                    primary_reasons.append(_REASON_WRITE_FAILED)
+                except OSError:
+                    try:
+                        dest_stat = os.lstat(path)
+                    except FileNotFoundError:
+                        primary_reasons.append(_REASON_WRITE_FAILED)
+                    except OSError:
+                        publication_uncertain = True
+                        primary_reasons.append(_REASON_PUBLISH_FAILED)
+                    else:
+                        if (
+                            stat.S_ISREG(dest_stat.st_mode)
+                            and temp_stat is not None
+                            and dest_stat.st_dev == temp_stat.st_dev
+                            and dest_stat.st_ino == temp_stat.st_ino
+                        ):
+                            destination_published = True
+                        else:
+                            publication_uncertain = True
+                            primary_reasons.append(_REASON_PUBLISH_FAILED)
+            if destination_published and not primary_reasons and not publication_uncertain:
+                try:
+                    dest_stat = os.lstat(path)
+                except OSError:
+                    publication_uncertain = True
+                    destination_published = False
+                    primary_reasons.append(_REASON_PUBLISH_FAILED)
+                else:
+                    if (
+                        not stat.S_ISREG(dest_stat.st_mode)
+                        or temp_stat is None
+                        or dest_stat.st_dev != temp_stat.st_dev
+                        or dest_stat.st_ino != temp_stat.st_ino
+                    ):
+                        publication_uncertain = True
+                        destination_published = False
+                        primary_reasons.append(_REASON_PUBLISH_FAILED)
+            if destination_published and not primary_reasons and not publication_uncertain:
+                parent_sync_attempted = True
+                parent_sync_confirmed = _fsync_directory(parent)
+                if not parent_sync_confirmed:
+                    primary_reasons.append(_REASON_SYNC_FAILED)
     finally:
         if fd is not None:
-            with contextlib.suppress(OSError):
+            try:
                 os.close(fd)
+                temp_close_complete = True
+            except OSError:
+                temp_close_complete = False
         if temp_created:
-            with contextlib.suppress(OSError):
+            try:
                 os.unlink(temp_path)
+                temp_cleanup_complete = True
+            except FileNotFoundError:
+                temp_cleanup_complete = True
+            except OSError:
+                temp_cleanup_complete = False
+    return _finalize()
+
+
+def _build_publish_reason_codes(
+    *,
+    primary_reasons: list[str],
+    temp_close_complete: bool,
+    temp_cleanup_complete: bool,
+    parent_sync_attempted: bool,
+    parent_sync_confirmed: bool,
+    destination_published: bool,
+    publication_uncertain: bool,
+) -> tuple[str, ...]:
+    reasons: list[str] = list(primary_reasons)
+    if not temp_close_complete:
+        reasons.append(_REASON_TEMP_CLOSE_FAILED)
+    if not temp_cleanup_complete:
+        reasons.append(_REASON_TEMP_CLEANUP_FAILED)
+    if (
+        (destination_published or publication_uncertain)
+        and parent_sync_attempted
+        and not parent_sync_confirmed
+    ):
+        reasons.append(_REASON_SYNC_FAILED)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in seen:
+            seen.add(reason)
+            deduped.append(reason)
+    return tuple(deduped)
 
 
 def _source_with_lifecycle(
@@ -1241,26 +1498,31 @@ def _run_live_startup_probe(
             with contextlib.suppress(BaseException):
                 await ready
 
-        # A source/consumer exception is the highest-priority startup outcome and
-        # must never be downgraded to health_not_ready. Inspect the consumer task's
-        # exception explicitly instead of suppressing it.
-        if consumer.done():
+        if consumer.done() and not consumer.cancelled():
             consumer_exc = consumer.exception()
-            if consumer_exc is not None and not isinstance(
-                consumer_exc, asyncio.CancelledError
-            ):
+            if consumer_exc is not None:
+                if isinstance(consumer_exc, (MemoryError, KeyboardInterrupt, SystemExit)):
+                    raise consumer_exc
                 raise AttendedPaperDayRuntimeError("source", "source_failed") from consumer_exc
         else:
             consumer.cancel()
             with contextlib.suppress(BaseException):
                 await consumer
+            # Python 3.11+: ``Task.exception()`` on a cancelled task re-raises
+            # ``CancelledError`` into the caller; check ``cancelled()`` first.
+            if consumer.done() and not consumer.cancelled():
+                cancel_exc = consumer.exception()
+                if cancel_exc is not None:
+                    if isinstance(cancel_exc, (MemoryError, KeyboardInterrupt, SystemExit)):
+                        raise cancel_exc
+                    raise AttendedPaperDayRuntimeError(
+                        "source", "source_close_failed"
+                    ) from cancel_exc
 
         if lifecycle.rejected:
             raise AttendedPaperDayRuntimeError("transport", "subscription_rejected")
         if lifecycle.all_subscribed:
             return
-        # The consumer reached normal exhaustion (or readiness fired without an ACK
-        # state) before subscription readiness was observed.
         if consumer.done():
             raise AttendedPaperDayRuntimeError("transport", "transport_not_ready")
 
@@ -1531,9 +1793,14 @@ __all__ = [
     "AttendedPaperDayConfig",
     "AttendedPaperDayInputError",
     "AttendedPaperDayRuntimeError",
+    "CleanupOutcome",
     "DiagnosticCounters",
     "DeterministicPaperDecisionPublisher",
     "EvidenceRecorder",
+    "PartialCleanupResult",
+    "RuntimeLockReleaseResult",
+    "SummaryPublicationOutcome",
+    "SummaryPublishResult",
     "build_diagnostic_stack",
     "journal_state_counts",
     "run_attended_paper_day",

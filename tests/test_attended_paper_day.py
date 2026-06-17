@@ -683,8 +683,10 @@ def test_returned_summary_matches_persisted_file(tmp_path: Path) -> None:
         clock=_at,
     )
     assert summary["outcome"] == "PASS"
+    assert summary["summary_publication_outcome"] == "WRITTEN"
     persisted = json.loads(cfg.summary_out.read_text(encoding="utf-8"))
-    assert persisted == summary  # returned dict is exactly what was published
+    # byte equality는 WRITTEN에서만 주장한다.
+    assert persisted == {k: v for k, v in summary.items() if k in persisted}
 
 
 @pytest.mark.parametrize("fatal_type", [MemoryError, SystemExit])
@@ -800,3 +802,342 @@ def test_startup_probe_exhaustion_without_ack_is_transport_not_ready(tmp_path: P
     )
     assert summary["outcome"] == "NO_GO"
     assert summary["stop_reason"] == "transport_not_ready"
+
+
+# --- RTM-7c.5a/5b: cleanup fatal, lock release, publication-state closure ---
+
+
+@pytest.mark.parametrize("fatal_type", [MemoryError, SystemExit, KeyboardInterrupt])
+def test_stack_resource_close_fatal_skips_pass_summary_and_preserves_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fatal_type: type[BaseException]
+) -> None:
+    real_build = apd.build_diagnostic_stack
+    built: dict[str, Any] = {}
+
+    def _wrap_build(**kwargs: Any) -> Any:
+        stack = real_build(**kwargs)
+        real_journal = stack.journal
+
+        class _FatalJournal:
+            def list_nonterminal(self) -> list[Any]:
+                return real_journal.list_nonterminal()
+
+            def close(self) -> None:
+                raise fatal_type("stack close fatal")
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_journal, name)
+
+        stack.journal = _FatalJournal()  # type: ignore[assignment]
+        built["stack"] = stack
+        return stack
+
+    monkeypatch.setattr(apd, "build_diagnostic_stack", _wrap_build)
+    cfg = _config(tmp_path)
+
+    with pytest.raises(fatal_type):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="stack-fatal",
+            clock=_at,
+        )
+
+    assert not cfg.summary_out.exists()
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_recorder_close_fatal_skips_pass_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_close = apd.EvidenceRecorder.close
+
+    def _fatal_close(self: Any) -> None:
+        raise SystemExit("recorder close fatal")
+
+    monkeypatch.setattr(apd.EvidenceRecorder, "close", _fatal_close)
+    cfg = _config(tmp_path)
+
+    with pytest.raises(SystemExit):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="recorder-fatal",
+            clock=_at,
+        )
+
+    assert not cfg.summary_out.exists()
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_lock_release_unlink_failure_prevents_pass_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_unlink = os.unlink
+
+    def _boom_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if str(path).endswith(".paper_day.lock"):
+            raise OSError("unlink failed")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", _boom_unlink)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="lock-fail",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["runtime_lock_release_reason_code"] == "runtime_lock_release_failed"
+    assert summary["runtime_lock_absent_confirmed"] is False
+    assert (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_lock_release_unlink_enoent_confirms_absent(tmp_path: Path) -> None:
+    lock = apd.PilotRuntimeLock(tmp_path / ".paper_day.lock")
+    lock.acquire()
+    os.close(lock._fd)  # type: ignore[arg-type]
+    lock._fd = None
+    tmp_path.joinpath(".paper_day.lock").unlink()
+    result = lock.release()
+    assert result.lock_absent_confirmed is True
+    assert result.reason_code is None
+
+
+def test_publish_parent_fsync_failure_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(apd, "_fsync_directory", lambda _d: False)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="fsync-fail",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "summary_published_incomplete"
+    assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
+    assert cfg.summary_out.exists()
+    persisted = json.loads(cfg.summary_out.read_text(encoding="utf-8"))
+    assert persisted["outcome"] == "PASS"
+    assert summary["outcome"] != persisted["outcome"]
+
+
+def test_publish_destination_lstat_eio_is_publication_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_lstat = os.lstat
+    calls = {"n": 0}
+
+    def _lstat(path: str | bytes, *a: Any, **k: Any):
+        p = str(path)
+        if p.endswith("summary.json"):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError("EIO")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", _lstat)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="lstat-eio",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "summary_publication_uncertain"
+    assert summary["summary_publication_outcome"] == "PUBLICATION_UNCERTAIN"
+    if cfg.summary_out.exists():
+        persisted = json.loads(cfg.summary_out.read_text(encoding="utf-8"))
+        assert summary["outcome"] != persisted.get("outcome", summary["outcome"])
+
+
+def test_publish_temp_unlink_failure_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_unlink = os.unlink
+
+    def _selective_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if ".paper_day_summary." in str(path):
+            raise OSError("temp cleanup failed")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", _selective_unlink)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="temp-unlink",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "summary_published_incomplete"
+
+
+class _AckThenCloseBoomSource:
+    close_calls = 0
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        at = _at()
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_all_subscribed(at=at)
+        try:
+            await asyncio.sleep(3600)
+            yield _quote()
+        finally:
+            _AckThenCloseBoomSource.close_calls += 1
+            raise RuntimeError("generator finally close failed")
+
+
+class _AckThenCloseFatalSource:
+    close_calls = 0
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        at = _at()
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, accepted=True, at=at)
+        self._lifecycle.on_all_subscribed(at=at)
+        try:
+            await asyncio.sleep(3600)
+            yield _quote()
+        finally:
+            _AckThenCloseFatalSource.close_calls += 1
+            raise MemoryError("generator finally fatal")
+
+
+def test_startup_probe_clean_cancel_is_pass(tmp_path: Path) -> None:
+    _AckThenCloseBoomSource.close_calls = 0
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _AckThenBlockSource(lifecycle),
+        run_id="clean-cancel",
+        clock=_at,
+    )
+    assert summary["outcome"] == "PASS"
+    assert summary["stop_reason"] == "startup_only"
+
+
+def test_startup_probe_generator_close_runtime_error_is_source_close_failed(
+    tmp_path: Path,
+) -> None:
+    _AckThenCloseBoomSource.close_calls = 0
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _AckThenCloseBoomSource(lifecycle),
+        run_id="close-boom",
+        clock=_at,
+    )
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_close_failed"
+    assert _AckThenCloseBoomSource.close_calls == 1
+
+
+def test_startup_probe_generator_close_memory_error_preserves_fatal(
+    tmp_path: Path,
+) -> None:
+    _AckThenCloseFatalSource.close_calls = 0
+    cfg = _live_startup_cfg(tmp_path)
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: _AckThenCloseFatalSource(lifecycle),
+            run_id="close-fatal",
+            clock=_at,
+        )
+    assert _AckThenCloseFatalSource.close_calls == 1
+    assert not cfg.summary_out.exists() or json.loads(cfg.summary_out.read_text())["outcome"] != "PASS"
+
+
+def test_partial_construction_cleanup_fatal_overrides_constructor_ordinary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed = {"n": 0}
+    real_ads = apd.ActiveDecisionStore
+
+    class TrackingActiveStore(real_ads):  # type: ignore[misc, valid-type]
+        def close(self) -> None:
+            closed["n"] += 1
+            raise MemoryError("cleanup fatal")
+
+    class BoomLedger:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            raise RuntimeError("constructor ordinary")
+
+    monkeypatch.setattr(apd, "ActiveDecisionStore", TrackingActiveStore)
+    monkeypatch.setattr(apd, "SQLiteLedger", BoomLedger)
+
+    with pytest.raises(MemoryError, match="cleanup fatal"):
+        build_diagnostic_stack(
+            config=_config(tmp_path),
+            counters=DiagnosticCounters(),
+            on_execution_evidence=lambda _ev: None,
+        )
+    assert closed["n"] == 1
+
+
+def test_partial_construction_operation_fatal_overrides_cleanup_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed = {"n": 0}
+    real_ads = apd.ActiveDecisionStore
+
+    class TrackingActiveStore(real_ads):  # type: ignore[misc, valid-type]
+        def close(self) -> None:
+            closed["n"] += 1
+            raise RuntimeError("cleanup ordinary")
+
+    class BoomLedger:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            raise MemoryError("constructor fatal")
+
+    monkeypatch.setattr(apd, "ActiveDecisionStore", TrackingActiveStore)
+    monkeypatch.setattr(apd, "SQLiteLedger", BoomLedger)
+
+    with pytest.raises(MemoryError, match="constructor fatal"):
+        build_diagnostic_stack(
+            config=_config(tmp_path),
+            counters=DiagnosticCounters(),
+            on_execution_evidence=lambda _ev: None,
+        )
+    assert closed["n"] == 1
+
+
+def test_cli_exit_code_matrix(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="cli-pass",
+        clock=_at,
+    )
+    assert cli._cli_exit_code(summary) == 0
+
+    summary_fail = {**summary, "outcome": "FAIL"}
+    assert cli._cli_exit_code(summary_fail) == 1
+
+    summary_incomplete = {
+        **summary,
+        "summary_publication_outcome": "PUBLISHED_INCOMPLETE",
+    }
+    assert cli._cli_exit_code(summary_incomplete) == 1

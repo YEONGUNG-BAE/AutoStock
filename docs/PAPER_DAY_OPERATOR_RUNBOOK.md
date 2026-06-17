@@ -74,9 +74,11 @@ before any DB is opened or any credential env var is read. Any admission refusal
 **zero** output files — no evidence, no summary, no symlink target. Output files
 are written by the lock owner only. The summary is published create-new and
 atomically (same-dir temp, fsync, hard-link, no overwrite, no symlink follow); a
-publish failure yields `FAIL/summary_failed` with no summary file left behind, and
-the returned result always equals the persisted `summary.json`. The runtime lock
-is always released as the last bounded cleanup step, including under a fatal.
+publish failure yields `FAIL/summary_failed`/`summary_published_incomplete`/
+`summary_publication_uncertain` as appropriate; operation/cleanup fatal writes no
+summary file. **Returned/persisted equality holds only for `WRITTEN`.** The
+runtime lock is always released as the last bounded cleanup step (structured
+release state; lock residue forbids PASS return), including under a fatal.
 
 Immediate stop conditions:
 
