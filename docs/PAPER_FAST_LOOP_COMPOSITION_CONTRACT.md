@@ -8,6 +8,13 @@ socket, production-DB write, or runtime-directory creation.
 Attended one-shot activation is **not implemented** — see
 `docs/PAPER_FAST_LOOP_ATTENDED_ACTIVATION_CONTRACT.md` (RTM-7c.4f).
 
+The separate paper-day diagnostic runner
+`ops/run_attended_paper_day.py` is bounded, attended, paper-only, and explicit.
+It does not change the legacy `--run` refusal above. Its transport readiness
+comes only from source lifecycle events, writes create-new evidence plus a
+post-close summary, uses explicit pilot DB paths plus a create-new runtime lock,
+and still leaves actual 1-day pilot readiness **NO-GO** until Reviewer PASS.
+
 This lane builds the offline wiring and the operator's read-only/replay tools.
 It does NOT turn on a live runtime. Even when every gate is green, the change is
 left for the operator to commit.

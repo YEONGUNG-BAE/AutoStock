@@ -68,6 +68,14 @@
   full config text, DB dumps, tracebacks, and LLM payloads are not evidence fields.
 - Startup-only mode exists for operator checks and performs no paper execution. Live KIS use remains
   an explicit operator action through the diagnostic CLI; tests use replay/fake sources only.
+- RTM-7c.5a/5b closure: fabricated transport readiness is removed. Connected/subscription counters
+  and `MarketHealthTracker` transport state are updated only by source lifecycle events. Offline
+  startup-only reports no connected/ACK readiness; live startup-only must observe actual trade and
+  quote ACK lifecycle events before `PASS`.
+- Runtime closure: summaries carry `PASS` / `NO_GO` / `FAIL`; duplicate runtime lock, critical
+  journal uncertainty/reconcile, nonterminal journal, and resource close failure fail closed.
+  Evidence is create-new, the runtime lock is create-new/no-overwrite, summaries are post-close,
+  and heartbeat fields come from latest state / health tracker / session / active store.
 - Scope exclusions remain: real-order adapter construction, live order submission, automatic
   restart, multi-symbol operation, implicit operational DB selection, daemon/scheduler deployment,
   signing/authentication, replay prevention claims, and runtime activation authorization.

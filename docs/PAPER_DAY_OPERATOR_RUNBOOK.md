@@ -38,6 +38,30 @@ Operator-only KIS startup/run path uses `--live-kis` and requires KIS websocket
 read-only config plus app key/secret environment variables. Cursor tests do not
 execute this path.
 
+Startup-only modes:
+
+- `--offline-fixture deterministic --startup-only`: validates, acquires the
+  single-process lock, opens/closes pilot DB resources, and writes a post-close
+  summary. It does not claim transport connected or subscription ACK readiness.
+- `--live-kis --startup-only`: additionally obtains KIS approval, connects the
+  websocket, waits for trade and quote subscription ACKs, closes the source, and
+  writes the post-close summary. It must not execute paper decisions or broker
+  calls.
+
+Summary outcome and CLI exit:
+
+```text
+PASS -> exit 0
+NO_GO -> exit 1
+FAIL -> exit 1
+legacy ops/run_paper_fast_loop.py --run -> exit 2
+```
+
+Use a fresh explicit `--db-dir`, `--evidence-out`, and `--summary-out` per run.
+The diagnostic runtime rejects output overlap, final symlink components, DB
+sidecars, existing non-empty pilot DB directories without explicit reuse policy,
+and duplicate runtime locks.
+
 Immediate stop conditions:
 
 ```text
@@ -45,6 +69,7 @@ real-order adapter constructed
 credential/raw frame leak
 unexpected network route
 journal uncertain
+reconcile required
 nonterminal journal stuck
 ledger invariant failure
 evidence write failure

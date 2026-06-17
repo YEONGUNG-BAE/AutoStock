@@ -4,6 +4,7 @@ import importlib.util
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from composition.attended_paper_day import (
     AttendedPaperDayConfig,
@@ -136,9 +137,97 @@ def test_startup_only_opens_and_closes_without_execution(tmp_path: Path) -> None
     )
 
     assert summary["stop_reason"] == "startup_only"
+    assert summary["outcome"] == "PASS"
     counters = summary["counters"]["counters"]  # type: ignore[index]
+    assert counters.get("connected", 0) == 0
+    assert counters.get("subscription_acks", 0) == 0
+    assert counters.get("orders", 0) == 0
+
+
+class _LiveStartupSource:
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        at = _at()
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(
+            tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=True, at=at
+        )
+        self._lifecycle.on_subscription_requested(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(
+            tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, accepted=True, at=at
+        )
+        self._lifecycle.on_all_subscribed(at=at)
+        if False:
+            yield _quote()
+
+
+def test_live_startup_only_requires_actual_lifecycle_readiness(tmp_path: Path) -> None:
+    cfg = AttendedPaperDayConfig(
+        session_date=date(2026, 6, 17),
+        symbol=PILOT_SYMBOL,
+        duration_seconds=1,
+        evidence_out=tmp_path / "runtime" / "evidence.jsonl",
+        summary_out=tmp_path / "runtime" / "summary.json",
+        db_dir=tmp_path / "runtime" / "db",
+        confirm_attended_paper=True,
+        startup_only=True,
+        source_kind="kis_live",
+    )
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda lifecycle: _LiveStartupSource(lifecycle),
+        run_id="live-startup",
+        clock=_at,
+    )
+
+    counters = summary["counters"]["counters"]  # type: ignore[index]
+    assert summary["outcome"] == "PASS"
+    assert summary["stop_reason"] == "startup_only"
+    assert counters["connect_attempts"] == 1
+    assert counters["connected"] == 1
+    assert counters["subscription_requests"] == 2
     assert counters["subscription_acks"] == 2
     assert counters.get("orders", 0) == 0
+
+
+def test_rejects_existing_non_empty_db_dir_without_reuse(tmp_path: Path) -> None:
+    db_dir = tmp_path / "runtime" / "db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "active.sqlite3").write_text("", encoding="utf-8")
+    cfg = _config(tmp_path)
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="db-reuse",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "invalid_input"
+
+
+def test_existing_runtime_lock_is_no_go_and_preserved(tmp_path: Path) -> None:
+    db_dir = tmp_path / "runtime" / "db"
+    db_dir.mkdir(parents=True)
+    lock = db_dir / ".paper_day.lock"
+    lock.write_text("owned\n", encoding="utf-8")
+    cfg = _config(tmp_path)
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="lock-conflict",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "NO_GO"
+    assert summary["stop_reason"] == "runtime_lock_exists"
+    assert lock.read_text(encoding="utf-8") == "owned\n"
 
 
 def test_cli_validate_only_no_writes_or_network(tmp_path: Path, capsys) -> None:

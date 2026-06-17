@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -18,14 +17,6 @@ from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
-from broker.kis_transport import StdlibKisHttpTransport
-from config.settings import load_settings
-from data.kis_ws_auth import KisWsApprovalProvider
-from data.kis_ws_source import (
-    KisWsMarketEventSource,
-    KisWsSubscription,
-    open_kis_websocket,
-)
 from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
 from market_data.models import (
     NormalizedBestBidAsk,
@@ -103,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             clock=clock,
         )
         _emit(summary, json_mode=args.json)
-        return 0
+        return 0 if summary.get("outcome") == "PASS" else 1
     except (AttendedPaperDayInputError, CliError) as exc:
         _emit(
             {
@@ -114,6 +105,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "db_open": False,
                 "filesystem_written": False,
                 "activation_authorized": False,
+            },
+            json_mode=args.json,
+        )
+        return 1
+    except Exception:
+        _emit(
+            {
+                "outcome": "FAIL",
+                "reason": "internal_runtime_error",
+                "network_called": False,
+                "credential_read": False,
+                "db_open": False,
+                "filesystem_written": False,
+                "activation_authorized": False,
+                "paper_only": True,
+                "real_order_adapter_constructed": False,
             },
             json_mode=args.json,
         )
@@ -136,6 +143,7 @@ def _config_from_args(args: argparse.Namespace) -> AttendedPaperDayConfig:
         db_dir=args.db_dir,
         confirm_attended_paper=args.confirm_attended_paper,
         startup_only=args.startup_only,
+        source_kind="kis_live" if args.live_kis else "replay",
     )
 
 
@@ -182,6 +190,17 @@ def _fixture_events(session_date: date) -> list[object]:
 
 
 def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
+    import os
+
+    from broker.kis_transport import StdlibKisHttpTransport
+    from config.settings import load_settings
+    from data.kis_ws_auth import KisWsApprovalProvider
+    from data.kis_ws_source import (
+        KisWsMarketEventSource,
+        KisWsSubscription,
+        open_kis_websocket,
+    )
+
     settings = load_settings(config_path)
     ws = settings.broker.kis_ws_read_only
     if not ws.enabled:
@@ -193,7 +212,7 @@ def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
     if config.symbol != PILOT_SYMBOL:
         raise CliError("only symbol 005930 is allowed.")
 
-    def factory() -> KisWsMarketEventSource:
+    def factory(lifecycle=None) -> KisWsMarketEventSource:
         approval = KisWsApprovalProvider(
             transport=StdlibKisHttpTransport(),
             approval_base_url=ws.approval_base_url,
@@ -212,6 +231,9 @@ def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
             ),
             clock=lambda: datetime.now(tz=KST),
             receive_timeout_seconds=ws.receive_timeout_seconds,
+            on_transport_event=(
+                None if lifecycle is None else lifecycle.on_kis_transport_event
+            ),
         )
 
     return factory

@@ -9,7 +9,9 @@ order path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import sqlite3
 import uuid
 from collections import Counter
@@ -18,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from allocator.models import (
@@ -69,6 +71,7 @@ from market_data.models import (
 )
 from market_data.monitor import AppliedMarketUpdate, MarketMonitor, MonitorEvidence
 from market_data.protocols import MarketEventSource
+from market_data.replay_source import ReplayMarketEventSource
 from market_data.rolling_window import RollingRetentionPolicy, RollingTradeHistoryStore
 from market_data.trigger_engine import TriggerEngine, TriggerPlan
 from orchestration.active_decision_store import (
@@ -93,6 +96,14 @@ PILOT_SYMBOL = "005930"
 PILOT_UNIVERSE = "KR_LARGE"
 SCHEMA_VERSION = "paper_day_diagnostic.v1"
 HEARTBEAT_SECONDS = 60
+PILOT_DB_FILES = frozenset({"active.sqlite3", "ledger.sqlite3", "trigger_journal.sqlite3"})
+PILOT_DB_SIDECAR_SUFFIXES = (".sqlite3-wal", ".sqlite3-shm")
+
+
+class RuntimeOutcome:
+    PASS = "PASS"
+    NO_GO = "NO_GO"
+    FAIL = "FAIL"
 
 
 class AttendedPaperDayInputError(Exception):
@@ -112,6 +123,22 @@ class CloseableSourceFactory(Protocol):
     def __call__(self) -> MarketEventSource: ...
 
 
+class DiagnosticMarketSourceLifecycle(Protocol):
+    def on_connect_attempt(self, *, at: datetime) -> None: ...
+
+    def on_connected(self, *, at: datetime) -> None: ...
+
+    def on_subscription_requested(self, *, tr_id: str | None, symbol: str | None, at: datetime) -> None: ...
+
+    def on_subscription_ack(
+        self, *, tr_id: str | None, symbol: str | None, accepted: bool, at: datetime
+    ) -> None: ...
+
+    def on_all_subscribed(self, *, at: datetime) -> None: ...
+
+    def on_disconnected(self, *, at: datetime) -> None: ...
+
+
 @dataclass(frozen=True)
 class AttendedPaperDayConfig:
     session_date: date
@@ -122,6 +149,8 @@ class AttendedPaperDayConfig:
     db_dir: Path
     confirm_attended_paper: bool
     startup_only: bool = False
+    source_kind: str = "replay"
+    reuse_pilot_db: bool = False
 
     def validate(self) -> None:
         if self.symbol != PILOT_SYMBOL:
@@ -139,6 +168,9 @@ class AttendedPaperDayConfig:
                 raise AttendedPaperDayInputError(f"{name} must be an explicit Path.")
         if self.evidence_out == self.summary_out:
             raise AttendedPaperDayInputError("evidence_out and summary_out must differ.")
+        if self.source_kind not in ("replay", "kis_live"):
+            raise AttendedPaperDayInputError("source_kind must be replay or kis_live.")
+        _validate_runtime_paths(self, reuse_pilot_db=self.reuse_pilot_db)
 
 
 @dataclass
@@ -173,7 +205,7 @@ class EvidenceRecorder:
 
     def open(self) -> None:
         self._config.evidence_out.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self._config.evidence_out.open("a", encoding="utf-8")
+        self._handle = self._config.evidence_out.open("x", encoding="utf-8")
 
     def record(
         self,
@@ -243,6 +275,143 @@ class DiagnosticStack:
                     failures += 1
         self.close_failures += failures
         return failures
+
+
+class PilotRuntimeLock:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._fd: int | None = None
+
+    def acquire(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(self._fd, b"locked\n")
+        except FileExistsError as exc:
+            raise AttendedPaperDayRuntimeError("lock", "runtime_lock_exists") from exc
+        except OSError as exc:
+            raise AttendedPaperDayRuntimeError("lock", "runtime_lock_failed") from exc
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        if self._fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = None
+        with contextlib.suppress(FileNotFoundError):
+            self._path.unlink()
+
+
+class _CriticalStop(Exception):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class DiagnosticLifecycle:
+    def __init__(
+        self,
+        *,
+        counters: DiagnosticCounters,
+        tracker: MarketHealthTracker | None,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._counters = counters
+        self._tracker = tracker
+        self._clock = clock
+        self.all_subscribed = False
+        self.rejected = False
+
+    def on_connect_attempt(self, *, at: datetime) -> None:
+        self._counters.inc("connect_attempts")
+
+    def on_connected(self, *, at: datetime) -> None:
+        self._counters.inc("connected")
+        if self._tracker is not None:
+            self._tracker.record_transport_event(kind="connected", at=at, now=self._clock())
+
+    def on_subscription_requested(
+        self, *, tr_id: str | None, symbol: str | None, at: datetime
+    ) -> None:
+        self._counters.inc("subscription_requests")
+
+    def on_subscription_ack(
+        self, *, tr_id: str | None, symbol: str | None, accepted: bool, at: datetime
+    ) -> None:
+        if accepted:
+            self._counters.inc("subscription_acks")
+        else:
+            self.rejected = True
+            self._counters.inc("subscription_rejections")
+
+    def on_all_subscribed(self, *, at: datetime) -> None:
+        self.all_subscribed = True
+        self._counters.stamp("subscriptions_ready_at", at)
+        if self._tracker is not None:
+            self._tracker.record_transport_event(kind="all_subscribed", at=at, now=self._clock())
+
+    def on_disconnected(self, *, at: datetime) -> None:
+        self._counters.inc("disconnects")
+        if self._tracker is not None:
+            self._tracker.record_transport_event(kind="disconnect", at=at, now=self._clock())
+
+    def on_kis_transport_event(self, event: object) -> None:
+        at = getattr(event, "at", None)
+        if not isinstance(at, datetime):
+            at = self._clock()
+        kind = getattr(event, "kind", None)
+        tr_id = getattr(event, "tr_id", None)
+        symbol = getattr(event, "symbol", None)
+        if kind == "connected":
+            self.on_connected(at=at)
+        elif kind == "subscription_sent":
+            self.on_subscription_requested(tr_id=tr_id, symbol=symbol, at=at)
+        elif kind == "ack":
+            self.on_subscription_ack(
+                tr_id=tr_id,
+                symbol=symbol,
+                accepted=getattr(event, "rt_cd", None) == "0",
+                at=at,
+            )
+        elif kind == "all_subscribed":
+            self.on_all_subscribed(at=at)
+        elif kind == "disconnect":
+            self.on_disconnected(at=at)
+
+    def now(self) -> datetime:
+        return self._clock()
+
+
+class DiagnosticReplayMarketEventSource:
+    def __init__(
+        self,
+        source: ReplayMarketEventSource,
+        *,
+        lifecycle: DiagnosticMarketSourceLifecycle,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._source = source
+        self._lifecycle = lifecycle
+        self._clock = clock
+
+    async def events(self):
+        at = self._clock() - timedelta(seconds=1)
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(
+            tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=True, at=at
+        )
+        self._lifecycle.on_subscription_requested(tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(
+            tr_id=TR_QUOTE, symbol=PILOT_SYMBOL, accepted=True, at=at
+        )
+        self._lifecycle.on_all_subscribed(at=at)
+        try:
+            async for event in self._source.events():
+                yield event
+        finally:
+            self._lifecycle.on_disconnected(at=self._clock())
 
 
 class DeterministicPaperDecisionPublisher:
@@ -317,6 +486,57 @@ class DeterministicPaperDecisionPublisher:
 
 def validate_attended_paper_day_inputs(config: AttendedPaperDayConfig) -> None:
     config.validate()
+
+
+def _validate_runtime_paths(
+    config: AttendedPaperDayConfig, *, reuse_pilot_db: bool
+) -> None:
+    paths = {
+        "evidence_out": config.evidence_out,
+        "summary_out": config.summary_out,
+        "db_dir": config.db_dir,
+    }
+    for name, path in paths.items():
+        if path.exists() and path.is_symlink():
+            raise AttendedPaperDayInputError(f"{name} final component must not be a symlink.")
+        parent = path.parent
+        if parent.exists() and parent.is_symlink():
+            raise AttendedPaperDayInputError(f"{name} parent must not be a symlink.")
+    evidence_resolved = config.evidence_out.resolve(strict=False)
+    summary_resolved = config.summary_out.resolve(strict=False)
+    db_resolved = config.db_dir.resolve(strict=False)
+    if evidence_resolved == summary_resolved:
+        raise AttendedPaperDayInputError("evidence_out and summary_out must differ.")
+    for name, resolved in (
+        ("evidence_out", evidence_resolved),
+        ("summary_out", summary_resolved),
+    ):
+        if resolved == db_resolved or db_resolved in resolved.parents:
+            raise AttendedPaperDayInputError(f"{name} must not be inside db_dir.")
+        if resolved in db_resolved.parents:
+            raise AttendedPaperDayInputError(f"db_dir must not be inside {name}.")
+    if config.db_dir.exists():
+        if not config.db_dir.is_dir():
+            raise AttendedPaperDayInputError("db_dir must be a directory.")
+        entries = [
+            p
+            for p in config.db_dir.iterdir()
+            if p.name not in {".DS_Store", ".paper_day.lock"}
+        ]
+        sidecars = [
+            p.name
+            for p in entries
+            if any(p.name.endswith(suffix) for suffix in PILOT_DB_SIDECAR_SUFFIXES)
+        ]
+        if sidecars:
+            raise AttendedPaperDayInputError("pilot DB sidecar files are not allowed.")
+        if entries and not reuse_pilot_db:
+            raise AttendedPaperDayInputError(
+                "existing non-empty pilot db_dir requires reuse_pilot_db."
+            )
+    for path in (config.evidence_out, config.summary_out):
+        if path.exists():
+            raise AttendedPaperDayInputError(f"{path.name} output already exists.")
 
 
 def build_diagnostic_stack(
@@ -402,15 +622,17 @@ def run_attended_paper_day(
     run_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
-    validate_attended_paper_day_inputs(config)
     actual_run_id = run_id or uuid.uuid4().hex
     counters = DiagnosticCounters()
     recorder = EvidenceRecorder(config=config, run_id=actual_run_id)
     stack: DiagnosticStack | None = None
     stop_reason = "completed"
+    outcome = RuntimeOutcome.PASS
     now_fn = clock or (lambda: datetime.now(tz=KST))
     last_heartbeat: datetime | None = None
     execution_results: list[FastLoopExecutionResult] = []
+    lock = PilotRuntimeLock(config.db_dir / ".paper_day.lock")
+    lifecycle: DiagnosticLifecycle | None = None
 
     def record(
         at: datetime,
@@ -436,8 +658,10 @@ def run_attended_paper_day(
         last_heartbeat = at
         record(at, "heartbeat", "heartbeat", snapshot=_heartbeat_snapshot(stack, counters, at))
 
-    recorder.open()
     try:
+        validate_attended_paper_day_inputs(config)
+        lock.acquire()
+        recorder.open()
         record(now_fn(), "validate", "startup")
 
         def on_execution_evidence(ev: object) -> None:
@@ -471,125 +695,154 @@ def run_attended_paper_day(
         stack = build_diagnostic_stack(
             config=config, counters=counters, on_execution_evidence=on_execution_evidence
         )
+        lifecycle = DiagnosticLifecycle(counters=counters, tracker=stack.tracker, clock=now_fn)
         if stack.journal.list_nonterminal():
             raise AttendedPaperDayRuntimeError("preflight", "nonterminal_journal")
-        counters.inc("connect_attempts")
-        counters.inc("connected")
-        counters.inc("subscription_requests", 2)
-        counters.inc("subscription_acks", 2)
-        counters.stamp("subscriptions_ready_at", now_fn())
-        transport_ready_at = now_fn() - timedelta(seconds=60)
-        stack.tracker.record_transport_event(kind="connected", at=transport_ready_at, now=now_fn())
-        stack.tracker.record_transport_event(kind="all_subscribed", at=transport_ready_at, now=now_fn())
-        counters.inc("startup_completed")
         record(now_fn(), "preflight", "startup_completed", snapshot=counters.snapshot())
 
         if config.startup_only:
             stop_reason = "startup_only"
-            return _write_summary(
-                config=config,
-                run_id=actual_run_id,
-                counters=counters,
-                stack=stack,
-                stop_reason=stop_reason,
-                recorder=recorder,
-                at=now_fn(),
+            if config.source_kind == "kis_live":
+                _run_live_startup_probe(
+                    source_factory=source_factory,
+                    lifecycle=lifecycle,
+                    timeout_seconds=float(config.duration_seconds),
+                )
+                if lifecycle.rejected or not lifecycle.all_subscribed:
+                    raise AttendedPaperDayRuntimeError("transport", "health_not_ready")
+        else:
+            publisher = DeterministicPaperDecisionPublisher(
+                store=stack.active_store,
+                session_date=config.session_date,
+                symbol=config.symbol,
+                evidence=lambda at, slot, status: _record_publication(
+                    record, counters, at, slot, status
+                ),
             )
 
-        publisher = DeterministicPaperDecisionPublisher(
-            store=stack.active_store,
-            session_date=config.session_date,
-            symbol=config.symbol,
-            evidence=lambda at, slot, status: _record_publication(
-                record, counters, at, slot, status
-            ),
-        )
+            def on_monitor_evidence(evidence: MonitorEvidence) -> None:
+                _record_monitor_evidence(record, counters, evidence)
 
-        def on_monitor_evidence(evidence: MonitorEvidence) -> None:
-            _record_monitor_evidence(record, counters, evidence)
+            def on_applied(update: AppliedMarketUpdate) -> None:
+                assert stack is not None
+                publisher.publish_due(update.applied_at)
+                event_type = (
+                    "trade"
+                    if update.event_type is MarketEventType.TRADE
+                    else "best_bid_ask"
+                )
+                stack.tracker.record_market_event(
+                    event_type=event_type, at=update.applied_at, now=update.applied_at
+                )
+                verdict = stack.tracker.evaluate(
+                    session=ExplicitMarketScheduleProvider(
+                        timezone=KST,
+                        schedule={
+                            config.session_date: SessionWindow(
+                                pre_open=time(8, 30),
+                                open=time(9, 0),
+                                close=time(15, 30),
+                                post_close_end=time(16, 0),
+                            )
+                        },
+                    ).session_at(PILOT_MARKET, update.applied_at),
+                    now=update.applied_at,
+                )
+                if verdict.is_execution_ready:
+                    counters.inc("health_pass")
+                    counters.stamp("first_gate_pass_at", update.applied_at)
+                else:
+                    counters.inc("health_hold")
+                    for reason in verdict.reasons:
+                        counters.reason(reason)
+                counters.inc("trigger_evaluations")
+                counters.stamp("first_trigger_evaluation_at", update.applied_at)
+                result = stack.orchestrator.handle_applied_update(update)
+                execution_results.append(result)
+                if result.status is FastLoopExecutionStatus.COMMITTED:
+                    counters.inc("trigger_matches")
+                elif result.status is FastLoopExecutionStatus.SUPPRESSED:
+                    counters.inc("trigger_no_match")
+                if result.status in (
+                    FastLoopExecutionStatus.UNCERTAIN,
+                    FastLoopExecutionStatus.RECONCILE_REQUIRED,
+                ):
+                    counters.inc("journal_uncertain")
+                    raise _CriticalStop(result.status.value)
+                heartbeat(update.applied_at)
 
-        def on_applied(update: AppliedMarketUpdate) -> None:
-            assert stack is not None
-            publisher.publish_due(update.applied_at)
-            event_type = (
-                "trade"
-                if update.event_type is MarketEventType.TRADE
-                else "best_bid_ask"
+            monitor = MarketMonitor(
+                store=stack.latest,
+                rolling_store=stack.rolling,
+                source_factory=lambda: _source_with_lifecycle(
+                    source_factory, lifecycle=lifecycle, source_kind=config.source_kind
+                ),
+                clock=now_fn,
+                session_id=actual_run_id,
+                max_runtime_seconds=float(config.duration_seconds),
+                on_evidence=on_monitor_evidence,
+                on_applied_update=on_applied,
             )
-            stack.tracker.record_market_event(
-                event_type=event_type, at=update.applied_at, now=update.applied_at
-            )
-            verdict = stack.tracker.evaluate(
-                session=ExplicitMarketScheduleProvider(
-                    timezone=KST,
-                    schedule={
-                        config.session_date: SessionWindow(
-                            pre_open=time(8, 30),
-                            open=time(9, 0),
-                            close=time(15, 30),
-                            post_close_end=time(16, 0),
-                        )
-                    },
-                ).session_at(PILOT_MARKET, update.applied_at),
-                now=update.applied_at,
-            )
-            if verdict.is_execution_ready:
-                counters.inc("health_pass")
-                counters.stamp("first_gate_pass_at", update.applied_at)
-            else:
-                counters.inc("health_hold")
-                for reason in verdict.reasons:
-                    counters.reason(reason)
-            counters.inc("trigger_evaluations")
-            counters.stamp("first_trigger_evaluation_at", update.applied_at)
-            result = stack.orchestrator.handle_applied_update(update)
-            execution_results.append(result)
-            if result.status is FastLoopExecutionStatus.COMMITTED:
-                counters.inc("trigger_matches")
-            elif result.status is FastLoopExecutionStatus.SUPPRESSED:
-                counters.inc("trigger_no_match")
-            if result.status in (
-                FastLoopExecutionStatus.UNCERTAIN,
-                FastLoopExecutionStatus.RECONCILE_REQUIRED,
-            ):
-                counters.inc("journal_uncertain")
-            heartbeat(update.applied_at)
-
-        monitor = MarketMonitor(
-            store=stack.latest,
-            rolling_store=stack.rolling,
-            source_factory=source_factory,
-            clock=now_fn,
-            session_id=actual_run_id,
-            max_runtime_seconds=float(config.duration_seconds),
-            on_evidence=on_monitor_evidence,
-            on_applied_update=on_applied,
-        )
-        asyncio.run(monitor.run())
-        if stack.journal.list_nonterminal():
-            stop_reason = "nonterminal_journal"
-        if any(r.status is FastLoopExecutionStatus.UNCERTAIN for r in execution_results):
-            stop_reason = "journal_uncertain"
+            try:
+                asyncio.run(monitor.run())
+            except Exception as exc:
+                critical = _critical_stop_from_exception(exc)
+                if critical is not None:
+                    stop_reason = critical.reason_code
+                    outcome = RuntimeOutcome.NO_GO
+                else:
+                    raise
+            if stack.journal.list_nonterminal():
+                stop_reason = "nonterminal_journal"
+                outcome = RuntimeOutcome.NO_GO
+            if any(r.status is FastLoopExecutionStatus.UNCERTAIN for r in execution_results):
+                stop_reason = "journal_uncertain"
+                outcome = RuntimeOutcome.NO_GO
+            if any(r.status is FastLoopExecutionStatus.RECONCILE_REQUIRED for r in execution_results):
+                stop_reason = "reconcile_required"
+                outcome = RuntimeOutcome.NO_GO
     except AttendedPaperDayRuntimeError as exc:
         stop_reason = exc.reason_code
+        outcome = _outcome_for_stop_reason(stop_reason)
         counters.reason(exc.reason_code)
-        record(now_fn(), exc.stage, "failed_closed", reason=exc.reason_code)
+        with contextlib.suppress(Exception):
+            record(now_fn(), exc.stage, "failed_closed", reason=exc.reason_code)
+    except AttendedPaperDayInputError:
+        stop_reason = "invalid_input"
+        outcome = RuntimeOutcome.FAIL
+        counters.reason(stop_reason)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        stop_reason = "graceful_stop"
+        outcome = RuntimeOutcome.NO_GO
+        with contextlib.suppress(Exception):
+            record(now_fn(), "signal", "graceful_stop", reason=stop_reason)
+    except Exception:
+        stop_reason = "internal_runtime_error"
+        outcome = RuntimeOutcome.FAIL
+        counters.reason(stop_reason)
+        with contextlib.suppress(Exception):
+            record(now_fn(), "runtime", "failed_closed", reason=stop_reason)
     finally:
         if stack is not None:
             failures = stack.close()
             if failures:
                 counters.inc("resource_close_failures", failures)
                 stop_reason = "resource_close_failure"
+                outcome = RuntimeOutcome.NO_GO
         counters.stamp("shutdown_completed_at", now_fn())
-    return _write_summary(
-        config=config,
-        run_id=actual_run_id,
-        counters=counters,
-        stack=stack,
-        stop_reason=stop_reason,
-        recorder=recorder,
-        at=now_fn(),
-    )
+    try:
+        return _write_summary(
+            config=config,
+            run_id=actual_run_id,
+            counters=counters,
+            stack=stack,
+            stop_reason=stop_reason,
+            outcome=outcome,
+            recorder=recorder,
+            at=now_fn(),
+        )
+    finally:
+        lock.release()
 
 
 def _write_summary(
@@ -599,6 +852,7 @@ def _write_summary(
     counters: DiagnosticCounters,
     stack: DiagnosticStack | None,
     stop_reason: str,
+    outcome: str,
     recorder: EvidenceRecorder,
     at: datetime,
 ) -> dict[str, object]:
@@ -614,25 +868,106 @@ def _write_summary(
         "real_order_adapter_constructed": False,
         "automatic_restart": False,
         "multi_symbol": False,
+        "outcome": outcome,
         "stop_reason": stop_reason,
         "nonterminal_journal": nonterminal,
         "counters": counters.snapshot(),
+        "source_kind": config.source_kind,
     }
     config.summary_out.parent.mkdir(parents=True, exist_ok=True)
-    config.summary_out.write_text(
-        json.dumps(summary, sort_keys=True, indent=2), encoding="utf-8"
-    )
     try:
-        recorder.record(
-            recorded_at=at,
-            stage="summary",
-            event="summary_written",
-            reason_code=stop_reason,
-            snapshot=summary,
+        config.summary_out.write_text(
+            json.dumps(summary, sort_keys=True, indent=2), encoding="utf-8"
         )
+        with contextlib.suppress(AttendedPaperDayRuntimeError):
+            recorder.record(
+                recorded_at=at,
+                stage="summary",
+                event="summary_written",
+                reason_code=stop_reason,
+                snapshot=summary,
+            )
     finally:
         recorder.close()
     return summary
+
+
+def _source_with_lifecycle(
+    source_factory: Callable[..., MarketEventSource],
+    *,
+    lifecycle: DiagnosticLifecycle,
+    source_kind: str,
+) -> MarketEventSource:
+    lifecycle.on_connect_attempt(at=lifecycle.now())
+    if source_kind == "kis_live":
+        return _call_source_factory(source_factory, lifecycle)
+    source = _call_source_factory(source_factory, lifecycle)
+    if isinstance(source, ReplayMarketEventSource):
+        return DiagnosticReplayMarketEventSource(
+            source, lifecycle=lifecycle, clock=lifecycle.now
+        )
+    return source
+
+
+def _call_source_factory(
+    source_factory: Callable[..., MarketEventSource], lifecycle: DiagnosticLifecycle
+) -> MarketEventSource:
+    try:
+        return source_factory(lifecycle)
+    except TypeError:
+        return source_factory()
+
+
+def _run_live_startup_probe(
+    *,
+    source_factory: Callable[..., MarketEventSource],
+    lifecycle: DiagnosticLifecycle,
+    timeout_seconds: float,
+) -> None:
+    async def probe() -> None:
+        source = _source_with_lifecycle(
+            source_factory, lifecycle=lifecycle, source_kind="kis_live"
+        )
+        iterator = source.events().__aiter__()
+        try:
+            while not lifecycle.all_subscribed and not lifecycle.rejected:
+                await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    await close()
+
+    try:
+        asyncio.run(asyncio.wait_for(probe(), timeout=timeout_seconds))
+    except asyncio.TimeoutError as exc:
+        if lifecycle.all_subscribed and not lifecycle.rejected:
+            return
+        raise AttendedPaperDayRuntimeError("transport", "health_not_ready") from exc
+
+
+def _critical_stop_from_exception(exc: BaseException) -> _CriticalStop | None:
+    cursor: BaseException | None = exc
+    while cursor is not None:
+        if isinstance(cursor, _CriticalStop):
+            return cursor
+        cursor = cursor.__cause__
+    return None
+
+
+def _outcome_for_stop_reason(stop_reason: str) -> str:
+    if stop_reason in {
+        "health_not_ready",
+        "journal_uncertain",
+        "reconcile_required",
+        "nonterminal_journal",
+        "resource_close_failure",
+        "runtime_lock_exists",
+    }:
+        return RuntimeOutcome.NO_GO
+    return RuntimeOutcome.FAIL
 
 
 def _record_publication(
@@ -697,20 +1032,38 @@ def _heartbeat_snapshot(
     stack: DiagnosticStack | None, counters: DiagnosticCounters, at: datetime
 ) -> dict[str, object]:
     nonterminal = len(stack.journal.list_nonterminal()) if stack is not None else 0
+    latest = stack.latest.peek(PILOT_MARKET, PILOT_SYMBOL, now=at) if stack is not None else None
+    session = ExplicitMarketScheduleProvider(
+        timezone=KST,
+        schedule={
+            at.astimezone(KST).date(): SessionWindow(
+                pre_open=time(8, 30),
+                open=time(9, 0),
+                close=time(15, 30),
+                post_close_end=time(16, 0),
+            )
+        },
+    ).session_at(PILOT_MARKET, at)
+    verdict = stack.tracker.evaluate(session=session, now=at) if stack is not None else None
+    active = stack.active_store.read_active(PILOT_MARKET, PILOT_SYMBOL) if stack is not None else None
     return {
         "connected": counters.values.get("connected", 0) > 0,
         "subscriptions_ready": counters.values.get("subscription_acks", 0) >= 2,
-        "last_trade_age_ms": None,
-        "last_quote_age_ms": None,
-        "transport_health": "recorded",
-        "market_data_health": "recorded",
-        "session_state": "OPEN",
-        "active_decision_id": None,
+        "last_trade_age_ms": _age_ms(latest.trade.trade_at, at) if latest and latest.trade else None,
+        "last_quote_age_ms": _age_ms(latest.quote.quote_at, at) if latest and latest.quote else None,
+        "transport_health": verdict.transport.value if verdict is not None else "UNKNOWN",
+        "market_data_health": verdict.market_data.value if verdict is not None else "UNKNOWN",
+        "session_state": verdict.session_state if verdict is not None else str(session.state),
+        "active_decision_id": active.decision_id if active is not None else None,
         "trigger_evaluations": counters.values.get("trigger_evaluations", 0),
         "execution_requests": counters.values.get("execution_requests", 0),
         "committed_orders": counters.values.get("journal_committed", 0),
         "nonterminal_journal": nonterminal,
     }
+
+
+def _age_ms(event_at: datetime, now: datetime) -> int:
+    return max(0, int((now - event_at).total_seconds() * 1000))
 
 
 def _diagnostic_thresholds() -> HealthThresholds:

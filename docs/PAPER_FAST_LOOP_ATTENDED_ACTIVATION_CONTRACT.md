@@ -7,6 +7,13 @@ This lane defines the contract, pure stage model, and NO-GO safety proof only.
 connection, no market stream, no monitor thread/process, no broker dispatch, no orders,
 no operational DB writes, no approval input, no approval persistence.
 
+The paper-day diagnostic runtime is not activation. It is a bounded attended
+paper-only diagnostic path with `activation_authorized=false`,
+`real_order_adapter_constructed=false`, and `paper_only=true` in all summaries.
+It may exercise replay or explicit read-only KIS market-data startup semantics,
+but it does not consume approval, send live orders, or make the 1-day pilot
+ready without a separate Reviewer PASS.
+
 Code model: `composition.attended_activation.AttendedActivationStage` (pure enum; no
 side effects).
 

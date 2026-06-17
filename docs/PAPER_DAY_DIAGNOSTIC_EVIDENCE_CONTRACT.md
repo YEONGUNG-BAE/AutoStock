@@ -24,7 +24,7 @@ sensitive_data_present
 raw websocket frames, raw config text, DB dumps, traceback reprs, or LLM
 prompt/response payloads.
 
-Counters cover:
+Counters cover actual observations only:
 
 - transport connect/subscription/disconnect
 - trade/quote frames and normalized updates
@@ -33,6 +33,11 @@ Counters cover:
 - trigger evaluations and match/suppression outcomes
 - execution requests, journal terminal outcomes, orders, fills
 - lifecycle timestamps and resource close failures
+
+Transport counters are derived from source lifecycle events, not from runtime
+startup assumptions. Replay sources may emit an explicit synthetic replay
+lifecycle; live KIS readiness comes from KIS websocket transport events. Offline
+startup-only therefore reports `connected=0` and `subscription_acks=0`.
 
 Heartbeat records include:
 
@@ -51,8 +56,11 @@ committed_orders
 nonterminal_journal
 ```
 
+Heartbeat values are read from `LatestMarketStateStore`, `MarketHealthTracker`,
+the session provider, and the active decision store. Placeholder health strings
+must not be emitted.
+
 Failure-stage principle: after a failed attended pilot, inspect the first failed
 stage in evidence and run only the corresponding partial verification. Do not
 expand scope to multi-symbol, daemonization, live orders, signing, or restart
 automation in this lane.
-
