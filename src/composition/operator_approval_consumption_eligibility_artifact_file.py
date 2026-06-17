@@ -715,7 +715,15 @@ def _validate_existing_parent_directory(parent: Path) -> str | None:
 
     if stat.S_ISLNK(st.st_mode):
         # parent symlink는 directory target이면 허용한다(lstat 기준 symlink 자체).
-        if not parent.is_dir():
+        try:
+            target = parent.stat()
+        except FileNotFoundError:
+            return _REASON_PARENT_MISSING
+        except OSError as exc:
+            if _is_absent_os_error(exc):
+                return _REASON_PARENT_MISSING
+            return _REASON_PARENT_UNREADABLE
+        if not stat.S_ISDIR(target.st_mode):
             return _REASON_PARENT_NOT_DIRECTORY
         return None
 

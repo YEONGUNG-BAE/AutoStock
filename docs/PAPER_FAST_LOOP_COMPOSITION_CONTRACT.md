@@ -541,3 +541,11 @@ touch network/credentials/DB/clock and never activate runtime:
   complete only when directory fd close also succeeds.
   TOCTOU/parent-symlink/platform limits documented. See
   `PAPER_FAST_LOOP_OPERATOR_APPROVAL_CONSUMPTION_ELIGIBILITY_ARTIFACT_FILE_CONTRACT.md`.
+- RTM-7c.5a/5b `composition.attended_paper_day` — bounded attended diagnostic composition for
+  single symbol `005930`. It wires a caller-provided `MarketEventSource` through `MarketMonitor`,
+  latest/rolling stores, health/session gate, `ActiveDecisionStore` read, `FastLoopExecutionOrchestrator`,
+  `TriggerEngine`, `TriggerOrderBridge`, `PaperExecutionCoordinator`, `PaperBrokerAdapter`,
+  `SqliteTriggerJournal`, and `SQLiteLedger`. A deterministic four-slot publisher is the only active
+  decision writer. This mode is paper-only, evidence-first, and does not change
+  `run_paper_fast_loop.py --run`, does not construct a real-order adapter, does not enable
+  daemon/restart behavior, and does not make runtime activation authorized.

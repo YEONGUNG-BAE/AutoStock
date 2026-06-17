@@ -267,6 +267,43 @@ def test_write_parent_symlink_allowed(tmp_path: Path) -> None:
     assert dest.resolve().parent == real_parent.resolve()
 
 
+@pytest.mark.parametrize("raised", [PermissionError(errno.EACCES, "SECRET_denied"), OSError(errno.EIO, "SECRET_eio")])
+def test_write_parent_symlink_target_unreadable_is_not_not_directory(
+    raised: OSError, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_parent = tmp_path / "real"
+    target_parent.mkdir()
+    link_parent = tmp_path / "link"
+    link_parent.symlink_to(target_parent, target_is_directory=True)
+    dest = link_parent / "artifact.json"
+    calls: list[str] = []
+    real_lstat = os.lstat
+    real_stat = os.stat
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        return real_lstat(path)
+
+    def _stat(path: str | bytes, *args: object, **kwargs: object) -> os.stat_result:
+        if Path(path) == link_parent:
+            raise raised
+        return real_stat(path, *args, **kwargs)
+
+    def _poison(*_args: object, **_kwargs: object) -> object:
+        calls.append("publication")
+        raise AssertionError("publication should not start after parent preflight failure")
+
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "stat", _stat)
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _poison)
+    monkeypatch.setattr(file_mod.os, "link", _poison)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_parent_unreadable",)
+    assert calls == []
+    assert not dest.exists()
+
+
 # --- writer: failure cleanup ---
 
 

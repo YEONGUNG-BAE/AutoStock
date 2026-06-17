@@ -56,6 +56,22 @@
 - Runtime activation posture remains NO-GO; read/decode `VALID` remains consistency-only, not
   authenticity, provenance, approval consumption, replay protection, signing, or activation.
 
+## Reference — RTM-7c.5a/5b Paper-Day Diagnostic Runtime
+
+- The attended paper-day diagnostic runtime is a bounded single-symbol composition for `005930`.
+  It connects a caller-provided market event source to the existing paper-only fast-loop execution
+  stack and writes JSONL evidence plus a summary. It does not alter the existing `--run` NO-GO path.
+- The deterministic slow loop publishes four structured `AnalysisDecision` + `TriggerPlan` slots.
+  It does not infer trigger plans from prose and does not call an LLM in this lane.
+- The runtime is evidence-first: transport, market-data, gate/decision, trigger/execution, and
+  lifecycle counters are recorded with sanitized stage/reason fields. Raw credentials, raw frames,
+  full config text, DB dumps, tracebacks, and LLM payloads are not evidence fields.
+- Startup-only mode exists for operator checks and performs no paper execution. Live KIS use remains
+  an explicit operator action through the diagnostic CLI; tests use replay/fake sources only.
+- Scope exclusions remain: real-order adapter construction, live order submission, automatic
+  restart, multi-symbol operation, implicit operational DB selection, daemon/scheduler deployment,
+  signing/authentication, replay prevention claims, and runtime activation authorization.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live

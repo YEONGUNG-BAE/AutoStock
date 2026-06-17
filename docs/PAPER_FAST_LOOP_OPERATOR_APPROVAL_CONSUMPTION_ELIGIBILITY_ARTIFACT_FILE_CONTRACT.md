@@ -180,6 +180,8 @@ Reader creates/modifies/deletes **nothing** — no sidecar/temp/reconcile files.
   `not_regular` (reader).
 - Parent preflight treats only `ENOENT` and `ENOTDIR` as missing. `EACCES`, `EIO`, and other
   non-absent `OSError` values return `parent_unreadable`; publication does not start.
+- Parent symlink targets are checked with followed `stat`; a symlink whose target stat raises a
+  non-absent `OSError` also returns `parent_unreadable`, not `parent_not_directory`.
 - Destination preflight treats only `ENOENT` and `ENOTDIR` as available. `EACCES`, `EIO`, and other
   non-absent `OSError` values return `destination_unreadable`; they are not classified as
   `destination_exists`, and publication does not start.
