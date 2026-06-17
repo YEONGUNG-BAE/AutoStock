@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import os
 import sqlite3
 import time as time_module
 from datetime import date, datetime, time
@@ -352,6 +354,8 @@ def test_lock_conflict_opens_no_db_and_never_calls_factory(
     assert factory_calls["n"] == 0  # source factory never invoked on lock conflict
     assert (db_dir / ".paper_day.lock").read_text(encoding="utf-8") == "owned\n"
     assert (db_dir / "trigger_journal.sqlite3").read_bytes() == journal_before
+    assert not cfg.summary_out.exists()  # non-owner writes no summary
+    assert not cfg.evidence_out.exists()  # non-owner writes no evidence
 
 
 def test_factory_internal_type_error_is_single_call_source_failed(tmp_path: Path) -> None:
@@ -432,14 +436,14 @@ def test_db_constructor_failure_classified_db_failed(
 def test_summary_write_failure_classified_and_releases_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_write = Path.write_text
+    real_link = os.link
 
-    def boom_write(self: Path, *a: Any, **k: Any):
-        if self.name == "summary.json":
-            raise OSError("summary write failed")
-        return real_write(self, *a, **k)
+    def boom_link(src: Any, dst: Any, *a: Any, **k: Any):
+        if str(dst).endswith("summary.json"):
+            raise OSError("summary publish failed")
+        return real_link(src, dst, *a, **k)
 
-    monkeypatch.setattr(Path, "write_text", boom_write)
+    monkeypatch.setattr(os, "link", boom_link)
     cfg = _config(tmp_path)
     summary = run_attended_paper_day(
         config=cfg,
@@ -450,6 +454,7 @@ def test_summary_write_failure_classified_and_releases_lock(
     assert summary["outcome"] == "FAIL"
     assert summary["stop_reason"] == "summary_failed"
     assert not (cfg.db_dir / ".paper_day.lock").exists()  # lock released
+    assert not cfg.summary_out.exists()  # no partial/overwritten summary visible
 
 
 @pytest.mark.parametrize(
@@ -636,3 +641,162 @@ def test_credential_read_deferred_until_after_admission(
     assert summary["stop_reason"] == "runtime_lock_exists"
     assert load_calls["n"] == 0  # admission failed first; no settings load
     assert env_reads == []  # and no credential env read
+
+
+# --- RTM-7c.5a/5b: output ownership, summary consistency, fatal lifecycle, probe ---
+
+
+def test_invalid_input_returns_memory_result_without_writes(tmp_path: Path) -> None:
+    # summary_out == evidence_out is an admission (path-ownership) failure: the run
+    # must return an in-memory FAIL/invalid_input result and write zero files.
+    shared = tmp_path / "runtime" / "out.jsonl"
+    cfg = AttendedPaperDayConfig(
+        session_date=date(2026, 6, 17),
+        symbol=PILOT_SYMBOL,
+        duration_seconds=5,
+        evidence_out=shared,
+        summary_out=shared,
+        db_dir=tmp_path / "runtime" / "db",
+        confirm_attended_paper=True,
+    )
+    factory_calls = {"n": 0}
+
+    def factory(*, lifecycle: Any) -> ReplayMarketEventSource:
+        factory_calls["n"] += 1
+        return ReplayMarketEventSource([_quote(), _trade()])
+
+    summary = run_attended_paper_day(config=cfg, source_factory=factory, run_id="inv", clock=_at)
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "invalid_input"
+    assert factory_calls["n"] == 0  # never reached the source factory
+    assert not shared.exists()  # validation failure writes nothing
+    assert not cfg.db_dir.exists()  # and opens no pilot DB
+
+
+def test_returned_summary_matches_persisted_file(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="match",
+        clock=_at,
+    )
+    assert summary["outcome"] == "PASS"
+    persisted = json.loads(cfg.summary_out.read_text(encoding="utf-8"))
+    assert persisted == summary  # returned dict is exactly what was published
+
+
+@pytest.mark.parametrize("fatal_type", [MemoryError, SystemExit])
+def test_body_fatal_preserved_and_lock_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fatal_type: type[BaseException]
+) -> None:
+    class _FatalMonitor:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise fatal_type("fatal in market loop")
+
+    monkeypatch.setattr(apd, "MarketMonitor", _FatalMonitor)
+    cfg = _config(tmp_path)
+
+    with pytest.raises(fatal_type):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="fatal",
+            clock=_at,
+        )
+
+    # Fatal identity is preserved (re-raised) yet the lock is still released as the
+    # last bounded cleanup step.
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+class _ProbeBoomSource:
+    """Connects, then the consumer raises before any subscription ACK."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        self._lifecycle.on_connected(at=_at())
+        raise RuntimeError("recv failed mid-stream")
+        yield
+
+
+class _RejectSource:
+    """Sends a rejected subscription ACK and then exhausts."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        at = _at()
+        self._lifecycle.on_connected(at=at)
+        self._lifecycle.on_subscription_requested(tr_id=TR_TRADE, symbol=PILOT_SYMBOL, at=at)
+        self._lifecycle.on_subscription_ack(
+            tr_id=TR_TRADE, symbol=PILOT_SYMBOL, accepted=False, at=at
+        )
+        if False:
+            yield _quote()
+
+
+class _ExhaustNoAckSource:
+    """Connects but never reaches subscription readiness before exhausting."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        self._lifecycle.on_connected(at=_at())
+        if False:
+            yield _quote()
+
+
+def _live_startup_cfg(tmp_path: Path) -> AttendedPaperDayConfig:
+    return AttendedPaperDayConfig(
+        session_date=date(2026, 6, 17),
+        symbol=PILOT_SYMBOL,
+        duration_seconds=2,
+        evidence_out=tmp_path / "runtime" / "evidence.jsonl",
+        summary_out=tmp_path / "runtime" / "summary.json",
+        db_dir=tmp_path / "runtime" / "db",
+        confirm_attended_paper=True,
+        startup_only=True,
+        source_kind="kis_live",
+    )
+
+
+def test_startup_probe_consumer_exception_is_source_failed(tmp_path: Path) -> None:
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _ProbeBoomSource(lifecycle),
+        run_id="probe-boom",
+        clock=_at,
+    )
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_failed"
+
+
+def test_startup_probe_rejected_ack_is_subscription_rejected(tmp_path: Path) -> None:
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _RejectSource(lifecycle),
+        run_id="probe-reject",
+        clock=_at,
+    )
+    assert summary["outcome"] == "NO_GO"
+    assert summary["stop_reason"] == "subscription_rejected"
+
+
+def test_startup_probe_exhaustion_without_ack_is_transport_not_ready(tmp_path: Path) -> None:
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _ExhaustNoAckSource(lifecycle),
+        run_id="probe-exhaust",
+        clock=_at,
+    )
+    assert summary["outcome"] == "NO_GO"
+    assert summary["stop_reason"] == "transport_not_ready"

@@ -12,7 +12,9 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import sqlite3
+import stat
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -678,6 +680,10 @@ def run_attended_paper_day(
     # so the summary writer never re-opens the DB to recompute it.
     nonterminal_journal: int | None = None
     ran_market_loop = False
+    # Output-ownership state. Output files belong to the lock owner only, and are
+    # written only after path ownership is confirmed (validation passed + lock held).
+    evidence_owned = False
+    summary_path_owned = False
 
     def record(
         at: datetime,
@@ -703,15 +709,53 @@ def run_attended_paper_day(
         last_heartbeat = at
         record(at, "heartbeat", "heartbeat", snapshot=_heartbeat_snapshot(stack, counters, at))
 
+    # --- Admission phase 1: validation. A validation failure writes NOTHING: no
+    #     evidence, no summary, no symlink target — only a memory result is returned.
     try:
         validate_attended_paper_day_inputs(config)
+    except AttendedPaperDayInputError:
+        stop_reason = "invalid_input"
+        outcome = RuntimeOutcome.FAIL
+        counters.reason(stop_reason)
+        return _build_summary(
+            config=config,
+            run_id=actual_run_id,
+            counters=counters,
+            nonterminal_journal=nonterminal_journal,
+            stop_reason=stop_reason,
+            outcome=outcome,
+        )
+
+    # --- Admission phase 2: runtime lock. Until the lock is held we own no output
+    #     path, so a lock conflict also returns a memory result with zero writes.
+    try:
         lock.acquire()
+    except AttendedPaperDayRuntimeError as exc:
+        stop_reason = exc.reason_code
+        outcome = _outcome_for_stop_reason(stop_reason)
+        counters.reason(stop_reason)
+        return _build_summary(
+            config=config,
+            run_id=actual_run_id,
+            counters=counters,
+            nonterminal_journal=nonterminal_journal,
+            stop_reason=stop_reason,
+            outcome=outcome,
+        )
+    # Lock held: validation already confirmed the output paths, so the lock owner now
+    # owns them. Every path from here MUST run the finalize/cleanup with lock release
+    # as the last bounded step, including under a fatal exception.
+    summary_path_owned = True
+    body_fatal: BaseException | None = None
+
+    try:
         try:
             recorder.open()
         except AttendedPaperDayRuntimeError:
             raise
         except Exception as exc:
             raise AttendedPaperDayRuntimeError("evidence", "evidence_failed") from exc
+        evidence_owned = True
         record(now_fn(), "validate", "startup")
 
         def on_execution_evidence(ev: object) -> None:
@@ -757,13 +801,16 @@ def run_attended_paper_day(
         if config.startup_only:
             stop_reason = "startup_only"
             if config.source_kind == "kis_live":
+                # The probe now fully classifies startup: a source exception becomes
+                # source_failed, ACK rejection subscription_rejected, exhaustion
+                # transport_not_ready, timeout health_not_ready. No post-probe
+                # re-derivation is needed (and none must silently downgrade a source
+                # failure to health_not_ready).
                 _run_live_startup_probe(
                     source_factory=source_factory,
                     lifecycle=lifecycle,
                     timeout_seconds=float(config.duration_seconds),
                 )
-                if lifecycle.rejected or not lifecycle.all_subscribed:
-                    raise AttendedPaperDayRuntimeError("transport", "health_not_ready")
         else:
             publisher = DeterministicPaperDecisionPublisher(
                 store=stack.active_store,
@@ -863,43 +910,43 @@ def run_attended_paper_day(
         outcome = RuntimeOutcome.NO_GO
         with contextlib.suppress(Exception):
             record(now_fn(), "signal", "graceful_stop", reason=stop_reason)
+    except MemoryError as exc:
+        # MemoryError is an Exception subclass, but the process is in an unreliable
+        # state: preserve its identity (re-raise) rather than reporting a normal FAIL
+        # summary. Cleanup (incl. lock release) still runs below.
+        body_fatal = exc
     except Exception:
         stop_reason = "internal_runtime_error"
         outcome = RuntimeOutcome.FAIL
         counters.reason(stop_reason)
         with contextlib.suppress(Exception):
             record(now_fn(), "runtime", "failed_closed", reason=stop_reason)
-    finally:
-        if stack is not None:
-            # Last journal observation by the owner, while the handle is still open.
-            with contextlib.suppress(Exception):
-                nonterminal_journal = len(stack.journal.list_nonterminal())
-            failures = stack.close()
-            if failures:
-                counters.inc("resource_close_failures", failures)
-                stop_reason = "resource_close_failure"
-                outcome = RuntimeOutcome.NO_GO
-        counters.stamp("shutdown_completed_at", now_fn())
+    except BaseException as exc:  # noqa: BLE001 — fatal (SystemExit/GeneratorExit)
+        # Preserve the original fatal; cleanup (incl. lock release) still runs below.
+        body_fatal = exc
 
-    if ran_market_loop and outcome == RuntimeOutcome.PASS:
-        outcome, stop_reason = _completion_verdict(counters, nonterminal_journal)
-
-    try:
-        return _write_summary(
-            config=config,
-            run_id=actual_run_id,
-            counters=counters,
-            nonterminal_journal=nonterminal_journal,
-            stop_reason=stop_reason,
-            outcome=outcome,
-            recorder=recorder,
-            at=now_fn(),
-        )
-    finally:
-        lock.release()
+    summary, cleanup_fatal = _finalize_run(
+        config=config,
+        run_id=actual_run_id,
+        counters=counters,
+        stack=stack,
+        recorder=recorder,
+        lock=lock,
+        outcome=outcome,
+        stop_reason=stop_reason,
+        ran_market_loop=ran_market_loop,
+        evidence_owned=evidence_owned,
+        summary_path_owned=summary_path_owned,
+        now_fn=now_fn,
+    )
+    # Fatal precedence: an operation (body) fatal outranks any cleanup fatal.
+    fatal = body_fatal if body_fatal is not None else cleanup_fatal
+    if fatal is not None:
+        raise fatal
+    return summary
 
 
-def _write_summary(
+def _build_summary(
     *,
     config: AttendedPaperDayConfig,
     run_id: str,
@@ -907,14 +954,10 @@ def _write_summary(
     nonterminal_journal: int | None,
     stop_reason: str,
     outcome: str,
-    recorder: EvidenceRecorder,
-    at: datetime,
 ) -> dict[str, object]:
-    # The summary writer serializes only immutable scalars handed to it. It never
-    # imports/opens SQLite, so a lock conflict (no stack) reports a null journal
-    # observation and performs zero DB opens against the lock owner's database.
-    nonterminal = nonterminal_journal
-    summary = {
+    # Pure serialization of immutable scalars. It never imports/opens SQLite, so a
+    # lock conflict (no stack) reports a null journal observation with zero DB opens.
+    return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "session_date": config.session_date.isoformat(),
@@ -927,32 +970,224 @@ def _write_summary(
         "multi_symbol": False,
         "outcome": outcome,
         "stop_reason": stop_reason,
-        "nonterminal_journal": nonterminal,
+        "nonterminal_journal": nonterminal_journal,
         "counters": counters.snapshot(),
         "source_kind": config.source_kind,
     }
-    try:
-        config.summary_out.parent.mkdir(parents=True, exist_ok=True)
-        config.summary_out.write_text(
-            json.dumps(summary, sort_keys=True, indent=2), encoding="utf-8"
-        )
-        with contextlib.suppress(AttendedPaperDayRuntimeError):
+
+
+def _finalize_run(
+    *,
+    config: AttendedPaperDayConfig,
+    run_id: str,
+    counters: DiagnosticCounters,
+    stack: DiagnosticStack | None,
+    recorder: EvidenceRecorder,
+    lock: PilotRuntimeLock,
+    outcome: str,
+    stop_reason: str,
+    ran_market_loop: bool,
+    evidence_owned: bool,
+    summary_path_owned: bool,
+    now_fn: Callable[[], datetime],
+) -> tuple[dict[str, object], BaseException | None]:
+    """Single outer lifecycle owner: decide the final result, persist it, release.
+
+    Cleanup order is fixed: stack reverse-close -> final journal observation ->
+    completion verdict -> final evidence record -> recorder close -> create-new
+    summary publish -> runtime lock release. The runtime lock release is always the
+    last bounded cleanup. The returned summary dict is byte-identical to any persisted
+    summary file. Cleanup-step fatals are captured (not masked) and the first one is
+    returned for the caller to re-raise after lock release; ordinary cleanup failures
+    are normalized into the runtime result (resource_close_failure / evidence_failed /
+    summary_failed).
+    """
+    nonterminal_journal: int | None = None
+    cleanup_fatal: BaseException | None = None
+
+    # 1. Stack reverse-close (DiagnosticStack.close swallows ordinary per-resource
+    #    errors into a failure count; a fatal there is captured as a cleanup fatal).
+    if stack is not None:
+        with contextlib.suppress(Exception):
+            nonterminal_journal = len(stack.journal.list_nonterminal())
+        try:
+            failures = stack.close()
+        except BaseException as exc:  # noqa: BLE001
+            cleanup_fatal = cleanup_fatal or exc
+            failures = 0
+        if failures:
+            counters.inc("resource_close_failures", failures)
+            stop_reason = "resource_close_failure"
+            outcome = RuntimeOutcome.NO_GO
+    counters.stamp("shutdown_completed_at", now_fn())
+
+    # 2. Completion verdict only refines a still-PASS market-loop run.
+    if ran_market_loop and outcome == RuntimeOutcome.PASS:
+        outcome, stop_reason = _completion_verdict(counters, nonterminal_journal)
+
+    # 3. Final evidence record + 4. recorder close. An evidence failure here downgrades
+    #    to FAIL/evidence_failed BEFORE the summary is built, so no PASS summary is ever
+    #    persisted after an evidence failure.
+    if evidence_owned:
+        try:
             recorder.record(
-                recorded_at=at,
-                stage="summary",
-                event="summary_written",
+                recorded_at=now_fn(),
+                stage="shutdown",
+                event="finalized",
                 reason_code=stop_reason,
-                snapshot=summary,
             )
-    except Exception:
-        # A summary write failure must not leak a raw exception or a stale lock: the
-        # caller still releases the lock, and the recorder is closed below. We return
-        # a sanitized FAIL/summary_failed verdict instead of propagating.
-        summary["outcome"] = RuntimeOutcome.FAIL
-        summary["stop_reason"] = "summary_failed"
-    finally:
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            cleanup_fatal = cleanup_fatal or exc
+        except Exception:
+            outcome = RuntimeOutcome.FAIL
+            stop_reason = "evidence_failed"
+    try:
         recorder.close()
-    return summary
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        cleanup_fatal = cleanup_fatal or exc
+    except Exception:
+        if outcome != RuntimeOutcome.FAIL:
+            outcome = RuntimeOutcome.FAIL
+            stop_reason = "evidence_failed"
+
+    # 5. Build the immutable summary from the now-final outcome and publish it
+    #    create-new/atomically. Only the lock owner with confirmed path ownership
+    #    writes the file. A publish failure yields FAIL/summary_failed with the file
+    #    absent (or another owner's file untouched) — never a partial/visible summary.
+    summary = _build_summary(
+        config=config,
+        run_id=run_id,
+        counters=counters,
+        nonterminal_journal=nonterminal_journal,
+        stop_reason=stop_reason,
+        outcome=outcome,
+    )
+    if summary_path_owned:
+        publish = _publish_summary_create_new(
+            config.summary_out, json.dumps(summary, sort_keys=True, indent=2)
+        )
+        if publish != _SUMMARY_WRITTEN:
+            summary = {**summary, "outcome": RuntimeOutcome.FAIL, "stop_reason": "summary_failed"}
+
+    # 6. Runtime lock release — the last bounded cleanup on every path.
+    try:
+        lock.release()
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        cleanup_fatal = cleanup_fatal or exc
+    except Exception:
+        pass
+    return summary, cleanup_fatal
+
+
+# Summary publication outcomes (minimal scope for the runtime summary).
+_SUMMARY_WRITTEN = "WRITTEN"
+_SUMMARY_NOT_WRITTEN = "NOT_WRITTEN"
+_SUMMARY_PUBLISHED_INCOMPLETE = "PUBLISHED_INCOMPLETE"
+_SUMMARY_PUBLICATION_UNCERTAIN = "PUBLICATION_UNCERTAIN"
+_SUMMARY_TEMP_PREFIX = ".paper_day_summary."
+
+
+def _summary_open_flags() -> int:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _fsync_directory(directory: Path) -> None:
+    dir_fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _publish_summary_create_new(path: Path, text: str) -> str:
+    """Atomic create-new summary publish; no overwrite, no symlink follow.
+
+    Bytes are written to a same-directory temp opened ``O_EXCL|O_NOFOLLOW``, fsynced,
+    then hard-linked to the create-new destination (link fails if the destination
+    already exists). The destination therefore only ever appears fully written — a
+    partial summary is never visible. Reuses the RTM-7c.4x artifact-file publish
+    pattern, limited to the minimum the runtime summary needs.
+    """
+    payload = text.encode("utf-8")
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return _SUMMARY_NOT_WRITTEN
+    temp_path = parent / f"{_SUMMARY_TEMP_PREFIX}{secrets.token_hex(16)}"
+    fd: int | None = None
+    temp_created = False
+    published = False
+    temp_stat: os.stat_result | None = None
+    try:
+        try:
+            fd = os.open(str(temp_path), _summary_open_flags(), 0o600)
+        except OSError:
+            return _SUMMARY_NOT_WRITTEN
+        temp_created = True
+        view = memoryview(payload)
+        offset = 0
+        while offset < len(view):
+            try:
+                written = os.write(fd, view[offset:])
+            except OSError:
+                return _SUMMARY_NOT_WRITTEN
+            if written <= 0:
+                return _SUMMARY_NOT_WRITTEN
+            offset += written
+        try:
+            os.fsync(fd)
+            temp_stat = os.fstat(fd)
+        except OSError:
+            return _SUMMARY_NOT_WRITTEN
+        try:
+            os.link(temp_path, path)
+            published = True
+        except FileExistsError:
+            return _SUMMARY_NOT_WRITTEN
+        except OSError:
+            try:
+                dest_stat = os.lstat(path)
+            except FileNotFoundError:
+                return _SUMMARY_NOT_WRITTEN
+            except OSError:
+                return _SUMMARY_PUBLICATION_UNCERTAIN
+            if (
+                stat.S_ISREG(dest_stat.st_mode)
+                and temp_stat is not None
+                and dest_stat.st_dev == temp_stat.st_dev
+                and dest_stat.st_ino == temp_stat.st_ino
+            ):
+                published = True
+            else:
+                return _SUMMARY_PUBLICATION_UNCERTAIN
+        try:
+            dest_stat = os.lstat(path)
+        except OSError:
+            return _SUMMARY_PUBLICATION_UNCERTAIN
+        if (
+            not stat.S_ISREG(dest_stat.st_mode)
+            or temp_stat is None
+            or dest_stat.st_dev != temp_stat.st_dev
+            or dest_stat.st_ino != temp_stat.st_ino
+        ):
+            return _SUMMARY_PUBLICATION_UNCERTAIN
+        # Destination content is correct and durable on the inode; a parent-dir fsync
+        # failure affects only directory-entry durability, not the returned/persisted
+        # consistency, so it does not downgrade WRITTEN.
+        with contextlib.suppress(Exception):
+            _fsync_directory(parent)
+        return _SUMMARY_WRITTEN
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if temp_created:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)
 
 
 def _source_with_lifecycle(
@@ -1003,11 +1238,31 @@ def _run_live_startup_probe(
             await asyncio.wait({consumer, ready}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             ready.cancel()
-            consumer.cancel()
             with contextlib.suppress(BaseException):
                 await ready
+
+        # A source/consumer exception is the highest-priority startup outcome and
+        # must never be downgraded to health_not_ready. Inspect the consumer task's
+        # exception explicitly instead of suppressing it.
+        if consumer.done():
+            consumer_exc = consumer.exception()
+            if consumer_exc is not None and not isinstance(
+                consumer_exc, asyncio.CancelledError
+            ):
+                raise AttendedPaperDayRuntimeError("source", "source_failed") from consumer_exc
+        else:
+            consumer.cancel()
             with contextlib.suppress(BaseException):
                 await consumer
+
+        if lifecycle.rejected:
+            raise AttendedPaperDayRuntimeError("transport", "subscription_rejected")
+        if lifecycle.all_subscribed:
+            return
+        # The consumer reached normal exhaustion (or readiness fired without an ACK
+        # state) before subscription readiness was observed.
+        if consumer.done():
+            raise AttendedPaperDayRuntimeError("transport", "transport_not_ready")
 
     try:
         asyncio.run(asyncio.wait_for(probe(), timeout=timeout_seconds))

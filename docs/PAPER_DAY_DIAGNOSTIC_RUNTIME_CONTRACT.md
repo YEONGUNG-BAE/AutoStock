@@ -44,20 +44,54 @@ prose.
 Lifecycle:
 
 ```text
-validate
--> acquire create-new runtime lock
+validate                       (admission phase 1)
+-> acquire create-new runtime lock   (admission phase 2)
 -> open create-new evidence
 -> resources open
 -> source connect/subscription path only when required
 -> bounded monitor run or startup probe
 -> source stop
--> resource close
+-> resource (stack) reverse close
 -> post-close journal/quiescence inspection
--> synchronous event finish
--> summary write
--> evidence final record/close
--> release lock
+-> completion verdict (if PASS)
+-> final evidence record
+-> evidence flush/close
+-> build immutable summary
+-> summary create-new publish
+-> release lock                (last bounded cleanup)
 ```
+
+Output ownership: validation and lock acquisition are the two admission phases.
+Until the lock is held the runtime owns no output path, so **any admission
+failure (`invalid_input`, `runtime_lock_exists`) returns an in-memory result and
+writes zero files**: no DB open, no source factory call, no credential/env read,
+no evidence, no summary, and no symlink target is created. Output files are
+written by the lock owner only. State is tracked by explicit locals
+(`validation_succeeded`, `lock_acquired`/`summary_path_owned`, `evidence_owned`,
+`resources_opened`): validation fail -> write 0; lock not acquired -> write 0;
+path ownership not confirmed -> write 0.
+
+Summary publication is create-new and atomic: bytes are written to a
+same-directory temp opened `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, fsynced, then
+hard-linked to the create-new destination (link fails if the destination
+exists). `Path.write_text()` overwrite is not used. A partial summary is never
+visible. Publish outcomes are `WRITTEN`, `NOT_WRITTEN`, `PUBLISHED_INCOMPLETE`,
+and `PUBLICATION_UNCERTAIN`; anything other than `WRITTEN` downgrades the run to
+`FAIL/summary_failed` with no PASS summary file left behind.
+
+Evidence/summary consistency: the final evidence record is written and the
+evidence recorder is closed **before** the summary is built and published, so the
+returned result dict is byte-for-byte equal to the persisted `summary.json`. An
+evidence failure yields `FAIL/evidence_failed` and no PASS summary; a summary
+publish failure yields `FAIL/summary_failed` with the file absent.
+
+Fatal lifecycle ownership: a single outer owner runs cleanup in order
+(source cancel/close -> stack reverse-close -> recorder close -> summary publish
+if eligible -> lock release) with lock release as the **last bounded cleanup,
+always attempted** even under a fatal (`MemoryError`, `SystemExit`). Fatal
+identity is preserved (re-raised) and operation (body) fatals outrank cleanup
+fatals: operation > source cleanup > stack cleanup > recorder cleanup > lock
+cleanup.
 
 Transport readiness counters are owned by source lifecycle events only:
 connect attempts, connected state, subscription requests, ACKs, rejects, and
@@ -74,6 +108,21 @@ Startup-only semantics:
   approval, connect websocket, observe trade and quote subscription ACKs, close
   source/resources, then write a post-close summary. It must not pass market
   events to the trigger engine or paper execution stack.
+
+Live startup probe exception taxonomy (the probe classifies fully; a source
+failure is never silently downgraded to `health_not_ready`):
+
+```text
+both subscription ACKs accepted        -> PASS/startup_only
+subscription ACK rejected              -> NO_GO/subscription_rejected
+consumer exhausts before readiness     -> NO_GO/transport_not_ready
+consumer/source raises                 -> FAIL/source_failed
+receive timeout without readiness      -> NO_GO/health_not_ready
+```
+
+The probe inspects the consumer task's exception explicitly rather than
+suppressing it; suppressing a consumer exception and then reporting
+`health_not_ready` is forbidden.
 
 Runtime summary outcome taxonomy:
 

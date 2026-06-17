@@ -566,6 +566,23 @@ touch network/credentials/DB/clock and never activate runtime:
   verdict; path admission rejects dangling final-component symlinks and rollback-journal sidecars;
   transport `connect_attempts`/`disconnects` counters are single-owner (lifecycle only); the live
   startup probe returns on subscription ACK without waiting for a market event.
+  Output ownership + fatal lifecycle closure (RTM-7c.5a/5b): admission failures (`invalid_input`,
+  `runtime_lock_exists`) return an in-memory result and write **0** files (no DB, no source factory,
+  no credential/env read, no evidence, no summary, no symlink target) — output is written by the lock
+  owner only. The summary is published **create-new/atomic** (same-dir temp opened
+  `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, write+fsync, hard-link to the create-new destination, no
+  overwrite, no symlink follow) reusing the RTM-7c.4x artifact-file publish pattern; outcomes are
+  `WRITTEN`/`NOT_WRITTEN`/`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN` and anything but `WRITTEN`
+  downgrades to `FAIL/summary_failed` with no summary file. The final evidence record is written and
+  the recorder closed **before** the summary is built/published, so the returned dict equals the
+  persisted `summary.json`. A single outer lifecycle owner runs cleanup (source cancel/close → stack
+  reverse-close → recorder close → summary publish if eligible → lock release) with lock release as
+  the **last bounded cleanup, always attempted** even under a fatal (`MemoryError`, `SystemExit`);
+  fatal identity is preserved (re-raised) and operation fatals outrank cleanup fatals. The live startup
+  probe inspects the consumer task's exception explicitly and classifies fully — ACK accepted → PASS;
+  rejected → `subscription_rejected`; exhaustion before readiness → `transport_not_ready`;
+  consumer/source error → `source_failed`; receive timeout → `health_not_ready` — never downgrading a
+  source error to `health_not_ready`.
   Import-guard boundary: `ops/run_attended_paper_day.py` is the only attended CLI permitted to reach
   the live KIS read-only surface, and only through an exact module allowlist —
   `broker.kis_transport`, `data.kis_ws_auth`, `data.kis_ws_source`. No other `broker`/`data`

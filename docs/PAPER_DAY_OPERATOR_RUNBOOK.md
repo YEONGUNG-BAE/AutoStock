@@ -46,9 +46,14 @@ Startup-only modes:
 - `--live-kis --startup-only`: additionally obtains KIS approval, connects the
   websocket, waits for trade and quote subscription ACKs, closes the source, and
   writes the post-close summary. It must not execute paper decisions or broker
-  calls. The probe returns as soon as both subscription ACKs are observed (or the
-  receive timeout elapses, yielding `health_not_ready`); it does not wait out the
-  full `--duration-seconds` for a market event.
+  calls. The probe returns as soon as both subscription ACKs are observed; it does
+  not wait out the full `--duration-seconds` for a market event. The probe
+  classifies the startup fully: both ACKs accepted -> `PASS/startup_only`; a
+  rejected ACK -> `NO_GO/subscription_rejected`; the stream ending before
+  readiness -> `NO_GO/transport_not_ready`; a consumer/source error ->
+  `FAIL/source_failed`; the receive timeout without readiness ->
+  `NO_GO/health_not_ready`. A source error is never downgraded to
+  `health_not_ready`.
 
 Summary outcome and CLI exit:
 
@@ -64,7 +69,14 @@ The diagnostic runtime rejects output overlap, final symlink components (includi
 dangling symlinks), DB sidecars (`-wal`, `-shm`, `-journal`), existing non-empty
 pilot DB directories without explicit reuse policy, and duplicate runtime locks.
 When a duplicate runtime lock is detected the run is refused as `runtime_lock_exists`
-before any DB is opened or any credential env var is read.
+before any DB is opened or any credential env var is read. Any admission refusal
+(`invalid_input` or `runtime_lock_exists`) returns an in-memory result and writes
+**zero** output files — no evidence, no summary, no symlink target. Output files
+are written by the lock owner only. The summary is published create-new and
+atomically (same-dir temp, fsync, hard-link, no overwrite, no symlink follow); a
+publish failure yields `FAIL/summary_failed` with no summary file left behind, and
+the returned result always equals the persisted `summary.json`. The runtime lock
+is always released as the last bounded cleanup step, including under a fatal.
 
 Immediate stop conditions:
 

@@ -101,6 +101,25 @@
   asyncio `FIRST_COMPLETED` without waiting for a market event. The attended CLI import guard pins an
   exact `broker`/`data` module allowlist (`broker.kis_transport`, `data.kis_ws_auth`,
   `data.kis_ws_source`); any other submodule fails the guard.
+- RTM-7c.5a/5b output-ownership + fatal-lifecycle closure (reproduced each finding before fixing):
+  (P1-A) Admission failures (`invalid_input`, `runtime_lock_exists`) return an in-memory result and
+  write **0** files — no DB open, no source factory, no credential/env read, no evidence, no summary,
+  no symlink target. Output is written by the lock owner only, tracked by explicit ownership locals
+  (`validation_succeeded`/`summary_path_owned`/`evidence_owned`). (P1-B) The final evidence record is
+  written and the recorder closed **before** the immutable summary is built/published, so the returned
+  dict equals the persisted `summary.json` (was: returned FAIL while persisting PASS). (P1-C) A single
+  outer lifecycle owner (`_finalize_run`) runs cleanup in order (source cancel/close → stack
+  reverse-close → recorder close → summary publish if eligible → lock release) with lock release as the
+  **last bounded cleanup, always attempted** even under a fatal; `MemoryError`/`SystemExit` identity is
+  preserved (re-raised) and operation (body) fatals outrank cleanup fatals (`body_fatal` vs
+  `cleanup_fatal`). (P1-D) `_run_live_startup_probe` inspects the consumer task's exception explicitly
+  instead of suppressing it: source/consumer error → `FAIL/source_failed`; rejected ACK →
+  `NO_GO/subscription_rejected`; exhaustion before readiness → `NO_GO/transport_not_ready`; timeout →
+  `NO_GO/health_not_ready` — a source error is never downgraded to `health_not_ready`. Summary
+  publication is create-new/atomic (`_publish_summary_create_new`: same-dir temp `O_EXCL|O_NOFOLLOW`,
+  write+fsync, hard-link, no overwrite/no symlink follow) reusing the RTM-7c.4x artifact-file pattern;
+  outcomes `WRITTEN`/`NOT_WRITTEN`/`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN`, anything but
+  `WRITTEN` → `FAIL/summary_failed` with no summary file. `Path.write_text()` overwrite removed.
 - Still NO-GO: the actual live KIS startup/run and the 1-day pilot have not been performed and
   remain NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures,
   and lifecycle-aware fakes; no commit is made until the Operator authorizes it.

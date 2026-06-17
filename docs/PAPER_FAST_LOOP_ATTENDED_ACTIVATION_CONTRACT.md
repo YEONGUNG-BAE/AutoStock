@@ -12,7 +12,13 @@ paper-only diagnostic path with `activation_authorized=false`,
 `real_order_adapter_constructed=false`, and `paper_only=true` in all summaries.
 It may exercise replay or explicit read-only KIS market-data startup semantics,
 but it does not consume approval, send live orders, or make the 1-day pilot
-ready without a separate Reviewer PASS.
+ready without a separate Reviewer PASS. RTM-7c.5a/5b closes the diagnostic lane's
+output ownership and fatal lifecycle (admission failures write zero files; the
+summary is create-new/atomic; the returned result equals the persisted summary;
+lock release is the always-attempted last bounded cleanup even under a fatal; the
+live startup probe surfaces a source error as `source_failed`, never
+`health_not_ready`) — none of which authorizes activation. The actual live KIS
+run and the 1-day pilot remain **NO-GO** until Reviewer PASS.
 
 Code model: `composition.attended_activation.AttendedActivationStage` (pure enum; no
 side effects).
