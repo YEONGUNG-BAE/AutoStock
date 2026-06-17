@@ -53,8 +53,10 @@ _REASON_INVALID_INPUT = "eligibility_artifact_file_invalid_input"
 _REASON_INVALID_SNAPSHOT = "eligibility_artifact_file_invalid_snapshot"
 _REASON_PARENT_MISSING = "eligibility_artifact_file_parent_missing"
 _REASON_PARENT_NOT_DIRECTORY = "eligibility_artifact_file_parent_not_directory"
+_REASON_PARENT_UNREADABLE = "eligibility_artifact_file_parent_unreadable"
 _REASON_DESTINATION_EXISTS = "eligibility_artifact_file_destination_exists"
 _REASON_DESTINATION_NOT_REGULAR = "eligibility_artifact_file_destination_not_regular"
+_REASON_DESTINATION_UNREADABLE = "eligibility_artifact_file_destination_unreadable"
 _REASON_TEMP_CREATE_FAILED = "eligibility_artifact_file_temp_create_failed"
 _REASON_WRITE_FAILED = "eligibility_artifact_file_write_failed"
 _REASON_PUBLISH_FAILED = "eligibility_artifact_file_publish_failed"
@@ -97,6 +99,14 @@ class EligibilityArtifactFileReadResult:
     outcome: EligibilityArtifactFileReadOutcome
     reason_codes: tuple[str, ...]
     snapshot: VerifiedOperatorApprovalConsumptionEligibilityArtifact | None
+
+
+@dataclass(frozen=True)
+class _RecoveryObservation:
+    confirmed_absent: bool = False
+    confirmed_present: bool = False
+    uncertain: bool = False
+    pending_fatal: BaseException | None = None
 
 
 def write_verified_operator_approval_consumption_eligibility_artifact_create_new(
@@ -194,6 +204,8 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
     parent_sync_confirmed = False
     primary_reasons: list[str] = []
     operation_stage = "temp_create"
+    link_os_error: OSError | None = None
+    pending_recovery_fatal: BaseException | None = None
 
     def _append_primary(reason: str) -> None:
         if reason not in primary_reasons:
@@ -349,65 +361,57 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                 bytes_written=None,
             )
 
-    def _recover_temp_create_side_effect(*, preserve_pending_fatal: bool) -> None:
+    def _recover_temp_create_side_effect() -> _RecoveryObservation:
         nonlocal temp_created
         if temp_path is None or temp_created:
-            return
+            return _RecoveryObservation(confirmed_present=temp_created)
         try:
             os.lstat(temp_path)
         except FileNotFoundError:
-            return
+            return _RecoveryObservation(confirmed_absent=True)
         except OSError as exc:
             if _is_absent_os_error(exc):
-                return
+                return _RecoveryObservation(confirmed_absent=True)
             temp_created = True
-            return
-        except (MemoryError, KeyboardInterrupt, SystemExit):
-            if preserve_pending_fatal:
-                temp_created = True
-                return
-            raise
+            return _RecoveryObservation(uncertain=True)
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            temp_created = True
+            return _RecoveryObservation(uncertain=True, pending_fatal=exc)
         except Exception:
-            if preserve_pending_fatal:
-                temp_created = True
-            return
+            temp_created = True
+            return _RecoveryObservation(uncertain=True)
         temp_created = True
+        return _RecoveryObservation(confirmed_present=True)
 
     def _recover_publish_side_effect(
         temp_stat: os.stat_result | None,
-        *,
-        preserve_pending_fatal: bool,
-    ) -> bool:
+    ) -> _RecoveryObservation:
         nonlocal destination_published, publication_uncertain
         if destination_published or temp_stat is None:
-            return destination_published
+            return _RecoveryObservation(confirmed_present=destination_published)
         try:
             dest_stat = os.lstat(dest)
         except FileNotFoundError:
-            return False
+            return _RecoveryObservation(confirmed_absent=True)
         except OSError as exc:
             if _is_absent_os_error(exc):
-                return False
+                return _RecoveryObservation(confirmed_absent=True)
             publication_uncertain = True
-            return False
-        except (MemoryError, KeyboardInterrupt, SystemExit):
-            if preserve_pending_fatal:
-                publication_uncertain = True
-                return False
-            raise
+            return _RecoveryObservation(uncertain=True)
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            publication_uncertain = True
+            return _RecoveryObservation(uncertain=True, pending_fatal=exc)
         except Exception:
-            if preserve_pending_fatal:
-                publication_uncertain = True
-            else:
-                publication_uncertain = True
-            return False
+            publication_uncertain = True
+            return _RecoveryObservation(uncertain=True)
         if (
             stat.S_ISREG(dest_stat.st_mode)
             and dest_stat.st_dev == temp_stat.st_dev
             and dest_stat.st_ino == temp_stat.st_ino
         ):
             destination_published = True
-        return destination_published
+            return _RecoveryObservation(confirmed_present=True)
+        return _RecoveryObservation()
 
     def _cleanup_lifecycle(*, pending_fatal: BaseException | None) -> BaseException | None:
         fatal_to_raise = pending_fatal
@@ -476,22 +480,23 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                 operation_stage = "link"
                 os.link(temp_path, dest)
             except OSError as exc:
-                recovered = _recover_publish_side_effect(
-                    temp_stat,
-                    preserve_pending_fatal=False,
-                )
-                if recovered:
-                    _append_primary(_REASON_PUBLISH_FAILED)
-                elif publication_uncertain:
-                    _append_primary(_REASON_PUBLISH_FAILED)
-                elif exc.errno in (errno.EEXIST, errno.ENOTDIR):
-                    _append_primary(_REASON_DESTINATION_EXISTS)
-                else:
-                    _append_primary(_REASON_PUBLISH_FAILED)
+                link_os_error = exc
             except (MemoryError, KeyboardInterrupt, SystemExit):
                 raise
             else:
                 destination_published = True
+
+        if temp_created and not primary_reasons and link_os_error is not None:
+            recovery = _recover_publish_side_effect(temp_stat)
+            if recovery.pending_fatal is not None:
+                operation_stage = "link_recovery"
+                pending_recovery_fatal = recovery.pending_fatal
+            elif recovery.confirmed_present or recovery.uncertain:
+                _append_primary(_REASON_PUBLISH_FAILED)
+            elif link_os_error.errno in (errno.EEXIST, errno.ENOTDIR):
+                _append_primary(_REASON_DESTINATION_EXISTS)
+            else:
+                _append_primary(_REASON_PUBLISH_FAILED)
 
         if destination_published:
             try:
@@ -512,28 +517,39 @@ def _write(*, snapshot: object, destination: object) -> EligibilityArtifactFileW
                     _append_primary(_REASON_PUBLISH_FAILED)
     except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
         if operation_stage == "temp_create":
-            _recover_temp_create_side_effect(preserve_pending_fatal=True)
+            recovery = _recover_temp_create_side_effect()
+            pending_fatal = exc
+            if recovery.pending_fatal is not None:
+                pending_fatal = exc
         elif operation_stage == "link":
-            _recover_publish_side_effect(temp_stat, preserve_pending_fatal=True)
-        pending_fatal = _cleanup_lifecycle(pending_fatal=exc)
+            _recover_publish_side_effect(temp_stat)
+            pending_fatal = exc
+        else:
+            pending_fatal = exc
+        pending_fatal = _cleanup_lifecycle(pending_fatal=pending_fatal)
         assert pending_fatal is not None
         raise pending_fatal
     except Exception:
         if operation_stage == "temp_create":
-            _recover_temp_create_side_effect(preserve_pending_fatal=False)
+            recovery = _recover_temp_create_side_effect()
+            if recovery.pending_fatal is not None:
+                pending_fatal = _cleanup_lifecycle(pending_fatal=recovery.pending_fatal)
+                assert pending_fatal is not None
+                raise pending_fatal
             _append_primary(_REASON_TEMP_CREATE_FAILED)
         elif operation_stage == "link":
-            recovered = _recover_publish_side_effect(
-                temp_stat,
-                preserve_pending_fatal=False,
-            )
+            recovery = _recover_publish_side_effect(temp_stat)
+            if recovery.pending_fatal is not None:
+                pending_fatal = _cleanup_lifecycle(pending_fatal=recovery.pending_fatal)
+                assert pending_fatal is not None
+                raise pending_fatal
             _append_primary(_REASON_PUBLISH_FAILED)
         elif destination_published:
             _append_primary(_REASON_PUBLISH_FAILED)
         else:
             _append_primary(_REASON_WRITE_FAILED)
 
-    pending_fatal = _cleanup_lifecycle(pending_fatal=None)
+    pending_fatal = _cleanup_lifecycle(pending_fatal=pending_recovery_fatal)
     if pending_fatal is not None:
         raise pending_fatal
     return _safe_finalize()
@@ -692,8 +708,10 @@ def _validate_existing_parent_directory(parent: Path) -> str | None:
         st = os.lstat(parent)
     except FileNotFoundError:
         return _REASON_PARENT_MISSING
-    except OSError:
-        return _REASON_PARENT_MISSING
+    except OSError as exc:
+        if _is_absent_os_error(exc):
+            return _REASON_PARENT_MISSING
+        return _REASON_PARENT_UNREADABLE
 
     if stat.S_ISLNK(st.st_mode):
         # parent symlink는 directory target이면 허용한다(lstat 기준 symlink 자체).
@@ -711,8 +729,10 @@ def _validate_create_new_destination(dest: Path) -> str | None:
         st = os.lstat(dest)
     except FileNotFoundError:
         return None
-    except OSError:
-        return _REASON_DESTINATION_EXISTS
+    except OSError as exc:
+        if _is_absent_os_error(exc):
+            return None
+        return _REASON_DESTINATION_UNREADABLE
 
     if stat.S_ISLNK(st.st_mode):
         return _REASON_DESTINATION_NOT_REGULAR

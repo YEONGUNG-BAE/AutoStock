@@ -59,8 +59,10 @@ eligibility_artifact_file_invalid_input
 eligibility_artifact_file_invalid_snapshot
 eligibility_artifact_file_parent_missing
 eligibility_artifact_file_parent_not_directory
+eligibility_artifact_file_parent_unreadable
 eligibility_artifact_file_destination_exists
 eligibility_artifact_file_destination_not_regular
+eligibility_artifact_file_destination_unreadable
 eligibility_artifact_file_temp_create_failed
 eligibility_artifact_file_write_failed
 eligibility_artifact_file_publish_failed
@@ -176,6 +178,11 @@ Reader creates/modifies/deletes **nothing** — no sidecar/temp/reconcile files.
 - Absolute and relative paths are both allowed.
 - Final path component: `lstat` without follow — symlinks ⇒ `destination_not_regular` (writer) /
   `not_regular` (reader).
+- Parent preflight treats only `ENOENT` and `ENOTDIR` as missing. `EACCES`, `EIO`, and other
+  non-absent `OSError` values return `parent_unreadable`; publication does not start.
+- Destination preflight treats only `ENOENT` and `ENOTDIR` as available. `EACCES`, `EIO`, and other
+  non-absent `OSError` values return `destination_unreadable`; they are not classified as
+  `destination_exists`, and publication does not start.
 - Parent directory symlinks to an existing directory are **allowed** (documented limitation: no
   claim that every path component is symlink-free).
 - Reader TOCTOU: `lstat → open → fstat_before → bounded read → EOF probe → fstat_after` minimizes
@@ -394,6 +401,31 @@ authentication, or activation:
   `sync_failed` through the writer.
 - **Single recovery owner:** link fatal recovery is run exactly once from the outer fatal boundary;
   destination lstat is attempted at most once and cleanup stays within fixed close/unlink/sync bounds.
+
+## RTM-7c.4x recovery-exception ownership closure
+
+Closes the remaining recovery-exception ownership review items without adding CLI, consumption,
+replay, signing, authentication, KIS/network, broker/order, scheduler, or activation:
+
+- **Structured recovery observation:** temp-create and link recovery return a bounded observation
+  (`confirmed_absent`, `confirmed_present`, `uncertain`, optional `pending_fatal`) instead of
+  throwing directly through helper boundaries. Recovery fatal exceptions are recorded for the
+  lifecycle owner; the cleanup coordinator still runs once before any fatal is re-raised.
+- **Temp ordinary recovery uncertainty:** ordinary non-`OSError` recovery exceptions do not prove
+  absence. If temp side effect cannot be confirmed absent, bounded temp unlink is attempted; unlink
+  success or `ENOENT` completes cleanup, and repeated unlink failure returns
+  `temp_cleanup_failed`. Raw path, errno, and exception text remain absent from reason codes.
+- **Recovery fatal precedence:** fatal precedence is operation fatal > recovery fatal > cleanup
+  fatal, preserving the first fatal object in that order. Cleanup close/unlink/parent-sync still run
+  through independent fatal boundaries.
+- **Link recovery single observation:** `os.link` `OSError` and direct link fatal paths have one
+  central recovery owner. Destination recovery `lstat` is attempted at most once; temp close is
+  attempted at most once; temp unlink is bounded to two attempts; parent sync is attempted at most
+  once only for published or uncertain publication state.
+- **Preflight errno taxonomy:** parent `EACCES`/`EIO`/other non-absent `OSError` maps to
+  `parent_unreadable`; destination `EACCES`/`EIO`/other non-absent `OSError` maps to
+  `destination_unreadable`. These preflight failures call no encode/write/open/link publication
+  path beyond the already-completed canonical encode step.
 
 **Still OPEN (unchanged posture):** file-path CLI, automatic path selection, actual approval
 consumption, consumed marker, replay/nonce/idempotency, signing/HMAC, Operator identity

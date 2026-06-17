@@ -529,7 +529,11 @@ touch network/credentials/DB/clock and never activate runtime:
   Side-effecting temp-create/link helper exceptions are recovered by post-condition checks, including
   `EEXIST` after a successful hard link (matching dev/ino ⇒ `PUBLISHED_INCOMPLETE` /
   `publish_failed`, not `destination_exists`) and non-absent recovery failures
-  (`PermissionError`/`EIO`/ordinary exception ⇒ `PUBLICATION_UNCERTAIN`). Reader:
+  (`PermissionError`/`EIO`/ordinary exception ⇒ `PUBLICATION_UNCERTAIN`). Recovery observations are
+  owned by the writer lifecycle rather than thrown through helper boundaries: operation fatal >
+  recovery fatal > cleanup fatal, with one recovery `lstat` for link `OSError`/fatal paths. Parent
+  preflight non-absent `OSError` returns `parent_unreadable`; destination preflight non-absent
+  `OSError` returns `destination_unreadable`; these do not start temp publication. Reader:
   `lstat`/`open`/`fstat` identity + bounded read + 1-byte EOF probe + post-read `fstat` → close
   confirmed → persistence decoder exactly once, with read fatal precedence over close exceptions.
   Read/decode VALID = schema·semantic·hash consistency only — not authenticity, consumption,

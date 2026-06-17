@@ -168,6 +168,34 @@ def test_write_parent_not_directory(tmp_path: Path) -> None:
     assert res.reason_codes == ("eligibility_artifact_file_parent_not_directory",)
 
 
+@pytest.mark.parametrize("raised", [PermissionError(errno.EACCES, "SECRET_denied"), OSError(errno.EIO, "SECRET_eio")])
+def test_write_parent_unreadable_is_not_classified_missing(
+    raised: OSError, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    calls: list[str] = []
+    real_lstat = os.lstat
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == tmp_path:
+            raise raised
+        return real_lstat(path)
+
+    def _poison(*_args: object, **_kwargs: object) -> object:
+        calls.append("publication")
+        raise AssertionError("publication should not start after parent preflight failure")
+
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _poison)
+    monkeypatch.setattr(file_mod.os, "link", _poison)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_parent_unreadable",)
+    assert calls == []
+    assert not dest.exists()
+
+
 def test_write_destination_exists_regular_file(tmp_path: Path) -> None:
     dest = tmp_path / "artifact.json"
     dest.write_bytes(b"existing")
@@ -175,6 +203,33 @@ def test_write_destination_exists_regular_file(tmp_path: Path) -> None:
     res = write_file(snapshot=_valid_snapshot(), destination=dest)
     assert res.reason_codes == ("eligibility_artifact_file_destination_exists",)
     assert dest.read_bytes() == before
+
+
+@pytest.mark.parametrize("raised", [PermissionError(errno.EACCES, "SECRET_denied"), OSError(errno.EIO, "SECRET_eio")])
+def test_write_destination_unreadable_is_not_classified_exists(
+    raised: OSError, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    calls: list[str] = []
+    real_lstat = os.lstat
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if Path(path) == dest:
+            raise raised
+        return real_lstat(path)
+
+    def _poison(*_args: object, **_kwargs: object) -> object:
+        calls.append("publication")
+        raise AssertionError("publication should not start after destination preflight failure")
+
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _poison)
+    monkeypatch.setattr(file_mod.os, "link", _poison)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == ("eligibility_artifact_file_destination_unreadable",)
+    assert calls == []
 
 
 def test_write_destination_is_directory(tmp_path: Path) -> None:
@@ -1437,6 +1492,184 @@ def test_write_link_recovery_fatal_preserves_original_fatal_once(
     assert calls["dest_lstat"] == 1
 
 
+@pytest.mark.parametrize(
+    ("recovery_mode", "expected_outcome", "expected_reason", "expected_sync"),
+    [
+        (
+            "matching_destination",
+            EligibilityArtifactFileWriteOutcome.PUBLISHED_INCOMPLETE,
+            "eligibility_artifact_file_publish_failed",
+            1,
+        ),
+        (
+            "enoent",
+            EligibilityArtifactFileWriteOutcome.NOT_WRITTEN,
+            "eligibility_artifact_file_publish_failed",
+            0,
+        ),
+        (
+            "eio",
+            EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN,
+            "eligibility_artifact_file_publish_failed",
+            1,
+        ),
+        (
+            "runtime",
+            EligibilityArtifactFileWriteOutcome.PUBLICATION_UNCERTAIN,
+            "eligibility_artifact_file_publish_failed",
+            1,
+        ),
+    ],
+)
+def test_write_link_oserror_recovery_single_observation_matrix(
+    recovery_mode: str,
+    expected_outcome: EligibilityArtifactFileWriteOutcome,
+    expected_reason: str,
+    expected_sync: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_link = os.link
+    real_lstat = os.lstat
+    real_close = os.close
+    real_unlink = os.unlink
+    temp_fds: list[int] = []
+    calls = {"dest_lstat": 0, "close": 0, "unlink": 0, "sync": 0}
+    real_open_temp = file_mod._open_exclusive_temp
+    recovering = {"active": False}
+
+    def _open(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        temp_fds.append(fd)
+        return fd
+
+    def _link(src: str | bytes, dst: str | bytes) -> None:
+        if recovery_mode == "matching_destination":
+            real_link(src, dst)
+        recovering["active"] = True
+        raise OSError(errno.EIO, "SECRET_link")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if recovering["active"] and Path(path) == dest:
+            recovering["active"] = False
+            calls["dest_lstat"] += 1
+            if recovery_mode == "enoent":
+                raise FileNotFoundError()
+            if recovery_mode == "eio":
+                raise OSError(errno.EIO, "SECRET_eio")
+            if recovery_mode == "runtime":
+                raise RuntimeError("SECRET_runtime")
+        return real_lstat(path)
+
+    def _close(fd: int) -> None:
+        if temp_fds and fd == temp_fds[0]:
+            calls["close"] += 1
+        real_close(fd)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
+    monkeypatch.setattr(file_mod.os, "link", _link)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda _directory: calls.__setitem__("sync", calls["sync"] + 1) or True)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is expected_outcome
+    assert res.reason_codes == (expected_reason,)
+    assert calls == {"dest_lstat": 1, "close": 1, "unlink": 1, "sync": expected_sync}
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+def test_write_link_oserror_recovery_fatal_single_observation_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+    real_close = os.close
+    real_unlink = os.unlink
+    real_open_temp = file_mod._open_exclusive_temp
+    temp_fds: list[int] = []
+    calls = {"dest_lstat": 0, "close": 0, "unlink": 0, "sync": 0}
+    recovering = {"active": False}
+
+    def _open(path: Path) -> int | None:
+        fd = real_open_temp(path)
+        assert fd is not None
+        temp_fds.append(fd)
+        return fd
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if recovering["active"] and Path(path) == dest:
+            recovering["active"] = False
+            calls["dest_lstat"] += 1
+            raise MemoryError()
+        return real_lstat(path)
+
+    def _close(fd: int) -> None:
+        if temp_fds and fd == temp_fds[0]:
+            calls["close"] += 1
+        real_close(fd)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _open)
+    def _link(_src: str | bytes, _dst: str | bytes) -> None:
+        recovering["active"] = True
+        raise OSError(errno.EIO, "SECRET_link")
+
+    monkeypatch.setattr(file_mod.os, "link", _link)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "close", _close)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda _directory: calls.__setitem__("sync", calls["sync"] + 1) or True)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert calls == {"dest_lstat": 1, "close": 1, "unlink": 1, "sync": 1}
+
+
+@pytest.mark.parametrize("recovery_mode", ["enoent", "fatal"])
+def test_write_link_direct_fatal_recovery_single_observation(
+    recovery_mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_lstat = os.lstat
+    calls = {"dest_lstat": 0}
+    recovering = {"active": False}
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if recovering["active"] and Path(path) == dest:
+            recovering["active"] = False
+            calls["dest_lstat"] += 1
+            if recovery_mode == "fatal":
+                raise KeyboardInterrupt()
+            raise FileNotFoundError()
+        return real_lstat(path)
+
+    def _link(_src: str | bytes, _dst: str | bytes) -> None:
+        recovering["active"] = True
+        raise MemoryError()
+
+    monkeypatch.setattr(file_mod.os, "link", _link)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert calls["dest_lstat"] == 1
+
+
 def test_write_link_side_effect_recovery_eio_is_publication_uncertain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1576,6 +1809,104 @@ def test_write_temp_create_recovery_eacces_unlink_enoent_cleanup_complete(
 
     assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
     assert res.reason_codes == ("eligibility_artifact_file_temp_create_failed",)
+
+
+@pytest.mark.parametrize(
+    ("unlink_mode", "expected_reasons", "expected_unlink_calls"),
+    [
+        ("success", ("eligibility_artifact_file_temp_create_failed",), 1),
+        ("enoent", ("eligibility_artifact_file_temp_create_failed",), 1),
+        (
+            "failure",
+            (
+                "eligibility_artifact_file_temp_create_failed",
+                "eligibility_artifact_file_temp_cleanup_failed",
+            ),
+            2,
+        ),
+    ],
+)
+def test_write_temp_create_recovery_runtime_error_attempts_bounded_cleanup(
+    unlink_mode: str,
+    expected_reasons: tuple[str, ...],
+    expected_unlink_calls: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    real_lstat = os.lstat
+    calls = {"unlink": 0}
+
+    def _create_then_raise(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        real_close(fd)
+        raise RuntimeError("SECRET_temp_create")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if _is_temp_path(path, tmp_path):
+            raise RuntimeError("SECRET_recovery")
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+            if unlink_mode == "enoent":
+                raise FileNotFoundError()
+            if unlink_mode == "failure":
+                raise OSError("SECRET_unlink")
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _create_then_raise)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    res = write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert res.outcome is EligibilityArtifactFileWriteOutcome.NOT_WRITTEN
+    assert res.reason_codes == expected_reasons
+    assert calls["unlink"] == expected_unlink_calls
+    assert "SECRET_" not in json.dumps(list(res.reason_codes))
+
+
+def test_write_temp_create_recovery_fatal_without_operation_fatal_runs_cleanup_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "artifact.json"
+    real_open = file_mod._open_exclusive_temp
+    real_close = os.close
+    real_unlink = os.unlink
+    real_lstat = os.lstat
+    calls = {"unlink": 0, "sync": 0}
+
+    def _create_then_raise(path: Path) -> int | None:
+        fd = real_open(path)
+        assert fd is not None
+        real_close(fd)
+        raise RuntimeError("SECRET_temp_create")
+
+    def _lstat(path: str | bytes) -> os.stat_result:
+        if _is_temp_path(path, tmp_path):
+            raise MemoryError()
+        return real_lstat(path)
+
+    def _unlink(path: str | bytes) -> None:
+        if _is_temp_path(path, tmp_path):
+            calls["unlink"] += 1
+        real_unlink(path)
+
+    monkeypatch.setattr(file_mod, "_open_exclusive_temp", _create_then_raise)
+    monkeypatch.setattr(file_mod.os, "lstat", _lstat)
+    monkeypatch.setattr(file_mod.os, "unlink", _unlink)
+    monkeypatch.setattr(file_mod, "_fsync_directory", lambda _directory: calls.__setitem__("sync", calls["sync"] + 1) or True)
+
+    with pytest.raises(MemoryError):
+        write_file(snapshot=_valid_snapshot(), destination=dest)
+
+    assert calls == {"unlink": 1, "sync": 0}
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(file_mod._TEMP_PREFIX)] == []
 
 
 def test_write_call_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

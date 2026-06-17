@@ -40,6 +40,17 @@
   recovery instead of false `NOT_WRITTEN` or confirmed `PUBLISHED_INCOMPLETE`. Temp-create recovery
   uncertainty attempts bounded cleanup and reflects cleanup failure. Reader read-phase fatal
   outranks close failure/fatal, and directory fsync fatal outranks directory close failure/fatal.
+- Recovery helper exceptions are represented as structured observations owned by the writer
+  lifecycle. Ordinary temp-create recovery exceptions do not prove absence; bounded unlink is still
+  attempted, with unlink success or `ENOENT` completing cleanup and repeated unlink failure recorded
+  as `eligibility_artifact_file_temp_cleanup_failed`. For fatal precedence, operation fatal outranks
+  recovery fatal, which outranks cleanup fatal, while cleanup steps still run through the central
+  coordinator. Link `OSError` and link fatal paths perform destination recovery at most once and keep
+  close/unlink/sync within fixed bounds.
+- Parent preflight non-absent `OSError` values (`EACCES`, `EIO`, other) are
+  `eligibility_artifact_file_parent_unreadable`, not missing. Destination preflight non-absent
+  `OSError` values are `eligibility_artifact_file_destination_unreadable`, not existing. These
+  preflight failures start no temp publication path and expose no raw errno/path/exception text.
 - Reader close failure returns `INVALID` / `eligibility_artifact_file_read_failed` before decoder
   execution; directory fsync is confirmed only when both fsync and directory fd close succeed.
 - Runtime activation posture remains NO-GO; read/decode `VALID` remains consistency-only, not

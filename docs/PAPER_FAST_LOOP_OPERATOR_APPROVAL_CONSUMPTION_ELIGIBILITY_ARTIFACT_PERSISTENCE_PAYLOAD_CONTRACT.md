@@ -195,5 +195,7 @@ encoder failures as `INVALID`, put temp-name generation inside the lifecycle bou
 only after one-shot temp fd close, bounded temp unlink, and published/uncertain parent-sync attempts
 complete, recover temp-create/link side effects by post-condition checks, represent unconfirmed
 publication as `PUBLICATION_UNCERTAIN`, run fatal cleanup through a single per-step-isolated
-coordinator, and require reader/directory fd close truth with fatal precedence. Read/decode `VALID`
-remains consistency-only, not authenticity/provenance/consumption/activation.
+coordinator, return structured recovery observations instead of leaking recovery exceptions past the
+lifecycle owner, classify parent/destination non-absent preflight `OSError` as unreadable rather than
+missing/existing, and require reader/directory fd close truth with fatal precedence. Read/decode
+`VALID` remains consistency-only, not authenticity/provenance/consumption/activation.
