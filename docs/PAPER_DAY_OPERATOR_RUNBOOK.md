@@ -84,9 +84,12 @@ before any DB is opened or any credential env var is read. Any admission refusal
 are written by the lock owner only. The summary is published create-new and
 atomically (same-dir temp, fsync, hard-link, no overwrite, no symlink follow); a
 publish failure yields `FAIL/summary_failed`/`summary_published_incomplete`/
-`summary_publication_uncertain` as appropriate; operation/cleanup fatal writes no
-summary file. No publisher exception can skip lock release — it runs exactly once
-on every path. The persisted `summary.json` holds only the mechanical summary;
+`summary_publication_uncertain` as appropriate; operation/cleanup fatal before
+publish writes no summary file. `_publish_summary_create_new` returns
+`SummaryPublishResult` (outcome + optional `fatal`); fatal propagation does not
+erase confirmed publication state — link landed + fatal cleanup/sync ⇒
+`PUBLISHED_INCOMPLETE` or `PUBLICATION_UNCERTAIN`, never a false `NOT_WRITTEN`.
+Lock release runs exactly once on every path. The persisted `summary.json` holds only the mechanical summary;
 the returned envelope adds `persisted_summary` + cleanup/publication/lock keys
 (never written to disk), and `persisted_summary` byte-equals the file **only for
 `WRITTEN`** (else `null`). The runtime lock is always released as the last bounded

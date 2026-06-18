@@ -116,41 +116,43 @@ block reason while the persisted mechanical file is left untouched.
 
 **Cleanup or operation fatal blocks PASS summary publish (Choice A):** when an
 operation fatal (`MemoryError`, `KeyboardInterrupt`, `SystemExit`) or cleanup
-fatal is pending, no summary file is written; lock release is still attempted;
-the original fatal is re-raised after finalize.
+fatal is pending **before** the publish step, no summary file is written; lock
+release is still attempted; the original fatal is re-raised after finalize.
+When publish runs, `SummaryPublishResult` carries both publication outcome and
+optional `fatal`; fatal propagation does **not** erase a confirmed publication
+state — link landed + fatal cleanup/sync ⇒ `PUBLISHED_INCOMPLETE` or
+`PUBLICATION_UNCERTAIN`, never a false `NOT_WRITTEN`.
 
-Publication exception boundary: the publish step is wrapped so that **no
-publisher exception can skip the lock release**. An ordinary exception escaping
-the publisher (including its own `parent.mkdir`/serialization/directory-sync
-paths) becomes a stable `NOT_WRITTEN`/`summary_publish_failed` result and marks
-cleanup `INCOMPLETE`; a fatal is captured as a pending cleanup fatal
-(`NOT_WRITTEN`/`operation_fatal`). Either way control falls through to the lock
-release, which runs **exactly once**. The parent-directory fsync is a structured
+Publication exception boundary: `_publish_summary_create_new` always returns a
+structured `SummaryPublishResult` (never raises fatals directly). `_finalize_run`
+reads `publish.outcome`, `publish.reason_codes`, and merges `publish.fatal` into
+the cleanup fatal chain before lock release. **No publisher path may skip lock
+release** — it runs **exactly once**. The parent-directory fsync is a structured
 `DirectorySyncResult` (open/fsync/close never let an `OSError` escape; a fatal is
-carried in the result and re-raised by the caller), so a directory-sync failure
-can no longer bypass lock release the way a raw `os.close` in a `finally` once
-did.
+carried in the result, not raised), so a directory-sync failure can no longer
+bypass lock release the way a raw `os.close` in a `finally` once did.
 
-Publisher-internal state preservation: the `NOT_WRITTEN` outer boundary above
-applies only when the *whole* publish step never confirmed a destination. **Inside**
-the publisher, once the hard link has landed (`destination_published`), no later
-non-`OSError` exception may collapse the result back to `NOT_WRITTEN`. An ordinary
-exception that escapes an inner step keeps whatever state was already established:
-if the link landed, `_finalize()` recovers it as `PUBLISHED_INCOMPLETE`; if it had
-not, the result is `PUBLICATION_UNCERTAIN` (never a false `NOT_WRITTEN`). Likewise
-a post-link verification `lstat` that fails (`EIO`/`EACCES`) yields
-`PUBLICATION_UNCERTAIN`, not `NOT_WRITTEN`. Publisher-internal fatal precedence is
-explicit: an operation (body) fatal — including a directory-sync fatal — outranks a
-cleanup (temp close/unlink) fatal, and **neither** may overwrite a confirmed
-publication state; the structured `_finalize()` result owns the outcome and the
-chosen fatal is re-raised only after finalize.
+Publisher-internal state preservation: `NOT_WRITTEN` is allowed **only** when
+destination absence/no-publication is confirmed. **Inside** the publisher, once the
+hard link has landed (`destination_published`), no later non-`OSError` exception
+or fatal may collapse the result back to `NOT_WRITTEN`. An ordinary exception
+that escapes an inner step keeps whatever state was already established: if the
+link landed, `_finalize()` recovers it as `PUBLISHED_INCOMPLETE`; if it had not,
+the result is `PUBLICATION_UNCERTAIN` (never a false `NOT_WRITTEN`). Likewise a
+post-link verification `lstat` that fails (`EIO`/`EACCES`) yields
+`PUBLICATION_UNCERTAIN`, not `NOT_WRITTEN`. Publisher-internal fatal precedence
+is explicit: an operation (body) fatal — including a directory-sync fatal —
+outranks a cleanup (temp close/unlink) fatal, and **neither** may overwrite a
+confirmed publication state; the structured result owns the outcome and the
+chosen fatal is re-raised only after lock release.
 
 Fatal boundary consistency: every operation boundary distinguishes fatals from
-ordinary failures with `except (MemoryError, KeyboardInterrupt, SystemExit):
-raise` ahead of `except Exception:`. This holds uniformly at `recorder.open`,
-the diagnostic-stack builder, the source factory (probe path), the summary
-publisher's `parent.mkdir`, and the directory-sync helper — a `MemoryError` is
-never absorbed as an ordinary failure at any of them.
+ordinary failures. Publisher fatals are carried in `SummaryPublishResult.fatal`
+(not raised by `_publish_summary_create_new`); other boundaries use
+`except (MemoryError, KeyboardInterrupt, SystemExit): raise` ahead of
+`except Exception:` at `recorder.open`, the diagnostic-stack builder, and the
+source factory (probe path) — a `MemoryError` is never absorbed as an ordinary
+failure at any of them.
 
 Evidence/summary consistency: the final evidence record is written and the
 evidence recorder is closed **before** the summary is built and published.

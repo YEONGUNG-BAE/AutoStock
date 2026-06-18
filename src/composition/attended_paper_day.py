@@ -160,6 +160,9 @@ class PartialCleanupResult:
 class SummaryPublishResult:
     outcome: str
     reason_codes: tuple[str, ...] = ()
+    # Publisher-internal operation/cleanup fatal (operation > cleanup precedence).
+    # Carried in the structured result so publication state is not erased by propagation.
+    fatal: BaseException | None = None
 
 
 class AttendedPaperDayInputError(Exception):
@@ -1358,58 +1361,40 @@ def _finalize_run(
     if summary_path_owned:
         publish_blocked = cleanup_fatal is not None or pending_fatal is not None
         if not publish_blocked:
-            # Independent publication lifecycle boundary: any ordinary exception
-            # becomes a stable publication result; a fatal is preserved as a pending
-            # cleanup fatal. Either way control falls through to the lock release —
-            # no publisher exception may skip it.
+            # Independent publication lifecycle boundary: the publisher returns a
+            # structured SummaryPublishResult (outcome + optional fatal). Fatal
+            # propagation does not erase confirmed publication state. Control always
+            # falls through to lock release — no publisher exception may skip it.
             persisted_candidate = summary
-            publish: SummaryPublishResult | None = None
-            try:
-                publish = _publish_summary_create_new(
-                    config.summary_out,
-                    json.dumps(persisted_candidate, sort_keys=True, indent=2),
+            publish = _publish_summary_create_new(
+                config.summary_out,
+                json.dumps(persisted_candidate, sort_keys=True, indent=2),
+            )
+            publication_outcome = publish.outcome
+            publication_reason_codes = publish.reason_codes
+            if publish.fatal is not None:
+                cleanup_fatal = cleanup_fatal or publish.fatal
+            if publish.outcome == SummaryPublicationOutcome.WRITTEN:
+                persisted_summary = persisted_candidate
+            elif publish.outcome == SummaryPublicationOutcome.PUBLISHED_INCOMPLETE:
+                summary = _build_summary(
+                    config=config,
+                    run_id=run_id,
+                    counters=counters,
+                    nonterminal_journal=nonterminal_journal,
+                    stop_reason="summary_published_incomplete",
+                    outcome=RuntimeOutcome.FAIL,
                 )
-            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
-                cleanup_fatal = cleanup_fatal or exc
-                publication_outcome = SummaryPublicationOutcome.NOT_WRITTEN
-                publication_reason_codes = ("operation_fatal",)
-            except Exception:
-                publication_outcome = SummaryPublicationOutcome.NOT_WRITTEN
-                publication_reason_codes = (_REASON_PUBLISH_FAILED,)
-                ordinary_cleanup_failure = True
-            if publish is not None:
-                publication_outcome = publish.outcome
-                publication_reason_codes = publish.reason_codes
-                if publish.outcome == SummaryPublicationOutcome.WRITTEN:
-                    persisted_summary = persisted_candidate
-                elif publish.outcome == SummaryPublicationOutcome.PUBLISHED_INCOMPLETE:
-                    summary = _build_summary(
-                        config=config,
-                        run_id=run_id,
-                        counters=counters,
-                        nonterminal_journal=nonterminal_journal,
-                        stop_reason="summary_published_incomplete",
-                        outcome=RuntimeOutcome.FAIL,
-                    )
-                elif publish.outcome == SummaryPublicationOutcome.PUBLICATION_UNCERTAIN:
-                    summary = _build_summary(
-                        config=config,
-                        run_id=run_id,
-                        counters=counters,
-                        nonterminal_journal=nonterminal_journal,
-                        stop_reason="summary_publication_uncertain",
-                        outcome=RuntimeOutcome.FAIL,
-                    )
-                else:
-                    summary = _build_summary(
-                        config=config,
-                        run_id=run_id,
-                        counters=counters,
-                        nonterminal_journal=nonterminal_journal,
-                        stop_reason="summary_failed",
-                        outcome=RuntimeOutcome.FAIL,
-                    )
-            elif publication_outcome == SummaryPublicationOutcome.NOT_WRITTEN:
+            elif publish.outcome == SummaryPublicationOutcome.PUBLICATION_UNCERTAIN:
+                summary = _build_summary(
+                    config=config,
+                    run_id=run_id,
+                    counters=counters,
+                    nonterminal_journal=nonterminal_journal,
+                    stop_reason="summary_publication_uncertain",
+                    outcome=RuntimeOutcome.FAIL,
+                )
+            else:
                 summary = _build_summary(
                     config=config,
                     run_id=run_id,
@@ -1554,8 +1539,12 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
     parent = path.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
-    except (MemoryError, KeyboardInterrupt, SystemExit):
-        raise
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        return SummaryPublishResult(
+            outcome=SummaryPublicationOutcome.NOT_WRITTEN,
+            reason_codes=(_REASON_WRITE_FAILED,),
+            fatal=exc,
+        )
     except Exception:
         return SummaryPublishResult(
             outcome=SummaryPublicationOutcome.NOT_WRITTEN,
@@ -1579,7 +1568,7 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
     operation_fatal: BaseException | None = None
     cleanup_fatal: BaseException | None = None
 
-    def _finalize() -> SummaryPublishResult:
+    def _finalize(*, selected_fatal: BaseException | None) -> SummaryPublishResult:
         if destination_published:
             reason_codes = _build_publish_reason_codes(
                 primary_reasons=primary_reasons,
@@ -1599,10 +1588,12 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                 return SummaryPublishResult(
                     outcome=SummaryPublicationOutcome.WRITTEN,
                     reason_codes=(),
+                    fatal=selected_fatal,
                 )
             return SummaryPublishResult(
                 outcome=SummaryPublicationOutcome.PUBLISHED_INCOMPLETE,
                 reason_codes=reason_codes,
+                fatal=selected_fatal,
             )
         if publication_uncertain:
             return SummaryPublishResult(
@@ -1616,6 +1607,7 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                     destination_published=False,
                     publication_uncertain=True,
                 ),
+                fatal=selected_fatal,
             )
         return SummaryPublishResult(
             outcome=SummaryPublicationOutcome.NOT_WRITTEN,
@@ -1628,6 +1620,7 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                 destination_published=False,
                 publication_uncertain=False,
             ),
+            fatal=selected_fatal,
         )
 
     try:
@@ -1738,12 +1731,11 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                 cleanup_fatal = cleanup_fatal or exc
             except Exception:
                 temp_cleanup_complete = False
-    # Operation fatal outranks cleanup fatal; either is re-raised so the outer
-    # finalizer owns fatal precedence and the lock release still runs.
-    fatal = operation_fatal if operation_fatal is not None else cleanup_fatal
-    if fatal is not None:
-        raise fatal
-    return _finalize()
+    # Operation fatal outranks cleanup fatal. Neither may collapse a confirmed
+    # publication state — the structured result carries both outcome and fatal for
+    # the outer finalizer (lock release still runs before re-raise).
+    selected_fatal = operation_fatal if operation_fatal is not None else cleanup_fatal
+    return _finalize(selected_fatal=selected_fatal)
 
 
 def _build_publish_reason_codes(

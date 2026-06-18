@@ -83,8 +83,12 @@ the mechanical summary; the returned **envelope** is a superset adding
 `persisted_summary` byte-equals the on-disk file **only when
 `summary_publication_outcome == WRITTEN`** (else `null`); the persisted file may
 read `PASS` while the envelope `outcome` is downgraded. Operation/cleanup fatal
-blocks PASS summary publish (Choice A: no summary file). An evidence write failure
-yields `FAIL/evidence_failed` and no PASS summary file.
+before publish blocks PASS summary publish (Choice A: no summary file). When
+publish runs, `SummaryPublishResult` carries both outcome and optional `fatal`;
+fatal propagation does not erase confirmed publication state — link landed +
+fatal cleanup/sync ⇒ `PUBLISHED_INCOMPLETE` or `PUBLICATION_UNCERTAIN`, never a
+false `NOT_WRITTEN`. Lock release still runs exactly once. An evidence write
+failure yields `FAIL/evidence_failed` and no PASS summary file.
 
 Failure-stage principle: after a failed attended pilot, inspect the first failed
 stage in evidence and run only the corresponding partial verification. Do not

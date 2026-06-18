@@ -603,14 +603,18 @@ touch network/credentials/DB/clock and never activate runtime:
   `release` is identity-safe (a replaced/foreign inode is never unlinked → `runtime_lock_identity_mismatch`,
   `runtime_lock_identity_matched`), observes fd-close independently of unlink, and captures an fd-close
   **fatal** into the result (`fatal = fatal or exc`) while still attempting the unlink — the outer owner
-  re-raises it only after higher-precedence fatals, never replacing them. Every publisher exception is
-  wrapped so the lock release runs **exactly once**: an ordinary exception at the *outer* boundary →
-  `NOT_WRITTEN` + `cleanup_outcome == INCOMPLETE`, but a non-`OSError` *inside* the publisher after the link
-  landed never collapses to `NOT_WRITTEN` — `_finalize()` recovers it as `PUBLISHED_INCOMPLETE` (link
-  landed) or `PUBLICATION_UNCERTAIN` (not), and publisher operation fatal > cleanup fatal with neither
-  overwriting a confirmed publication. `_fsync_directory` is a structured
-  `DirectorySyncResult` that never lets `OSError` escape. `MemoryError` is fatal at every boundary
-  (`recorder.open`, stack builder, source factory, publisher `parent.mkdir`, directory-sync).
+  re-raises it only after higher-precedence fatals, never replacing them.
+  `_publish_summary_create_new` always returns `SummaryPublishResult` (outcome +
+  optional `fatal`; never raises fatals directly). `_finalize_run` merges
+  `publish.fatal` into the cleanup chain; lock release runs **exactly once**. A
+  non-`OSError` *inside* the publisher after the link landed never collapses to
+  `NOT_WRITTEN` — `_finalize()` recovers it as `PUBLISHED_INCOMPLETE` (link
+  landed) or `PUBLICATION_UNCERTAIN` (not). Link landed + fatal cleanup/sync ⇒
+  `PUBLISHED_INCOMPLETE` or `PUBLICATION_UNCERTAIN`, never a false `NOT_WRITTEN`;
+  publisher operation fatal > cleanup fatal with neither overwriting a confirmed
+  publication state. `_fsync_directory` is a structured `DirectorySyncResult` that
+  never lets `OSError` escape. `MemoryError` is fatal at every non-publisher
+  boundary (`recorder.open`, stack builder, source factory).
   `DiagnosticStack.close` closes in reverse construction order (journal → ledger → active_store). The
   startup-probe boundedness is **verdict-level (Option B)**: the cleanup await is bounded by
   `PROBE_CLEANUP_TIMEOUT_SECONDS` → `source_close_timeout`, so a cancel-ignoring consumer cannot hang the

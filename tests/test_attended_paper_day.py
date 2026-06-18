@@ -1333,14 +1333,17 @@ def _release_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
 def test_publisher_ordinary_exception_releases_lock_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # An ordinary exception escaping the publisher must become a stable NOT_WRITTEN
-    # result, mark cleanup INCOMPLETE, and still release the lock exactly once.
+    # A pre-link ordinary failure (no destination) becomes NOT_WRITTEN and still
+    # releases the lock exactly once.
     calls = _release_spy(monkeypatch)
+    real_open = os.open
 
-    def boom_publish(path: Any, text: Any) -> Any:
-        raise RuntimeError("publisher exploded")
+    def boom_open(path: Any, *a: Any, **k: Any) -> int:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise OSError(errno.ENOSPC, "no space for summary temp")
+        return real_open(path, *a, **k)
 
-    monkeypatch.setattr(apd, "_publish_summary_create_new", boom_publish)
+    monkeypatch.setattr(os, "open", boom_open)
     cfg = _config(tmp_path)
     summary = run_attended_paper_day(
         config=cfg,
@@ -1352,26 +1355,85 @@ def test_publisher_ordinary_exception_releases_lock_exactly_once(
     assert summary["outcome"] == "FAIL"
     assert summary["stop_reason"] == "summary_failed"
     assert summary["summary_publication_outcome"] == "NOT_WRITTEN"
-    assert summary["summary_publication_reason_codes"] == ["summary_publish_failed"]
-    assert summary["cleanup_outcome"] == "INCOMPLETE"
+    assert "summary_write_failed" in summary["summary_publication_reason_codes"]
+    assert summary["cleanup_outcome"] == "CLEAN"
     assert summary["persisted_summary"] is None
-    assert calls["n"] == 1  # lock released exactly once despite publisher exception
+    assert calls["n"] == 1
     assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_publish_directory_sync_fatal_after_link_full_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # RTM-7c.5a/5b repro: link lands, parent sync returns operation fatal — the
+    # destination exists, publication state must be PUBLISHED_INCOMPLETE (never
+    # NOT_WRITTEN), lock release runs once, then the fatal re-raises.
+    calls = _release_spy(monkeypatch)
+    captured: dict[str, apd.SummaryPublishResult] = {}
+    real_publish = apd._publish_summary_create_new
+
+    def spy_publish(path: Any, text: Any) -> apd.SummaryPublishResult:
+        result = real_publish(path, text)
+        captured["result"] = result
+        return result
+
+    sync_fatal = MemoryError("sync fatal")
+    monkeypatch.setattr(apd, "_publish_summary_create_new", spy_publish)
+    monkeypatch.setattr(
+        apd,
+        "_fsync_directory",
+        lambda _d: apd.DirectorySyncResult(
+            opened=True,
+            synced=False,
+            closed=True,
+            reason_code=apd._REASON_SYNC_FAILED,
+            fatal=sync_fatal,
+        ),
+    )
+    cfg = _config(tmp_path)
+    with pytest.raises(MemoryError) as ei:
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="sync-fatal-after-link",
+            clock=_at,
+        )
+
+    assert ei.value is sync_fatal
+    assert calls["n"] == 1
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+    assert cfg.summary_out.exists()
+    assert captured["result"].outcome == apd.SummaryPublicationOutcome.PUBLISHED_INCOMPLETE
+    assert captured["result"].fatal is sync_fatal
+    assert captured["result"].outcome != apd.SummaryPublicationOutcome.NOT_WRITTEN
 
 
 def test_publisher_fatal_exception_releases_lock_exactly_once_and_reraises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A fatal escaping the publisher is preserved as a cleanup fatal (re-raised) but
-    # the lock is still released exactly once before the fatal propagates.
+    # A pre-link operation fatal (no destination) returns NOT_WRITTEN with fatal
+    # carried in SummaryPublishResult; lock is released once before re-raise.
     calls = _release_spy(monkeypatch)
+    write_fatal = MemoryError("publisher oom")
+    real_open = os.open
+    real_write = os.write
+    summary_temp_fds: set[int] = set()
 
-    def fatal_publish(path: Any, text: Any) -> Any:
-        raise MemoryError("publisher oom")
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            summary_temp_fds.add(fd)
+        return fd
 
-    monkeypatch.setattr(apd, "_publish_summary_create_new", fatal_publish)
+    def fatal_write(fd: int, data: bytes) -> int:
+        if fd in summary_temp_fds:
+            raise write_fatal
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "write", fatal_write)
     cfg = _config(tmp_path)
-    with pytest.raises(MemoryError):
+    with pytest.raises(MemoryError) as ei:
         run_attended_paper_day(
             config=cfg,
             source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
@@ -1379,6 +1441,7 @@ def test_publisher_fatal_exception_releases_lock_exactly_once_and_reraises(
             clock=_at,
         )
 
+    assert ei.value is write_fatal
     assert calls["n"] == 1
     assert not (cfg.db_dir / ".paper_day.lock").exists()
     assert not cfg.summary_out.exists()
@@ -1470,20 +1533,20 @@ def test_source_factory_fatal_in_probe_preserved_and_lock_released(
     assert not cfg.summary_out.exists()
 
 
-def test_publish_parent_mkdir_fatal_is_reraised(
+def test_publish_parent_mkdir_fatal_returns_not_written_with_fatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The publisher's own parent.mkdir fatal is re-raised by _publish_summary_create_new
-    # (never swallowed into a NOT_WRITTEN result).
-    real_mkdir = apd.Path.mkdir
+    # parent.mkdir fatal is carried in SummaryPublishResult.fatal (never raised by
+    # the publisher) with NOT_WRITTEN when no destination was created.
+    mkdir_fatal = MemoryError("mkdir oom")
 
     def boom_mkdir(self: Any, *a: Any, **k: Any) -> None:
-        raise MemoryError("mkdir oom")
+        raise mkdir_fatal
 
     monkeypatch.setattr(apd.Path, "mkdir", boom_mkdir)
-    with pytest.raises(MemoryError):
-        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
-    monkeypatch.setattr(apd.Path, "mkdir", real_mkdir)
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.outcome == apd.SummaryPublicationOutcome.NOT_WRITTEN
+    assert result.fatal is mkdir_fatal
 
 
 def test_ordinary_resource_close_failure_is_incomplete_cleanup(
@@ -1918,6 +1981,191 @@ def test_publish_post_link_verify_runtime_error_is_not_not_written(
     assert summary["outcome"] == "FAIL"
 
 
+def test_publish_temp_close_fatal_after_link_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # temp close MemoryError after link: PUBLISHED_INCOMPLETE + fatal preserved.
+    real_open = os.open
+    real_close = os.close
+    temp_fds: set[int] = set()
+    close_fatal = MemoryError("temp close fatal")
+
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            temp_fds.add(fd)
+        return fd
+
+    def fatal_close(fd: int) -> None:
+        if fd in temp_fds:
+            temp_fds.discard(fd)
+            real_close(fd)
+            raise close_fatal
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", fatal_close)
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.outcome == apd.SummaryPublicationOutcome.PUBLISHED_INCOMPLETE
+    assert result.fatal is close_fatal
+    assert (tmp_path / "out" / "summary.json").exists()
+
+
+def test_publish_temp_close_fatal_full_run_preserves_publication_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+    real_close = os.close
+    temp_fds: set[int] = set()
+    close_fatal = SystemExit("temp close fatal")
+
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            temp_fds.add(fd)
+        return fd
+
+    def fatal_close(fd: int) -> None:
+        if fd in temp_fds:
+            temp_fds.discard(fd)
+            real_close(fd)
+            raise close_fatal
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", fatal_close)
+    cfg = _config(tmp_path)
+    with pytest.raises(SystemExit) as ei:
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="temp-close-fatal",
+            clock=_at,
+        )
+    assert ei.value is close_fatal
+    assert cfg.summary_out.exists()
+    # Envelope is not returned on fatal re-raise; verify via direct publish contract above.
+
+
+def test_publish_temp_unlink_fatal_after_link_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unlink_fatal = KeyboardInterrupt("temp unlink fatal")
+    real_unlink = os.unlink
+
+    def fatal_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise unlink_fatal
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", fatal_unlink)
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.outcome == apd.SummaryPublicationOutcome.PUBLISHED_INCOMPLETE
+    assert result.fatal is unlink_fatal
+    assert (tmp_path / "out" / "summary.json").exists()
+
+
+def test_publish_no_link_operation_fatal_is_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MemoryError before link: no destination, NOT_WRITTEN + fatal, lock released.
+    open_fatal = MemoryError("open oom")
+    real_open = os.open
+
+    def fatal_open(path: Any, *a: Any, **k: Any) -> int:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise open_fatal
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(os, "open", fatal_open)
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.outcome == apd.SummaryPublicationOutcome.NOT_WRITTEN
+    assert result.fatal is open_fatal
+    assert not (tmp_path / "out" / "summary.json").exists()
+
+    calls = _release_spy(monkeypatch)
+    cfg = _config(tmp_path)
+    with pytest.raises(MemoryError) as ei:
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="no-link-fatal",
+            clock=_at,
+        )
+    assert ei.value is open_fatal
+    assert calls["n"] == 1
+    assert not cfg.summary_out.exists()
+    assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+def test_publish_operation_fatal_outranks_temp_close_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # os.link MemoryError (operation fatal) + temp close SystemExit (cleanup fatal):
+    # operation fatal wins in SummaryPublishResult.fatal.
+    real_open = os.open
+    real_close = os.close
+    temp_fds: set[int] = set()
+    link_fatal = MemoryError("link oom")
+
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            temp_fds.add(fd)
+        return fd
+
+    def fatal_close(fd: int) -> None:
+        if fd in temp_fds:
+            temp_fds.discard(fd)
+            real_close(fd)
+            raise SystemExit("temp close fatal")
+        return real_close(fd)
+
+    def fatal_link(src: Any, dst: Any, *a: Any, **k: Any) -> None:
+        raise link_fatal
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", fatal_close)
+    monkeypatch.setattr(os, "link", fatal_link)
+
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.fatal is link_fatal
+    assert result.outcome == apd.SummaryPublicationOutcome.NOT_WRITTEN
+
+
+def test_publish_directory_sync_fatal_outranks_temp_unlink_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # directory fsync MemoryError (operation fatal) + temp unlink KeyboardInterrupt
+    # (cleanup fatal): operation fatal wins; destination published =>
+    # PUBLISHED_INCOMPLETE.
+    sync_fatal = MemoryError("dir sync oom")
+    monkeypatch.setattr(
+        apd,
+        "_fsync_directory",
+        lambda _d: apd.DirectorySyncResult(
+            opened=True,
+            synced=False,
+            closed=True,
+            reason_code=apd._REASON_SYNC_FAILED,
+            fatal=sync_fatal,
+        ),
+    )
+    real_unlink = os.unlink
+
+    def fatal_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise KeyboardInterrupt("temp unlink fatal")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", fatal_unlink)
+
+    result = apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+    assert result.fatal is sync_fatal
+    assert result.outcome == apd.SummaryPublicationOutcome.PUBLISHED_INCOMPLETE
+    assert (tmp_path / "out" / "summary.json").exists()
+
+
 def test_publish_temp_close_runtime_error_is_published_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1934,7 +2182,7 @@ def test_publish_temp_close_runtime_error_is_published_incomplete(
     def boom_close(fd: int) -> None:
         if fd in temp_fds:
             temp_fds.discard(fd)
-            real_close(fd)  # close for real to avoid a leak, then fail the report
+            real_close(fd)
             raise RuntimeError("temp close exploded")
         return real_close(fd)
 
@@ -1975,68 +2223,6 @@ def test_publish_temp_unlink_runtime_error_is_published_incomplete(
     assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
     assert summary["summary_publication_outcome"] != "NOT_WRITTEN"
     assert cfg.summary_out.exists()
-
-
-def test_publish_operation_fatal_outranks_temp_close_fatal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # os.link MemoryError (operation fatal) + temp close SystemExit (cleanup fatal):
-    # the operation fatal must be the one raised.
-    real_open = os.open
-    real_close = os.close
-    temp_fds: set[int] = set()
-
-    def spy_open(path: Any, *a: Any, **k: Any) -> int:
-        fd = real_open(path, *a, **k)
-        if apd._SUMMARY_TEMP_PREFIX in str(path):
-            temp_fds.add(fd)
-        return fd
-
-    def fatal_close(fd: int) -> None:
-        if fd in temp_fds:
-            temp_fds.discard(fd)
-            real_close(fd)
-            raise SystemExit("temp close fatal")
-        return real_close(fd)
-
-    def fatal_link(src: Any, dst: Any, *a: Any, **k: Any) -> None:
-        raise MemoryError("link oom")
-
-    monkeypatch.setattr(os, "open", spy_open)
-    monkeypatch.setattr(os, "close", fatal_close)
-    monkeypatch.setattr(os, "link", fatal_link)
-
-    with pytest.raises(MemoryError):
-        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
-
-
-def test_publish_directory_sync_fatal_outranks_temp_unlink_fatal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # directory fsync MemoryError (operation fatal) + temp unlink KeyboardInterrupt
-    # (cleanup fatal): the operation fatal must be the one raised.
-    monkeypatch.setattr(
-        apd,
-        "_fsync_directory",
-        lambda _d: apd.DirectorySyncResult(
-            opened=True,
-            synced=False,
-            closed=True,
-            reason_code=apd._REASON_SYNC_FAILED,
-            fatal=MemoryError("dir sync oom"),
-        ),
-    )
-    real_unlink = os.unlink
-
-    def fatal_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
-        if apd._SUMMARY_TEMP_PREFIX in str(path):
-            raise KeyboardInterrupt("temp unlink fatal")
-        return real_unlink(path, *a, **k)
-
-    monkeypatch.setattr(os, "unlink", fatal_unlink)
-
-    with pytest.raises(MemoryError):
-        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
 
 
 # ---------------------------------------------------------------------------

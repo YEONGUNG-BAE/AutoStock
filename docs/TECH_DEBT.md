@@ -139,9 +139,12 @@
   `summary_publication_outcome == WRITTEN` (else `null`); the subset-equality test that hid this was
   replaced with an exact persisted/envelope contract test. (F2) An fd-close `OSError` during release
   surfaces `runtime_lock_fd_closed == false` + a release reason even when unlink succeeds, so it can
-  no longer yield exit 0. (F3) The publish step is wrapped so **no publisher exception skips lock
-  release** — ordinary → stable `NOT_WRITTEN`/`summary_publish_failed` + cleanup `INCOMPLETE`; fatal →
-  pending cleanup fatal; lock release runs **exactly once** either way. `_fsync_directory` returns a
+  no longer yield exit 0. (F3) `_publish_summary_create_new` returns
+  `SummaryPublishResult` (outcome + optional `fatal`; never raises fatals directly).
+  `_finalize_run` merges `publish.fatal` into the cleanup chain; lock release runs
+  **exactly once** either way. Fatal propagation does not erase confirmed publication
+  state — link landed + fatal cleanup/sync ⇒ `PUBLISHED_INCOMPLETE` or
+  `PUBLICATION_UNCERTAIN`, never a false `NOT_WRITTEN`. `_fsync_directory` returns a
   `DirectorySyncResult` (open/fsync/close never let `OSError` escape; fatal carried in result), fixing
   the prior raw `os.close`-in-`finally` that bypassed release. (F4) `PilotRuntimeLock.acquire` is
   partial-side-effect-safe: a post-`O_EXCL`-open `fstat`/`write` failure closes the fd and unlinks the
@@ -168,9 +171,13 @@
   higher-precedence fatal. (R-F3) A non-`OSError` raised **inside** the publisher after the hard link
   landed no longer collapses to `NOT_WRITTEN`: `_finalize()` recovers it as `PUBLISHED_INCOMPLETE`
   (link landed) or `PUBLICATION_UNCERTAIN` (not), and a post-link verification `lstat` failure →
-  `PUBLICATION_UNCERTAIN`. (R-F4) Publisher-internal fatal precedence is explicit — operation (body,
+  `PUBLICATION_UNCERTAIN`.   (R-F4) Publisher-internal fatal precedence is explicit — operation (body,
   incl. directory-sync) fatal > cleanup (temp close/unlink) fatal, neither overwriting a confirmed
-  publication; the chosen fatal is re-raised only after `_finalize()`. (R-F5) Startup cancellation
+  publication; the chosen fatal is carried in `SummaryPublishResult.fatal` and re-raised only after
+  lock release. (R-F6) `_finalize_run` no longer maps publisher fatals to `NOT_WRITTEN`/
+  `operation_fatal`: `SummaryPublishResult` carries both publication outcome and fatal; fatal
+  propagation does not erase confirmed publication state — link landed + fatal cleanup/sync ⇒
+  `PUBLISHED_INCOMPLETE` or `PUBLICATION_UNCERTAIN`, never a false `NOT_WRITTEN`. (R-F5) Startup cancellation
   bounding is documented as **verdict-level (Option B)**: `PROBE_CLEANUP_TIMEOUT_SECONDS` bounds the
   verdict, but a source that genuinely ignores `CancelledError` leaves a pending task the in-process
   loop cannot force-terminate — in-process termination is guaranteed only for cancellation-compliant

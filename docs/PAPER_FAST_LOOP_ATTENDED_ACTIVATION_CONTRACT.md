@@ -19,9 +19,10 @@ persisted mechanical summary is separated from the returned envelope and `persis
 byte-equals the file only for `WRITTEN`; a single-owner `is_clean_pass` predicate owns exit 0;
 lock acquire/release is partial-side-effect-safe and identity-safe — no stale lock/fd, foreign
 lock never unlinked, an fd-close failure during rollback/release is reported as uncertain rather than
-hidden, and a lock-release fatal never replaces a higher-precedence fatal; every publisher exception
-still releases the lock exactly once and a non-`OSError` after the link landed is recovered as
-`PUBLISHED_INCOMPLETE`/`PUBLICATION_UNCERTAIN` rather than a false `NOT_WRITTEN`; an
+hidden, and a lock-release fatal never replaces a higher-precedence fatal; `_publish_summary_create_new`
+returns `SummaryPublishResult` (outcome + optional `fatal`) and fatal propagation does not erase
+confirmed publication state — link landed + fatal cleanup/sync ⇒ `PUBLISHED_INCOMPLETE`/
+`PUBLICATION_UNCERTAIN` rather than a false `NOT_WRITTEN`; lock release runs exactly once; an
 uncancellable startup consumer is bounded at the verdict level (Option B) as `source_close_timeout`,
 with in-process termination guaranteed only for cancellation-compliant sources) —
 none of which authorizes activation. Actual KIS startup/run and the 1-day pilot remain
