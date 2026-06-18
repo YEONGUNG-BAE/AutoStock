@@ -196,6 +196,23 @@
   NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures, and
   lifecycle-aware fakes; no commit is made until the Operator authorizes it.
 
+## Reference — RTM-7c.6a Source Subreason Closure
+
+- RTM-7c.6a source-failed subreason closure: the collapsed `source_failed` startup taxonomy is split
+  so a live KIS startup-only smoke self-classifies without a live retry. Config/env gate, KIS approval
+  key issuance, and websocket connect failures now map to stable sanitized subreasons
+  (`source_config_gate_failed` / `source_approval_failed` / `source_connect_failed`) via the typed
+  `LiveSourceConfigGateError` / `LiveSourceApprovalError` / `LiveSourceConnectError` exceptions; the
+  connect wrapper is `async def` so await-time connect errors are caught (a sync lambda returning the
+  coroutine would let them escape unclassified). `source_failed` is retained as an unclassified
+  fallback only. Subreasons reach both summary `stop_reason` and evidence `failed_closed.reason_code`
+  and persist no secret / approval key / raw HTTP response / raw websocket frame / traceback /
+  credentialed URL. `MemoryError` / `KeyboardInterrupt` / `SystemExit` are never converted into any
+  source subreason — fatal precedence preserved at every raise site. Fake-only tests added (fake
+  settings loader / fake approval provider / fake websocket connect); no actual KIS retry was run by
+  Cursor. Operator docs (runbook + runtime/evidence contracts) synchronized with the new taxonomy.
+  The 1-day pilot remains NO-GO until a KIS startup-only smoke reaches `PASS/startup_only`.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live

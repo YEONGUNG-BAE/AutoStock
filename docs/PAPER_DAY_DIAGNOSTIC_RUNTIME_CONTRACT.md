@@ -247,12 +247,28 @@ failure is never silently downgraded to `health_not_ready`):
 both subscription ACKs accepted        -> PASS/startup_only
 subscription ACK rejected              -> NO_GO/subscription_rejected
 consumer exhausts before readiness     -> NO_GO/transport_not_ready
-consumer/source raises                 -> FAIL/source_failed
+config/env gate failure                -> FAIL/source_config_gate_failed
+KIS approval key issuance failure      -> FAIL/source_approval_failed
+websocket open/connect failure         -> FAIL/source_connect_failed
+unclassified source/factory/consumer raise -> FAIL/source_failed
 generator close raises (non-cancel)    -> FAIL/source_close_failed
 consumer ignores cancel (no close)     -> FAIL/source_close_timeout
 generator close fatal                  -> fatal preserved (no PASS summary)
 receive timeout without readiness      -> NO_GO/health_not_ready
 ```
+
+`source_failed` is no longer the only live source startup failure reason.
+Config/env, approval issuance, and websocket connect failures are classified as
+stable sanitized subreasons (`source_config_gate_failed`, `source_approval_failed`,
+`source_connect_failed`), raised via the typed `LiveSourceConfigGateError` /
+`LiveSourceApprovalError` / `LiveSourceConnectError` exceptions and mapped in the
+source-open path; `source_failed` is now an unclassified fallback only. These
+subreasons are sanitized — the reason string carries no secret, approval key, raw
+HTTP response, raw websocket frame, traceback, or credentialed URL.
+`MemoryError` / `KeyboardInterrupt` / `SystemExit` are never converted into
+`source_config_gate_failed`, `source_approval_failed`, `source_connect_failed`, or
+`source_failed`; fatal precedence is preserved (the typed wrappers re-raise fatals
+ahead of their sanitized mapping).
 
 Bounded cancellation (scope — Option B, reduced contract): after the consumer is
 cancelled, the cleanup *await* is bounded by
@@ -292,7 +308,9 @@ NO_GO: transport_not_ready, subscription_rejected, trade_not_observed,
        quote_not_observed, health_not_ready, trigger_not_evaluated,
        journal_uncertain, reconcile_required, nonterminal_journal,
        resource_close_failure, runtime_lock_exists
-FAIL: invalid_input, source_failed, source_close_failed, source_close_timeout,
+FAIL: invalid_input, source_config_gate_failed, source_approval_failed,
+      source_connect_failed, source_failed, source_close_failed,
+      source_close_timeout,
       evidence_failed, summary_failed, summary_published_incomplete,
       summary_publication_uncertain, runtime_lock_parent_unreadable,
       runtime_lock_acquire_failed,

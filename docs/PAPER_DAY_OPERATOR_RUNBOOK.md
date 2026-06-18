@@ -48,12 +48,65 @@ Startup-only modes:
   writes the post-close summary. It must not execute paper decisions or broker
   calls. The probe returns as soon as both subscription ACKs are observed; it does
   not wait out the full `--duration-seconds` for a market event. The probe
-  classifies the startup fully: both ACKs accepted -> `PASS/startup_only`; a
-  rejected ACK -> `NO_GO/subscription_rejected`; the stream ending before
-  readiness -> `NO_GO/transport_not_ready`; a consumer/source error ->
-  `FAIL/source_failed`; the receive timeout without readiness ->
-  `NO_GO/health_not_ready`. A source error is never downgraded to
-  `health_not_ready`.
+  classifies the startup fully:
+
+  ```text
+  both ACKs accepted               -> PASS/startup_only
+  rejected ACK                     -> NO_GO/subscription_rejected
+  stream ending before readiness   -> NO_GO/transport_not_ready
+  receive timeout without readiness-> NO_GO/health_not_ready
+  config/env gate failure          -> FAIL/source_config_gate_failed
+  KIS approval key issuance failure-> FAIL/source_approval_failed
+  websocket open/connect failure   -> FAIL/source_connect_failed
+  unclassified source/factory/consumer error -> FAIL/source_failed
+  source close timeout             -> FAIL/source_close_timeout
+  ```
+
+  A source error is never downgraded to `health_not_ready`. The three live-source
+  startup subreasons (`source_config_gate_failed`, `source_approval_failed`,
+  `source_connect_failed`) are sanitized: they persist **no** secret, approval key,
+  raw HTTP response, raw websocket frame, traceback, or credentialed URL — only the
+  stable reason string reaches the summary `stop_reason` and the evidence
+  `failed_closed.reason_code`. `source_failed` is now a fallback only, used for an
+  unclassified factory/consumer error (i.e. a bug or unexpected source error).
+  `MemoryError` / `KeyboardInterrupt` / `SystemExit` are never converted into any of
+  these source reasons; fatal identity is preserved.
+
+  Operator action per subreason (never print secret values, raw HTTP responses, or
+  raw frames):
+
+  ```text
+  source_config_gate_failed:
+    - confirm config/config.toml broker.kis_ws_read_only.enabled = true
+    - confirm KIS_LIVE_APP_KEY / KIS_LIVE_APP_SECRET env vars are present
+    - confirm symbol is 005930
+    - confirm config path / approval_base_url / websocket_url are set
+    - do not print secret values
+
+  source_approval_failed:
+    - check live vs. mock app-key / domain mismatch
+    - check approval_base_url
+    - check app key/secret permissions
+    - do not print raw HTTP response or secret
+    - do NOT immediately retry with the same settings
+
+  source_connect_failed:
+    - check websocket_url
+    - check DNS / TLS / network / firewall
+    - treat as a failure reached before the subscription stage
+    - do not print raw frames
+    - do NOT immediately retry with the same settings
+
+  source_failed:
+    - fallback only
+    - an unexpected source error not classified into a subreason (likely a bug)
+    - inspect evidence/summary and review code
+  ```
+
+  After `source_approval_failed` or `source_connect_failed`, a live retry must not
+  be repeated immediately: separate the config / domain / account / network cause
+  first, then retry. The 1-day pilot remains NO-GO until a KIS startup-only smoke
+  reaches `PASS/startup_only`.
 
 Summary outcome and CLI exit:
 

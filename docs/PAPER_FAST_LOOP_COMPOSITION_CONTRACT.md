@@ -584,8 +584,12 @@ touch network/credentials/DB/clock and never activate runtime:
   outrank cleanup fatals. The live startup probe inspects `Task.exception()` only when
   `done and not cancelled`; generator close `RuntimeError` → `source_close_failed`; fatal preserved.
   ACK accepted → PASS; rejected → `subscription_rejected`; exhaustion before readiness →
-  `transport_not_ready`; consumer/source error → `source_failed`; receive timeout →
-  `health_not_ready`.
+  `transport_not_ready`; receive timeout → `health_not_ready`. Live-source startup failures are
+  classified (RTM-7c.6a): config/env gate → `source_config_gate_failed`, KIS approval issuance →
+  `source_approval_failed`, websocket connect → `source_connect_failed`, and any unclassified
+  factory/consumer error → `source_failed` (fallback). These subreasons are sanitized (no secret,
+  approval key, raw HTTP response, raw frame, traceback, or credentialed URL) and never absorb
+  `MemoryError`/`KeyboardInterrupt`/`SystemExit`.
   Clean-pass / lock-identity / publication-boundary closure (RTM-7c.5a/5b): the persisted
   `summary.json` holds only the mechanical summary, while the returned **envelope** adds
   `persisted_summary` + cleanup/publication/lock keys (never written to disk); `persisted_summary`

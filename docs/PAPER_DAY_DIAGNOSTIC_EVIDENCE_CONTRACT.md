@@ -24,6 +24,21 @@ sensitive_data_present
 raw websocket frames, raw config text, DB dumps, traceback reprs, or LLM
 prompt/response payloads.
 
+`reason_code` on a `failed_closed` row records only a stable sanitized reason
+string. For live-source startup failures it may be one of:
+
+```text
+source_config_gate_failed   (config/env gate failure)
+source_approval_failed      (KIS approval key issuance failure)
+source_connect_failed       (websocket open/connect failure)
+source_failed               (unclassified factory/consumer fallback)
+```
+
+These reason strings are sanitized: they must never carry an app key, app secret,
+approval key, raw HTTP request/response, raw websocket frame, traceback, or
+credentialed URL. The underlying exception cause is never serialized into evidence;
+only the stable reason reaches the `reason_code` field.
+
 Counters cover actual observations only:
 
 - transport connect/subscription/disconnect
