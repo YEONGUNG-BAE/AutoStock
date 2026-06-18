@@ -156,6 +156,35 @@
   closes in reverse construction order (journal → ledger → active_store). Bounded startup cancellation:
   a consumer that ignores `CancelledError` is bounded by `PROBE_CLEANUP_TIMEOUT_SECONDS`
   (`FAIL/source_close_timeout`).
+- RTM-7c.5a/5b residual rollback / publication-state / cancellation-termination closure (each
+  finding reproduced before fixing; REVISE verdict): (R-F1) `_abort_partial_acquire` now returns a
+  structured `RuntimeLockAcquireCleanupResult` (`fd_closed`/`lock_unlinked`/`lock_absent_confirmed`/
+  `identity_matched`/`reason_code`/`fatal`) instead of a bool — a fd-close `OSError` during rollback
+  makes the acquire `runtime_lock_acquire_uncertain` **even when the unlink succeeded** (the prior code
+  reported a clean `…_failed` and hid a possible fd leak); `…_failed` is chosen only when fd-close *and*
+  lock-absent are both confirmed. (R-F2) An fd-close **fatal** in `release()` is captured into the
+  result (`fd_closed=false`, `fatal = fatal or exc`) with the unlink still attempted; the outer owner
+  re-raises it only after body/source/stack/recorder/publisher fatals, so it can never replace a
+  higher-precedence fatal. (R-F3) A non-`OSError` raised **inside** the publisher after the hard link
+  landed no longer collapses to `NOT_WRITTEN`: `_finalize()` recovers it as `PUBLISHED_INCOMPLETE`
+  (link landed) or `PUBLICATION_UNCERTAIN` (not), and a post-link verification `lstat` failure →
+  `PUBLICATION_UNCERTAIN`. (R-F4) Publisher-internal fatal precedence is explicit — operation (body,
+  incl. directory-sync) fatal > cleanup (temp close/unlink) fatal, neither overwriting a confirmed
+  publication; the chosen fatal is re-raised only after `_finalize()`. (R-F5) Startup cancellation
+  bounding is documented as **verdict-level (Option B)**: `PROBE_CLEANUP_TIMEOUT_SECONDS` bounds the
+  verdict, but a source that genuinely ignores `CancelledError` leaves a pending task the in-process
+  loop cannot force-terminate — in-process termination is guaranteed only for cancellation-compliant
+  sources. The real `KisWsMarketEventSource` is compliant
+  (`test_kis_ws_source.py::test_cancellation_cleans_up_and_reraises`); a subprocess-isolation test
+  (`test_attended_paper_day.py::test_all_cancel_ignoring_source_is_not_bounded_without_process_isolation`)
+  honestly demonstrates the limit. No real-termination (Option A) reaper was added. (R-F6) The
+  lock-parent `mkdir` joins the stable admission taxonomy: `PermissionError`/`OSError(EACCES/EIO)` →
+  `runtime_lock_parent_unreadable`, other `OSError` → `runtime_lock_acquire_failed`, non-`OSError`
+  `Exception` → `runtime_lock_acquire_uncertain`, fatal re-raised — no raw `OSError`/`RuntimeError`
+  escapes. (R-F7/F8) The post-resource-close stamp is renamed `shutdown_completed_at` →
+  `resource_close_completed_at` to match its actual semantics (stamped when the resource stack finishes
+  closing and serialized **before** lock release / summary publish, not a whole-process shutdown time).
+  Full suite 5138 passed; acceptance 11 PASS / 0 WARN / 0 FAIL.
 - Still NO-GO: actual KIS startup/run and the 1-day pilot have **not** been performed and remain
   NO-GO until Reviewer PASS. Cursor/test work is limited to validate-only, offline fixtures, and
   lifecycle-aware fakes; no commit is made until the Operator authorizes it.

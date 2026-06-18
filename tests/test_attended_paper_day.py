@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
 import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
+import sys
+import textwrap
 import time as time_module
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -1611,3 +1616,491 @@ def test_startup_probe_bounds_uncancellable_consumer_with_timeout(
     assert summary["stop_reason"] == "source_close_timeout"
     assert elapsed < float(cfg.duration_seconds)  # bounded by cleanup timeout, not duration
     assert not (cfg.db_dir / ".paper_day.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# RTM-7c.5a/5b residual closure: partial lock-acquire rollback (F1)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_acquire_fd_close_failure_is_uncertain_even_when_unlinked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # write OSError + close OSError + unlink success: the fd-close failure must not be
+    # hidden. Even though the inode is unlinked, a leaked fd means the rollback is
+    # uncertain, not a clean acquire_failed.
+    p = tmp_path / ".paper_day.lock"
+    real_close = os.close
+    leaked: list[int] = []
+
+    def boom_close(fd: int) -> None:
+        leaked.append(fd)
+        raise OSError("close failed")
+
+    def boom_write(fd: int, data: bytes) -> int:
+        raise OSError("write failed")
+
+    monkeypatch.setattr(os, "close", boom_close)
+    monkeypatch.setattr(os, "write", boom_write)
+
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(apd.AttendedPaperDayRuntimeError) as ei:
+        lock.acquire()
+    monkeypatch.undo()
+    for fd in leaked:
+        with contextlib.suppress(OSError):
+            real_close(fd)
+
+    assert ei.value.reason_code == "runtime_lock_acquire_uncertain"
+    assert not p.exists()  # identity matched, so our inode was still unlinked
+    assert lock._fd is None  # type: ignore[attr-defined]
+    assert lock._identity is None  # type: ignore[attr-defined]
+
+
+def test_lock_acquire_operation_fatal_outranks_rollback_close_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # write MemoryError (operation fatal) + close SystemExit (rollback cleanup fatal):
+    # the operation fatal identity must be preserved (MemoryError), never replaced by
+    # the cleanup fatal.
+    p = tmp_path / ".paper_day.lock"
+    real_close = os.close
+    leaked: list[int] = []
+
+    def fatal_close(fd: int) -> None:
+        leaked.append(fd)
+        raise SystemExit("close fatal during rollback")
+
+    def fatal_write(fd: int, data: bytes) -> int:
+        raise MemoryError("oom mid-write")
+
+    monkeypatch.setattr(os, "close", fatal_close)
+    monkeypatch.setattr(os, "write", fatal_write)
+
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(MemoryError):
+        lock.acquire()
+    monkeypatch.undo()
+    for fd in leaked:
+        with contextlib.suppress(OSError):
+            real_close(fd)
+
+    assert lock._fd is None  # type: ignore[attr-defined]
+    assert lock._identity is None  # type: ignore[attr-defined]
+
+
+def test_lock_acquire_foreign_inode_is_not_unlinked_during_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A write failure rolls back, but if our inode was replaced by a foreign one before
+    # the rollback unlink, the rollback must refuse to remove it (and report uncertain).
+    p = tmp_path / ".paper_day.lock"
+    real_close = os.close
+
+    def spy_close(fd: int) -> None:
+        return real_close(fd)
+
+    def boom_write(fd: int, data: bytes) -> int:
+        # Replace our inode with a foreign one before rollback inspects it.
+        p.unlink()
+        p.write_text("foreign\n", encoding="utf-8")
+        raise OSError("write failed")
+
+    monkeypatch.setattr(os, "close", spy_close)
+    monkeypatch.setattr(os, "write", boom_write)
+
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(apd.AttendedPaperDayRuntimeError) as ei:
+        lock.acquire()
+
+    assert ei.value.reason_code == "runtime_lock_acquire_uncertain"
+    assert p.exists()  # foreign inode left intact
+    assert p.read_text(encoding="utf-8") == "foreign\n"
+
+
+# ---------------------------------------------------------------------------
+# Lock parent admission taxonomy (F6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (PermissionError("denied"), "runtime_lock_parent_unreadable"),
+        (OSError(errno.EACCES, "eacces"), "runtime_lock_parent_unreadable"),
+        (OSError(errno.EIO, "eio"), "runtime_lock_parent_unreadable"),
+        (OSError(errno.ENOSPC, "enospc"), "runtime_lock_acquire_failed"),
+        (RuntimeError("weird"), "runtime_lock_acquire_uncertain"),
+    ],
+)
+def test_lock_acquire_parent_mkdir_failure_taxonomy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: BaseException, expected: str
+) -> None:
+    p = tmp_path / "missing" / ".paper_day.lock"
+
+    def boom_mkdir(self: Any, *a: Any, **k: Any) -> None:
+        raise exc
+
+    monkeypatch.setattr(apd.Path, "mkdir", boom_mkdir)
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(apd.AttendedPaperDayRuntimeError) as ei:
+        lock.acquire()
+
+    assert ei.value.reason_code == expected
+    assert ei.value.stage == "lock"
+    assert lock._fd is None  # type: ignore[attr-defined]
+    assert not p.exists()  # zero side effects: no lock inode created
+
+
+def test_lock_acquire_parent_mkdir_fatal_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = tmp_path / "missing" / ".paper_day.lock"
+
+    def fatal_mkdir(self: Any, *a: Any, **k: Any) -> None:
+        raise MemoryError("mkdir oom")
+
+    monkeypatch.setattr(apd.Path, "mkdir", fatal_mkdir)
+    lock = apd.PilotRuntimeLock(p)
+    with pytest.raises(MemoryError):
+        lock.acquire()
+    assert lock._fd is None  # type: ignore[attr-defined]
+
+
+def test_run_lock_parent_unreadable_writes_nothing_and_skips_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An end-to-end lock-parent failure returns a memory summary with zero writes and
+    # never constructs the source (admission boundary holds before any output).
+    cfg = _config(tmp_path)
+    db_dir = cfg.db_dir
+    real_mkdir = apd.Path.mkdir
+
+    def selective_mkdir(self: Any, *a: Any, **k: Any) -> Any:
+        if self == db_dir:
+            raise PermissionError("db_dir denied")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(apd.Path, "mkdir", selective_mkdir)
+    factory_calls = {"n": 0}
+
+    def factory(*, lifecycle: Any) -> Any:
+        factory_calls["n"] += 1
+        return ReplayMarketEventSource([_quote(), _trade()])
+
+    summary = run_attended_paper_day(
+        config=cfg, source_factory=factory, run_id="parent-unreadable", clock=_at
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "runtime_lock_parent_unreadable"
+    assert factory_calls["n"] == 0
+    assert not cfg.evidence_out.exists()
+    assert not cfg.summary_out.exists()
+    assert not (db_dir / ".paper_day.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# Lock release fd-close fatal ownership (F2)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_release_fd_close_fatal_is_captured_and_unlink_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An fd-close *fatal* during release must be captured in the result (not raised),
+    # and the identity check + safe unlink must still be attempted.
+    p = tmp_path / ".paper_day.lock"
+    lock = apd.PilotRuntimeLock(p)
+    lock.acquire()
+
+    real_close = os.close
+    leaked: list[int] = []
+
+    def fatal_close(fd: int) -> None:
+        leaked.append(fd)
+        raise SystemExit("close fatal during release")
+
+    monkeypatch.setattr(os, "close", fatal_close)
+    result = lock.release()
+    monkeypatch.undo()
+    for fd in leaked:
+        with contextlib.suppress(OSError):
+            real_close(fd)
+
+    assert isinstance(result.fatal, SystemExit)
+    assert result.fd_closed is False
+    # unlink was still attempted and succeeded (bounded cleanup continued past close).
+    assert result.lock_unlinked is True
+    assert result.lock_absent_confirmed is True
+    assert not p.exists()
+
+
+def test_release_close_fatal_does_not_replace_body_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # body MemoryError (operation fatal) + lock-release os.close SystemExit (cleanup
+    # fatal): the body fatal must win, and the release fatal must never escape the
+    # outer finalizer to replace it.
+    class _FatalMonitor:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise MemoryError("fatal in market loop")
+
+    monkeypatch.setattr(apd, "MarketMonitor", _FatalMonitor)
+
+    real_release = apd.PilotRuntimeLock.release
+
+    def release_with_close_fatal(self: Any) -> Any:
+        saved_close = os.close
+        captured: list[int] = []
+
+        def boom(fd: int) -> None:
+            captured.append(fd)
+            saved_close(fd)  # actually close to avoid a leak
+            raise SystemExit("close fatal during release")
+
+        os.close = boom  # type: ignore[assignment]
+        try:
+            return real_release(self)
+        finally:
+            os.close = saved_close  # type: ignore[assignment]
+
+    monkeypatch.setattr(apd.PilotRuntimeLock, "release", release_with_close_fatal)
+    cfg = _config(tmp_path)
+
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=cfg,
+            source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+            run_id="body-vs-release-fatal",
+            clock=_at,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Publisher state recovery and fatal precedence (F3/F4)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_post_link_verify_runtime_error_is_not_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-OSError raised during post-link verification must NOT collapse an actually
+    # linked destination into NOT_WRITTEN — the file exists, so the outcome must be a
+    # PUBLISHED_INCOMPLETE / PUBLICATION_UNCERTAIN recovery.
+    real_lstat = os.lstat
+    calls = {"n": 0}
+
+    def _lstat(path: str | bytes, *a: Any, **k: Any):
+        if str(path).endswith("summary.json"):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("post-link verify exploded")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", _lstat)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="post-link-runtime",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] in (
+        "PUBLISHED_INCOMPLETE",
+        "PUBLICATION_UNCERTAIN",
+    )
+    assert summary["summary_publication_outcome"] != "NOT_WRITTEN"
+    assert summary["outcome"] == "FAIL"
+
+
+def test_publish_temp_close_runtime_error_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+    real_close = os.close
+    temp_fds: set[int] = set()
+
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            temp_fds.add(fd)
+        return fd
+
+    def boom_close(fd: int) -> None:
+        if fd in temp_fds:
+            temp_fds.discard(fd)
+            real_close(fd)  # close for real to avoid a leak, then fail the report
+            raise RuntimeError("temp close exploded")
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", boom_close)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="temp-close-runtime",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
+    assert summary["summary_publication_outcome"] != "NOT_WRITTEN"
+    assert cfg.summary_out.exists()
+
+
+def test_publish_temp_unlink_runtime_error_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_unlink = os.unlink
+
+    def boom_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise RuntimeError("temp unlink exploded")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", boom_unlink)
+    cfg = _config(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([_quote(), _trade()]),
+        run_id="temp-unlink-runtime",
+        clock=_at,
+    )
+
+    assert summary["summary_publication_outcome"] == "PUBLISHED_INCOMPLETE"
+    assert summary["summary_publication_outcome"] != "NOT_WRITTEN"
+    assert cfg.summary_out.exists()
+
+
+def test_publish_operation_fatal_outranks_temp_close_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # os.link MemoryError (operation fatal) + temp close SystemExit (cleanup fatal):
+    # the operation fatal must be the one raised.
+    real_open = os.open
+    real_close = os.close
+    temp_fds: set[int] = set()
+
+    def spy_open(path: Any, *a: Any, **k: Any) -> int:
+        fd = real_open(path, *a, **k)
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            temp_fds.add(fd)
+        return fd
+
+    def fatal_close(fd: int) -> None:
+        if fd in temp_fds:
+            temp_fds.discard(fd)
+            real_close(fd)
+            raise SystemExit("temp close fatal")
+        return real_close(fd)
+
+    def fatal_link(src: Any, dst: Any, *a: Any, **k: Any) -> None:
+        raise MemoryError("link oom")
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", fatal_close)
+    monkeypatch.setattr(os, "link", fatal_link)
+
+    with pytest.raises(MemoryError):
+        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+
+
+def test_publish_directory_sync_fatal_outranks_temp_unlink_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # directory fsync MemoryError (operation fatal) + temp unlink KeyboardInterrupt
+    # (cleanup fatal): the operation fatal must be the one raised.
+    monkeypatch.setattr(
+        apd,
+        "_fsync_directory",
+        lambda _d: apd.DirectorySyncResult(
+            opened=True,
+            synced=False,
+            closed=True,
+            reason_code=apd._REASON_SYNC_FAILED,
+            fatal=MemoryError("dir sync oom"),
+        ),
+    )
+    real_unlink = os.unlink
+
+    def fatal_unlink(path: str | bytes, *a: Any, **k: Any) -> None:
+        if apd._SUMMARY_TEMP_PREFIX in str(path):
+            raise KeyboardInterrupt("temp unlink fatal")
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", fatal_unlink)
+
+    with pytest.raises(MemoryError):
+        apd._publish_summary_create_new(tmp_path / "out" / "summary.json", "{}")
+
+
+# ---------------------------------------------------------------------------
+# Startup cancellation termination contract (F5, Option B)
+# ---------------------------------------------------------------------------
+
+
+def test_all_cancel_ignoring_source_is_not_bounded_without_process_isolation(
+    tmp_path: Path,
+) -> None:
+    # Honest contract boundary: a source that ignores EVERY CancelledError (including
+    # the one asyncio.run delivers at loop shutdown) cannot be terminated in-process.
+    # We reproduce it in a subprocess and assert it must be killed by a hard wall-clock
+    # timeout — i.e. it is NOT bounded without process isolation. (The complementary
+    # "compliant source is bounded" guarantee is proved by
+    # tests/test_kis_ws_source.py::test_cancellation_cleans_up_and_reraises.)
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import composition.attended_paper_day as apd
+
+        apd.PROBE_CLEANUP_TIMEOUT_SECONDS = 0.1
+
+        class AllIgnoreSource:
+            def __init__(self, lifecycle):
+                self._lifecycle = lifecycle
+
+            async def events(self):
+                from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
+                at = apd.datetime.now(tz=apd.KST)
+                self._lifecycle.on_connected(at=at)
+                self._lifecycle.on_subscription_ack(
+                    tr_id=TR_TRADE, symbol="005930", accepted=True, at=at
+                )
+                self._lifecycle.on_subscription_ack(
+                    tr_id=TR_QUOTE, symbol="005930", accepted=True, at=at
+                )
+                self._lifecycle.on_all_subscribed(at=at)
+                while True:
+                    try:
+                        await asyncio.sleep(3600)
+                    except asyncio.CancelledError:
+                        # Ignore EVERY cancel, including loop-shutdown cancellation.
+                        continue
+                yield  # unreachable
+
+        lifecycle = apd.DiagnosticLifecycle(
+            counters=apd.DiagnosticCounters(), tracker=None, clock=lambda: apd.datetime.now(tz=apd.KST)
+        )
+        apd._run_live_startup_probe(
+            source_factory=lambda *, lifecycle: AllIgnoreSource(lifecycle),
+            lifecycle=lifecycle,
+            timeout_seconds=30.0,
+        )
+        print("UNEXPECTED_CLEAN_EXIT")
+        """
+    )
+    env = {**os.environ, "PYTHONPATH": str(src_root)}
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            timeout=3.0,
+            capture_output=True,
+            text=True,
+        )

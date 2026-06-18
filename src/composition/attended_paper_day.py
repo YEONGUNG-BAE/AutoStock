@@ -99,8 +99,13 @@ PILOT_SYMBOL = "005930"
 PILOT_UNIVERSE = "KR_LARGE"
 SCHEMA_VERSION = "paper_day_diagnostic.v1"
 HEARTBEAT_SECONDS = 60
-# Upper bound on awaiting the startup-probe consumer's cancellation/cleanup so a
-# source that ignores cancellation cannot block the probe indefinitely.
+# Upper bound on awaiting the startup-probe consumer's cancellation/cleanup. This
+# bounds the *probe await* for a source that delays its response to cancellation. It
+# does NOT make an arbitrary source bounded: a source that ignores *every*
+# CancelledError (including the one asyncio.run delivers during loop shutdown) cannot
+# be terminated in-process and would require process isolation to bound. See the
+# startup cancellation contract in the runtime contract doc — only cancellation-
+# compliant sources (the real KisWsMarketEventSource is one) are bounded here.
 PROBE_CLEANUP_TIMEOUT_SECONDS = 5.0
 PILOT_DB_FILES = frozenset({"active.sqlite3", "ledger.sqlite3", "trigger_journal.sqlite3"})
 PILOT_DB_SIDECAR_SUFFIXES = (".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal")
@@ -127,6 +132,16 @@ class SummaryPublicationOutcome:
 
 @dataclass(frozen=True)
 class RuntimeLockReleaseResult:
+    fd_closed: bool
+    lock_unlinked: bool
+    lock_absent_confirmed: bool
+    identity_matched: bool | None = None
+    reason_code: str | None = None
+    fatal: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeLockAcquireCleanupResult:
     fd_closed: bool
     lock_unlinked: bool
     lock_absent_confirmed: bool
@@ -348,7 +363,25 @@ class PilotRuntimeLock:
         close하고, 그 inode가 여전히 우리 것일 때만 unlink하여 stale lock/fd leak을
         남기지 않는다. fd와 identity는 완전 성공에서만 보존한다.
         """
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Lock-parent creation is part of the stable admission boundary: any mkdir
+        # failure is mapped to a sanitized lock reason (or, for a fatal, preserved by
+        # identity) so a raw OSError/RuntimeError never escapes the taxonomy. No lock
+        # fd is opened on this path, so there is no partial side effect to roll back.
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except PermissionError as exc:
+            raise AttendedPaperDayRuntimeError("lock", "runtime_lock_parent_unreadable") from exc
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EIO):
+                raise AttendedPaperDayRuntimeError(
+                    "lock", "runtime_lock_parent_unreadable"
+                ) from exc
+            raise AttendedPaperDayRuntimeError("lock", "runtime_lock_acquire_failed") from exc
+        except Exception as exc:
+            raise AttendedPaperDayRuntimeError("lock", "runtime_lock_acquire_uncertain") from exc
+
         try:
             fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
@@ -362,12 +395,25 @@ class PilotRuntimeLock:
             identity = (st.st_dev, st.st_ino)
             os.write(fd, b"locked\n")
         except (MemoryError, KeyboardInterrupt, SystemExit):
+            # Operation fatal outranks any rollback cleanup fatal: roll back on a
+            # best-effort basis (its own fatal is captured, not raised) and re-raise
+            # the original operation fatal with its identity intact.
             self._abort_partial_acquire(fd, identity)
             raise
         except BaseException as exc:
-            uncertain = self._abort_partial_acquire(fd, identity)
+            cleanup = self._abort_partial_acquire(fd, identity)
+            if cleanup.fatal is not None:
+                # Rollback cleanup fatal outranks an ordinary acquire error.
+                raise cleanup.fatal
+            clean_rollback = (
+                cleanup.fd_closed
+                and cleanup.lock_absent_confirmed
+                and cleanup.reason_code is None
+            )
             reason = (
-                "runtime_lock_acquire_uncertain" if uncertain else "runtime_lock_acquire_failed"
+                "runtime_lock_acquire_failed"
+                if clean_rollback
+                else "runtime_lock_acquire_uncertain"
             )
             cause = exc if isinstance(exc, Exception) else None
             raise AttendedPaperDayRuntimeError("lock", reason) from cause
@@ -375,27 +421,69 @@ class PilotRuntimeLock:
         self._fd = fd
         self._identity = identity
 
-    def _abort_partial_acquire(self, fd: int, identity: tuple[int, int] | None) -> bool:
-        """부분 취득 롤백: fd close + (우리 inode일 때만) unlink. 미확정이면 True."""
-        with contextlib.suppress(OSError):
+    def _abort_partial_acquire(
+        self, fd: int, identity: tuple[int, int] | None
+    ) -> RuntimeLockAcquireCleanupResult:
+        """부분 취득 롤백을 structured result로 관찰한다.
+
+        fd close 실패는 더 이상 숨기지 않는다: close가 실패하면(또는 미확정이면)
+        unlink가 성공해도 rollback은 ``runtime_lock_acquire_uncertain``으로 본다(fd
+        leak 가능성). 우리가 만든 inode임을 확인할 때만 unlink하고, replaced/foreign
+        lock은 건드리지 않는다. fatal은 raise하지 않고 결과에 담아 호출자가 operation
+        fatal precedence를 적용하게 한다.
+        """
+        fd_closed = False
+        lock_unlinked = False
+        lock_absent_confirmed = False
+        identity_matched: bool | None = None
+        reason_code: str | None = None
+        fatal: BaseException | None = None
+
+        try:
             os.close(fd)
+            fd_closed = True
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            fatal = exc
+        except OSError:
+            reason_code = "runtime_lock_acquire_uncertain"
+
         try:
             st = os.lstat(self._path)
         except FileNotFoundError:
-            return False
+            lock_unlinked = True
+            lock_absent_confirmed = True
+        except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+            fatal = fatal or exc
         except OSError:
-            return True
-        # Only remove the lock file when we can confirm it is still the inode we
-        # created. A replaced/foreign lock (or an unverifiable one) is left intact.
-        if identity is None or (st.st_dev, st.st_ino) != identity:
-            return True
-        try:
-            os.unlink(self._path)
-            return False
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True
+            reason_code = reason_code or "runtime_lock_acquire_uncertain"
+        else:
+            if identity is None or (st.st_dev, st.st_ino) != identity:
+                identity_matched = False
+                reason_code = reason_code or "runtime_lock_acquire_uncertain"
+            else:
+                identity_matched = True
+                try:
+                    os.unlink(self._path)
+                    lock_unlinked = True
+                    lock_absent_confirmed = True
+                except FileNotFoundError:
+                    lock_unlinked = True
+                    lock_absent_confirmed = True
+                except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                    fatal = fatal or exc
+                except OSError:
+                    reason_code = reason_code or "runtime_lock_acquire_uncertain"
+
+        if not fd_closed and reason_code is None and fatal is None:
+            reason_code = "runtime_lock_acquire_uncertain"
+        return RuntimeLockAcquireCleanupResult(
+            fd_closed=fd_closed,
+            lock_unlinked=lock_unlinked,
+            lock_absent_confirmed=lock_absent_confirmed,
+            identity_matched=identity_matched,
+            reason_code=reason_code,
+            fatal=fatal,
+        )
 
     def release(self) -> RuntimeLockReleaseResult:
         """fd close와 identity-safe unlink를 분리 관찰한다.
@@ -417,6 +505,12 @@ class PilotRuntimeLock:
             try:
                 os.close(fd)
                 fd_closed = True
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                # An fd-close fatal is captured (not raised) so identity/unlink still
+                # run and the outer finalizer owns fatal precedence; release() must
+                # never escape the outer cleanup.
+                fd_closed = False
+                fatal = exc
             except OSError:
                 fd_closed = False
                 reason_code = "runtime_lock_release_failed"
@@ -427,7 +521,7 @@ class PilotRuntimeLock:
             lock_unlinked = True
             lock_absent_confirmed = True
         except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
-            fatal = exc
+            fatal = fatal or exc
         except PermissionError:
             reason_code = reason_code or "runtime_lock_release_uncertain"
         except OSError as exc:
@@ -451,7 +545,7 @@ class PilotRuntimeLock:
                 except PermissionError:
                     reason_code = reason_code or "runtime_lock_release_uncertain"
                 except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
-                    fatal = exc
+                    fatal = fatal or exc
                 except OSError as exc:
                     if exc.errno in (errno.EACCES, errno.EIO):
                         reason_code = reason_code or "runtime_lock_release_uncertain"
@@ -1211,7 +1305,10 @@ def _finalize_run(
             stop_reason = "resource_close_failure"
             outcome = RuntimeOutcome.NO_GO
             ordinary_cleanup_failure = True
-    counters.stamp("shutdown_completed_at", now_fn())
+    # Stamp the actual resource-close completion here (exactly the point at which the
+    # stack has been closed), not a "shutdown_completed" claim recorded before the
+    # summary publish and lock release have run. The name now matches the observation.
+    counters.stamp("resource_close_completed_at", now_fn())
 
     # 2. Completion verdict — cleanup fatal 전 mechanical outcome만 정제.
     if ran_market_loop and outcome == RuntimeOutcome.PASS and cleanup_fatal is None:
@@ -1475,6 +1572,12 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
     parent_sync_attempted = False
     temp_stat: os.stat_result | None = None
     primary_reasons: list[str] = []
+    # Fatal ownership inside the publisher: an operation (body) fatal outranks any
+    # cleanup (temp close/unlink) fatal. Neither is allowed to collapse an actually
+    # published destination into NOT_WRITTEN — the structured _finalize() result owns
+    # the publication state.
+    operation_fatal: BaseException | None = None
+    cleanup_fatal: BaseException | None = None
 
     def _finalize() -> SummaryPublishResult:
         if destination_published:
@@ -1598,18 +1701,32 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                 parent_sync_attempted = True
                 sync = _fsync_directory(parent)
                 if sync.fatal is not None:
-                    # Preserve as a pending publication fatal; the temp close/unlink
-                    # finally still runs, then the finalize boundary releases the lock.
-                    raise sync.fatal
-                parent_sync_confirmed = sync.synced and sync.closed
-                if not parent_sync_confirmed:
-                    primary_reasons.append(_REASON_SYNC_FAILED)
+                    # Capture as the operation fatal; the temp close/unlink finally
+                    # still runs, then operation>cleanup precedence is applied below.
+                    operation_fatal = sync.fatal
+                else:
+                    parent_sync_confirmed = sync.synced and sync.closed
+                    if not parent_sync_confirmed:
+                        primary_reasons.append(_REASON_SYNC_FAILED)
+    except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+        operation_fatal = operation_fatal or exc
+    except Exception:
+        # An ordinary (non-OSError) exception escaped an inner step. It must never
+        # collapse a published destination into NOT_WRITTEN: keep whatever state was
+        # already established and let _finalize() recover it (PUBLISHED_INCOMPLETE if
+        # the link landed, PUBLICATION_UNCERTAIN otherwise).
+        if not destination_published:
+            publication_uncertain = True
+            if _REASON_PUBLISH_FAILED not in primary_reasons:
+                primary_reasons.append(_REASON_PUBLISH_FAILED)
     finally:
         if fd is not None:
             try:
                 os.close(fd)
                 temp_close_complete = True
-            except OSError:
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                cleanup_fatal = cleanup_fatal or exc
+            except Exception:
                 temp_close_complete = False
         if temp_created:
             try:
@@ -1617,8 +1734,15 @@ def _publish_summary_create_new(path: Path, text: str) -> SummaryPublishResult:
                 temp_cleanup_complete = True
             except FileNotFoundError:
                 temp_cleanup_complete = True
-            except OSError:
+            except (MemoryError, KeyboardInterrupt, SystemExit) as exc:
+                cleanup_fatal = cleanup_fatal or exc
+            except Exception:
                 temp_cleanup_complete = False
+    # Operation fatal outranks cleanup fatal; either is re-raised so the outer
+    # finalizer owns fatal precedence and the lock release still runs.
+    fatal = operation_fatal if operation_fatal is not None else cleanup_fatal
+    if fatal is not None:
+        raise fatal
     return _finalize()
 
 
@@ -1713,9 +1837,14 @@ def _run_live_startup_probe(
                 raise AttendedPaperDayRuntimeError("source", "source_failed") from consumer_exc
         else:
             consumer.cancel()
-            # Bound the cancellation/cleanup await: a consumer that ignores
-            # CancelledError must not hang the probe. ``shield`` keeps the timeout
-            # from re-cancelling (and thus re-blocking on) the same task.
+            # Bound the *probe await* on cancellation/cleanup so a source that delays
+            # its response to cancellation cannot stall the probe past the timeout.
+            # ``shield`` keeps the timeout from re-cancelling (and thus re-blocking on)
+            # the same task. NOTE: this bounds only the await — a source that ignores
+            # every CancelledError (including the one asyncio.run delivers at loop
+            # shutdown) cannot be terminated in-process; bounding that pathological
+            # case requires process isolation. The supported contract is therefore
+            # "cancellation-compliant sources are bounded".
             try:
                 await asyncio.wait_for(
                     asyncio.shield(consumer), timeout=PROBE_CLEANUP_TIMEOUT_SECONDS
@@ -2019,6 +2148,7 @@ __all__ = [
     "DeterministicPaperDecisionPublisher",
     "EvidenceRecorder",
     "PartialCleanupResult",
+    "RuntimeLockAcquireCleanupResult",
     "RuntimeLockReleaseResult",
     "SummaryPublicationOutcome",
     "SummaryPublishResult",

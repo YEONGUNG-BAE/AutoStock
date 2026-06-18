@@ -131,6 +131,20 @@ carried in the result and re-raised by the caller), so a directory-sync failure
 can no longer bypass lock release the way a raw `os.close` in a `finally` once
 did.
 
+Publisher-internal state preservation: the `NOT_WRITTEN` outer boundary above
+applies only when the *whole* publish step never confirmed a destination. **Inside**
+the publisher, once the hard link has landed (`destination_published`), no later
+non-`OSError` exception may collapse the result back to `NOT_WRITTEN`. An ordinary
+exception that escapes an inner step keeps whatever state was already established:
+if the link landed, `_finalize()` recovers it as `PUBLISHED_INCOMPLETE`; if it had
+not, the result is `PUBLICATION_UNCERTAIN` (never a false `NOT_WRITTEN`). Likewise
+a post-link verification `lstat` that fails (`EIO`/`EACCES`) yields
+`PUBLICATION_UNCERTAIN`, not `NOT_WRITTEN`. Publisher-internal fatal precedence is
+explicit: an operation (body) fatal — including a directory-sync fatal — outranks a
+cleanup (temp close/unlink) fatal, and **neither** may overwrite a confirmed
+publication state; the structured `_finalize()` result owns the outcome and the
+chosen fatal is re-raised only after finalize.
+
 Fatal boundary consistency: every operation boundary distinguishes fatals from
 ordinary failures with `except (MemoryError, KeyboardInterrupt, SystemExit):
 raise` ahead of `except Exception:`. This holds uniformly at `recorder.open`,
@@ -166,13 +180,27 @@ bounded cleanup (stack close, recorder close, summary publish, lock release):
   denies PASS independently.
 
 Lock acquire is partial-side-effect-safe: after the `O_EXCL` open, any failure
-of `fstat`/`write` rolls back — the fd is closed and the inode is unlinked **only
-when its `(st_dev, st_ino)` still matches the one we created**. A fatal during
-write is re-raised after rollback; an ordinary failure yields
-`runtime_lock_acquire_failed` (rollback confirmed) or
-`runtime_lock_acquire_uncertain` (rollback could not be confirmed). The fd and
-identity are recorded only on a fully successful acquire, so a failed acquire
-leaves no stale lock and no leaked fd.
+of `fstat`/`write` rolls back via `_abort_partial_acquire`, which returns a
+structured `RuntimeLockAcquireCleanupResult` (`fd_closed`, `lock_unlinked`,
+`lock_absent_confirmed`, `identity_matched`, `reason_code`, `fatal`) rather than a
+bare bool — the caller owns fatal precedence and reason selection. The fd is
+closed and the inode is unlinked **only when its `(st_dev, st_ino)` still matches
+the one we created**. A fatal during the write body is re-raised after rollback
+(operation fatal outranks any rollback fatal); a rollback fatal is otherwise
+re-raised by the caller. An ordinary failure yields `runtime_lock_acquire_failed`
+**only when the rollback is fully confirmed** (fd closed *and* lock absent), else
+`runtime_lock_acquire_uncertain`. In particular an fd-close `OSError` during
+rollback makes the acquire `runtime_lock_acquire_uncertain` **even when the unlink
+succeeds** — a closed-but-unconfirmed fd is never reported as a clean rollback.
+The fd and identity are recorded only on a fully successful acquire, so a failed
+acquire leaves no stale lock and no leaked fd.
+
+The lock-parent `mkdir` is part of the same stable admission taxonomy — a raw
+`OSError`/`RuntimeError` never escapes it. No lock fd is open on this path, so
+there is nothing to roll back. A `PermissionError` or `OSError(EACCES/EIO)` →
+`runtime_lock_parent_unreadable`; any other `OSError` → `runtime_lock_acquire_failed`;
+a non-`OSError` `Exception` → `runtime_lock_acquire_uncertain`; a fatal
+(`MemoryError`/`KeyboardInterrupt`/`SystemExit`) is re-raised unchanged.
 
 Lock release returns structured state (`runtime_lock_fd_closed`,
 `runtime_lock_unlinked`, `runtime_lock_absent_confirmed`,
@@ -183,11 +211,16 @@ reported `runtime_lock_identity_mismatch` (never unlinked). `unlink` `ENOENT`
 confirms absent; `EACCES`/`EIO` yield `runtime_lock_release_uncertain`; other
 failures yield `runtime_lock_release_failed`. fd-close and unlink are observed
 independently: an fd-close `OSError` sets `runtime_lock_fd_closed == false` and a
-release reason even when the subsequent unlink succeeds. A fatal during release
-is not raised from `release()` — it is returned in the result and re-raised by
-the outer owner. Lock residue, fd-close failure, identity mismatch, or uncertain
-release forbids PASS return. No automatic stale-lock deletion after release
-failure.
+release reason even when the subsequent unlink succeeds. An fd-close **fatal**
+(`MemoryError`/`KeyboardInterrupt`/`SystemExit`) is likewise captured into the
+result (`runtime_lock_fd_closed == false`) rather than thrown from `release()`,
+and the unlink is **still attempted** afterward; later release fatals never
+overwrite the first (`fatal = fatal or exc`). A fatal during release is therefore
+never raised from `release()` — it is returned in the result and re-raised by the
+outer owner only after the higher-precedence body/source/stack/recorder/publisher
+fatals, so a lock-release fatal can never replace the original failure path. Lock
+residue, fd-close failure, identity mismatch, or uncertain release forbids PASS
+return. No automatic stale-lock deletion after release failure.
 
 Transport readiness counters are owned by source lifecycle events only:
 connect attempts, connected state, subscription requests, ACKs, rejects, and
@@ -219,10 +252,22 @@ generator close fatal                  -> fatal preserved (no PASS summary)
 receive timeout without readiness      -> NO_GO/health_not_ready
 ```
 
-Bounded cancellation: after the consumer is cancelled, the cleanup await is
-bounded by `asyncio.wait_for(asyncio.shield(consumer), PROBE_CLEANUP_TIMEOUT_SECONDS)`.
-A consumer that ignores `CancelledError` cannot hang the probe — the timeout
-yields `FAIL/source_close_timeout`.
+Bounded cancellation (scope — Option B, reduced contract): after the consumer is
+cancelled, the cleanup *await* is bounded by
+`asyncio.wait_for(asyncio.shield(consumer), PROBE_CLEANUP_TIMEOUT_SECONDS)`, so a
+consumer that ignores `CancelledError` cannot hang the *probe verdict* — the
+timeout yields `FAIL/source_close_timeout`. The boundedness guarantee is
+**verdict-level, not task-termination-level**: a source that genuinely refuses
+`CancelledError` leaves a real pending task that the in-process event loop cannot
+force-terminate, and `asyncio.run()` loop shutdown would itself block on it. The
+contract therefore guarantees in-process termination **only for
+cancellation-compliant sources**. The real `KisWsMarketEventSource` is
+cancellation-compliant — it re-raises `CancelledError` after a `finally` that runs
+`_safe_unsubscribe` + `_safe_close` (proven by
+`tests/test_kis_ws_source.py::test_cancellation_cleans_up_and_reraises`). An
+all-cancel-ignoring source is honestly out of scope for in-process bounding; only
+process isolation (a hard subprocess timeout) bounds it, demonstrated by
+`tests/test_attended_paper_day.py::test_all_cancel_ignoring_source_is_not_bounded_without_process_isolation`.
 
 The probe inspects the consumer task's exception explicitly rather than
 suppressing it; suppressing a consumer exception and then reporting
@@ -247,7 +292,8 @@ NO_GO: transport_not_ready, subscription_rejected, trade_not_observed,
        resource_close_failure, runtime_lock_exists
 FAIL: invalid_input, source_failed, source_close_failed, source_close_timeout,
       evidence_failed, summary_failed, summary_published_incomplete,
-      summary_publication_uncertain, runtime_lock_acquire_failed,
+      summary_publication_uncertain, runtime_lock_parent_unreadable,
+      runtime_lock_acquire_failed,
       runtime_lock_acquire_uncertain, runtime_lock_release_failed,
       runtime_lock_release_uncertain, runtime_lock_identity_mismatch,
       db_failed, internal_runtime_error
@@ -293,7 +339,9 @@ an existing non-empty pilot DB directory requires an explicit reuse policy.
 Immediate stop: `UNCERTAIN` and `RECONCILE_REQUIRED` stop event intake after the
 first occurrence and return `NO_GO`; later events must not reach orchestration.
 Resource close failures are reflected in summary/return/exit. The summary is
-written after resource close and includes `shutdown_completed_at`.
+written after resource close and includes `resource_close_completed_at` (stamped
+when the resource stack finishes closing, not a whole-process shutdown time — the
+lock release and summary publish run after this stamp is serialized).
 
 Actual KIS network execution remains Operator-only. Cursor/test work must use
 replay or lifecycle-aware fakes. A 1-day pilot remains **NO-GO** until Reviewer

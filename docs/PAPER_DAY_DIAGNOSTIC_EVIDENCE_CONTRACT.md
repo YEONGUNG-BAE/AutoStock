@@ -32,7 +32,10 @@ Counters cover actual observations only:
 - health/session gate outcomes
 - trigger evaluations and match/suppression outcomes
 - execution requests, journal terminal outcomes, orders, fills
-- lifecycle timestamps and resource close failures
+- lifecycle timestamps and resource close failures (the post-close stamp is
+  `resource_close_completed_at` — set when the resource stack finishes closing,
+  serialized before lock release/summary publish; it is not a whole-process
+  shutdown time)
 
 Transport counters are derived from source lifecycle events, not from runtime
 startup assumptions. Replay sources may emit an explicit synthetic replay

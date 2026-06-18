@@ -93,8 +93,13 @@ the returned envelope adds `persisted_summary` + cleanup/publication/lock keys
 cleanup step (identity-safe: a replaced/foreign lock is never unlinked and is
 reported `runtime_lock_identity_mismatch`); lock residue, fd-close failure,
 identity mismatch, or uncertain release forbids PASS return, including under a
-fatal. A consumer that ignores cancellation during a startup probe is bounded and
-reported `FAIL/source_close_timeout`.
+fatal. A consumer that ignores cancellation during a startup probe is bounded at
+the **verdict level** (Option B) and reported `FAIL/source_close_timeout`; the
+real `KisWsMarketEventSource` is cancellation-compliant, but a source that truly
+refuses `CancelledError` leaves a pending task that only process isolation can
+terminate — in-process bounding is guaranteed only for compliant sources. If a
+startup probe reports `source_close_timeout`, treat the source as defective and do
+not retry in-process.
 
 Immediate stop conditions:
 

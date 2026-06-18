@@ -592,16 +592,33 @@ touch network/credentials/DB/clock and never activate runtime:
   byte-equals the file **only for `WRITTEN`** (else `null`). A single-owner `is_clean_pass` predicate
   (PASS + `WRITTEN` + `runtime_lock_fd_closed` + `runtime_lock_absent_confirmed` + no release reason +
   `cleanup_outcome == CLEAN`) owns the exit-0 decision for CLI and runtime. `PilotRuntimeLock.acquire`
-  is partial-side-effect-safe (post-open `fstat`/`write` failure rolls back fd + identity-verified
-  unlink → `runtime_lock_acquire_failed`/`_uncertain`, no stale lock/fd); `release` is identity-safe
-  (a replaced/foreign inode is never unlinked → `runtime_lock_identity_mismatch`,
-  `runtime_lock_identity_matched`) and observes fd-close independently of unlink. Every publisher
-  exception is wrapped so the lock release runs **exactly once** (ordinary → `NOT_WRITTEN` +
-  `cleanup_outcome == INCOMPLETE`; fatal → pending cleanup fatal); `_fsync_directory` is a structured
+  is partial-side-effect-safe: `_abort_partial_acquire` returns a structured
+  `RuntimeLockAcquireCleanupResult` (not a bool) so the caller owns precedence — a post-open
+  `fstat`/`write` failure rolls back fd + identity-verified unlink, reporting `runtime_lock_acquire_failed`
+  **only when rollback is fully confirmed** (fd closed *and* lock absent) else `runtime_lock_acquire_uncertain`;
+  an fd-close `OSError` during rollback makes it `_uncertain` **even when the unlink succeeded** (no false
+  clean rollback), no stale lock/fd. The lock-parent `mkdir` shares the admission taxonomy
+  (`PermissionError`/`EACCES`/`EIO` → `runtime_lock_parent_unreadable`; other `OSError` →
+  `runtime_lock_acquire_failed`; non-`OSError` → `runtime_lock_acquire_uncertain`; fatal re-raised).
+  `release` is identity-safe (a replaced/foreign inode is never unlinked → `runtime_lock_identity_mismatch`,
+  `runtime_lock_identity_matched`), observes fd-close independently of unlink, and captures an fd-close
+  **fatal** into the result (`fatal = fatal or exc`) while still attempting the unlink — the outer owner
+  re-raises it only after higher-precedence fatals, never replacing them. Every publisher exception is
+  wrapped so the lock release runs **exactly once**: an ordinary exception at the *outer* boundary →
+  `NOT_WRITTEN` + `cleanup_outcome == INCOMPLETE`, but a non-`OSError` *inside* the publisher after the link
+  landed never collapses to `NOT_WRITTEN` — `_finalize()` recovers it as `PUBLISHED_INCOMPLETE` (link
+  landed) or `PUBLICATION_UNCERTAIN` (not), and publisher operation fatal > cleanup fatal with neither
+  overwriting a confirmed publication. `_fsync_directory` is a structured
   `DirectorySyncResult` that never lets `OSError` escape. `MemoryError` is fatal at every boundary
   (`recorder.open`, stack builder, source factory, publisher `parent.mkdir`, directory-sync).
-  `DiagnosticStack.close` closes in reverse construction order (journal → ledger → active_store). An
-  uncancellable startup consumer is bounded by `PROBE_CLEANUP_TIMEOUT_SECONDS` → `source_close_timeout`.
+  `DiagnosticStack.close` closes in reverse construction order (journal → ledger → active_store). The
+  startup-probe boundedness is **verdict-level (Option B)**: the cleanup await is bounded by
+  `PROBE_CLEANUP_TIMEOUT_SECONDS` → `source_close_timeout`, so a cancel-ignoring consumer cannot hang the
+  verdict, but an in-process loop cannot force-terminate a source that genuinely refuses `CancelledError`.
+  In-process termination is guaranteed only for cancellation-compliant sources; the real
+  `KisWsMarketEventSource` is compliant (`test_kis_ws_source.py::test_cancellation_cleans_up_and_reraises`),
+  and an all-cancel-ignoring source is bounded only by process isolation
+  (`test_attended_paper_day.py::test_all_cancel_ignoring_source_is_not_bounded_without_process_isolation`).
   Import-guard boundary: `ops/run_attended_paper_day.py` is the only attended CLI permitted to reach
   the live KIS read-only surface, and only through an exact module allowlist —
   `broker.kis_transport`, `data.kis_ws_auth`, `data.kis_ws_source`. No other `broker`/`data`
