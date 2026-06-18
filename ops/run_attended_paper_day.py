@@ -29,6 +29,9 @@ from composition.attended_paper_day import (
     AttendedPaperDayConfig,
     AttendedPaperDayInputError,
     KST,
+    LiveSourceApprovalError,
+    LiveSourceConfigGateError,
+    LiveSourceConnectError,
     PILOT_MARKET,
     PILOT_SYMBOL,
     is_clean_pass,
@@ -215,27 +218,66 @@ def _live_source_factory(config_path: Path, config: AttendedPaperDayConfig):
             open_kis_websocket,
         )
 
-        settings = load_settings(config_path)
-        ws = settings.broker.kis_ws_read_only
-        if not ws.enabled:
-            raise CliError("broker.kis_ws_read_only.enabled must be true for --live-kis.")
-        app_key = os.environ.get(ws.app_key_env)
-        app_secret = os.environ.get(ws.app_secret_env)
-        if not app_key or not app_secret:
-            raise CliError("KIS app key/secret env vars are required for --live-kis.")
-        if config.symbol != PILOT_SYMBOL:
-            raise CliError("only symbol 005930 is allowed.")
-        approval = KisWsApprovalProvider(
-            transport=StdlibKisHttpTransport(),
-            approval_base_url=ws.approval_base_url,
-            app_key=app_key,
-            app_secret=app_secret,
-            timeout_seconds=ws.connect_timeout_seconds,
-        ).issue_approval_key()
+        # Stage 1 — config/env gate. Settings load, the enabled flag, credential-env
+        # reads, and the symbol allow-list are all config-shaped failures. They carry
+        # no secret value; the runtime maps the typed exception to the sanitized reason
+        # ``source_config_gate_failed``. Fatal signals propagate untouched.
+        try:
+            settings = load_settings(config_path)
+            ws = settings.broker.kis_ws_read_only
+            if not ws.enabled:
+                raise LiveSourceConfigGateError(
+                    "broker.kis_ws_read_only.enabled must be true for --live-kis."
+                )
+            app_key = os.environ.get(ws.app_key_env)
+            app_secret = os.environ.get(ws.app_secret_env)
+            if not app_key or not app_secret:
+                raise LiveSourceConfigGateError(
+                    "KIS app key/secret env vars are required for --live-kis."
+                )
+            if config.symbol != PILOT_SYMBOL:
+                raise LiveSourceConfigGateError("only symbol 005930 is allowed.")
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except LiveSourceConfigGateError:
+            raise
+        except Exception as exc:
+            raise LiveSourceConfigGateError("live-source config gate failed.") from exc
+
+        # Stage 2 — approval-key issuance. Any failure here (HTTP, auth, parse) is mapped
+        # to the sanitized reason ``source_approval_failed``. The message carries no app
+        # key/secret, approval key, or raw HTTP response. Fatal signals propagate.
+        try:
+            approval = KisWsApprovalProvider(
+                transport=StdlibKisHttpTransport(),
+                approval_base_url=ws.approval_base_url,
+                app_key=app_key,
+                app_secret=app_secret,
+                timeout_seconds=ws.connect_timeout_seconds,
+            ).issue_approval_key()
+        except (MemoryError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            raise LiveSourceApprovalError("live-source approval issuance failed.") from exc
+
+        # Stage 3 — websocket connect. ``open_kis_websocket`` is a coroutine, so connect
+        # failures only surface at await time inside the consumer. The wrapper must be
+        # ``async def`` so it can catch the await-time error and re-raise it as the typed
+        # ``LiveSourceConnectError`` (mapped to ``source_connect_failed``). A sync lambda
+        # returning the coroutine would let the raw error escape unclassified. The message
+        # carries no raw frame or credentialed URL. Fatal signals propagate.
+        async def _connect() -> object:
+            try:
+                return await open_kis_websocket(
+                    ws.websocket_url, connect_timeout_seconds=ws.connect_timeout_seconds
+                )
+            except (MemoryError, KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                raise LiveSourceConnectError("live-source websocket connect failed.") from exc
+
         return KisWsMarketEventSource(
-            connect=lambda: open_kis_websocket(
-                ws.websocket_url, connect_timeout_seconds=ws.connect_timeout_seconds
-            ),
+            connect=_connect,
             approval_key=approval,
             subscriptions=(
                 KisWsSubscription(tr_id=TR_TRADE, symbol=config.symbol),

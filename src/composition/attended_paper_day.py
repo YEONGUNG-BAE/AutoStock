@@ -178,6 +178,22 @@ class AttendedPaperDayRuntimeError(Exception):
         self.reason_code = reason_code
 
 
+class LiveSourceConfigGateError(Exception):
+    """Live-source config/env gate failure (enabled, credential env names, symbol,
+    settings load, URL config). Carries no secret/credential value — the source-open
+    path maps it to the sanitized reason ``source_config_gate_failed``."""
+
+
+class LiveSourceApprovalError(Exception):
+    """Live-source approval-key issuance failure. Carries no app key/secret/approval
+    key or raw HTTP response — mapped to the sanitized reason ``source_approval_failed``."""
+
+
+class LiveSourceConnectError(Exception):
+    """Live-source websocket connect failure (open/handshake/timeout). Carries no raw
+    frame or credentialed URL — mapped to the sanitized reason ``source_connect_failed``."""
+
+
 class DiagnosticMarketSourceLifecycle(Protocol):
     def on_connect_attempt(self, *, at: datetime) -> None: ...
 
@@ -1781,6 +1797,10 @@ def _source_with_lifecycle(
         raise
     except (MemoryError, KeyboardInterrupt, SystemExit):
         raise
+    except LiveSourceConfigGateError as exc:
+        raise AttendedPaperDayRuntimeError("source", "source_config_gate_failed") from exc
+    except LiveSourceApprovalError as exc:
+        raise AttendedPaperDayRuntimeError("source", "source_approval_failed") from exc
     except Exception as exc:
         # Any factory failure (including an internal TypeError) is a sanitized source
         # failure — never a signal to retry the call with a different signature.
@@ -1826,6 +1846,10 @@ def _run_live_startup_probe(
             if consumer_exc is not None:
                 if isinstance(consumer_exc, (MemoryError, KeyboardInterrupt, SystemExit)):
                     raise consumer_exc
+                if isinstance(consumer_exc, LiveSourceConnectError):
+                    raise AttendedPaperDayRuntimeError(
+                        "source", "source_connect_failed"
+                    ) from consumer_exc
                 raise AttendedPaperDayRuntimeError("source", "source_failed") from consumer_exc
         else:
             consumer.cancel()
@@ -2139,6 +2163,9 @@ __all__ = [
     "DiagnosticCounters",
     "DeterministicPaperDecisionPublisher",
     "EvidenceRecorder",
+    "LiveSourceApprovalError",
+    "LiveSourceConfigGateError",
+    "LiveSourceConnectError",
     "PartialCleanupResult",
     "RuntimeLockAcquireCleanupResult",
     "RuntimeLockReleaseResult",

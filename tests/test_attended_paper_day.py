@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import time as time_module
+import types
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +31,11 @@ from composition.attended_paper_day import (
     validate_attended_paper_day_inputs,
 )
 from composition.attended_paper_day import AttendedPaperDayInputError
+from composition.attended_paper_day import (
+    LiveSourceApprovalError,
+    LiveSourceConfigGateError,
+    LiveSourceConnectError,
+)
 from domain.enums import Currency
 from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
 from market_data.models import NormalizedBestBidAsk, NormalizedTradeTick, ProviderSequence
@@ -2290,3 +2296,302 @@ def test_all_cancel_ignoring_source_is_not_bounded_without_process_isolation(
             capture_output=True,
             text=True,
         )
+
+
+# --- RTM-7c.6a: source-failed subreason taxonomy (fake-only) ----------------
+#
+# These tests pin the split of the collapsed ``source_failed`` reason into stable
+# sanitized sub-reasons. They use fake source factories, a fake approval provider,
+# and a fake websocket connect only — no live KIS, no network, no credentials.
+
+
+class _ConfigGateBoomSource:
+    """Factory-stage failure: raises the typed config-gate exception."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+
+class _ApprovalBoomSource:
+    """Factory-stage failure: raises the typed approval exception."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+
+class _ConnectBoomSource:
+    """Consumer-stage failure: the source raises the typed connect exception on the
+    first await, as a lazy websocket connect would."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        raise LiveSourceConnectError("live-source websocket connect failed.")
+        yield  # unreachable
+
+
+class _ConnectFatalSource:
+    """Consumer-stage fatal: a connect that raises MemoryError must not be swallowed
+    into source_connect_failed; the fatal identity is preserved."""
+
+    def __init__(self, lifecycle: Any) -> None:
+        self._lifecycle = lifecycle
+
+    async def events(self):
+        raise MemoryError("oom during connect")
+        yield  # unreachable
+
+
+def test_factory_config_gate_error_is_source_config_gate_failed(tmp_path: Path) -> None:
+    def factory(*, lifecycle: Any) -> Any:
+        raise LiveSourceConfigGateError("enabled must be true.")
+
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=factory,
+        run_id="gate",
+        clock=_at,
+    )
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_config_gate_failed"
+
+
+def test_factory_approval_error_is_source_approval_failed(tmp_path: Path) -> None:
+    def factory(*, lifecycle: Any) -> Any:
+        raise LiveSourceApprovalError("live-source approval issuance failed.")
+
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=factory,
+        run_id="approval",
+        clock=_at,
+    )
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_approval_failed"
+
+
+def test_factory_fatal_is_preserved_not_source_failed(tmp_path: Path) -> None:
+    def factory(*, lifecycle: Any) -> Any:
+        raise MemoryError("oom in factory")
+
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=_live_startup_cfg(tmp_path),
+            source_factory=factory,
+            run_id="factory-fatal",
+            clock=_at,
+        )
+    assert not (tmp_path / "runtime" / "summary.json").exists()
+
+
+def test_connect_error_is_source_connect_failed(tmp_path: Path) -> None:
+    summary = run_attended_paper_day(
+        config=_live_startup_cfg(tmp_path),
+        source_factory=lambda *, lifecycle: _ConnectBoomSource(lifecycle),
+        run_id="connect",
+        clock=_at,
+    )
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_connect_failed"
+
+
+def test_connect_fatal_is_preserved_not_source_connect_failed(tmp_path: Path) -> None:
+    with pytest.raises(MemoryError):
+        run_attended_paper_day(
+            config=_live_startup_cfg(tmp_path),
+            source_factory=lambda *, lifecycle: _ConnectFatalSource(lifecycle),
+            run_id="connect-fatal",
+            clock=_at,
+        )
+    assert not (tmp_path / "runtime" / "summary.json").exists()
+
+
+def test_subreason_split_preserves_evidence_subreason(tmp_path: Path) -> None:
+    """The stable subreason must reach both the summary stop_reason and the evidence
+    ``failed_closed`` reason — no collapse back to source_failed."""
+    cfg = _live_startup_cfg(tmp_path)
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: _ConnectBoomSource(lifecycle),
+        run_id="evidence",
+        clock=_at,
+    )
+    assert summary["stop_reason"] == "source_connect_failed"
+    lines = [
+        json.loads(line)
+        for line in cfg.evidence_out.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    failed = [ev for ev in lines if ev["event"] == "failed_closed"]
+    assert failed and failed[-1]["reason_code"] == "source_connect_failed"
+
+
+# --- RTM-7c.6a: CLI live-source factory raise sites (fake transport/approval/ws) ---
+#
+# The CLI factory body owns the actual config-gate / approval / connect raise sites.
+# These tests substitute a fake settings loader, a fake approval provider, and a fake
+# websocket connect, so no credential is read and no socket is opened.
+
+_APP_KEY_SENTINEL = "APPKEYSENTINEL_DO_NOT_LEAK"
+_APP_SECRET_SENTINEL = "APPSECRETSENTINEL_DO_NOT_LEAK"
+
+
+def _fake_kis_ws_settings(*, enabled: bool = True) -> Any:
+    ws = types.SimpleNamespace(
+        enabled=enabled,
+        app_key_env="KIS_FAKE_APP_KEY",
+        app_secret_env="KIS_FAKE_APP_SECRET",
+        approval_base_url="https://example.invalid",
+        websocket_url="ws://example.invalid:1/",
+        connect_timeout_seconds=1,
+        receive_timeout_seconds=1,
+    )
+    return types.SimpleNamespace(
+        broker=types.SimpleNamespace(kis_ws_read_only=ws)
+    )
+
+
+class _CapturingWsSource:
+    """Stands in for KisWsMarketEventSource: captures the constructor kwargs (notably
+    the ``connect`` coroutine factory) without opening anything."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class _FakeApprovalOk:
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    def issue_approval_key(self) -> str:
+        return "FAKE-APPROVAL-KEY"
+
+
+def _fake_lifecycle() -> Any:
+    return types.SimpleNamespace(on_kis_transport_event=lambda *a, **k: None)
+
+
+def _patch_factory_deps(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool = True,
+    provider_cls: Any = _FakeApprovalOk,
+    open_ws: Any = None,
+) -> None:
+    if open_ws is None:
+        async def open_ws(*a: Any, **k: Any) -> Any:  # noqa: ANN401
+            return object()
+
+    monkeypatch.setattr(
+        "config.settings.load_settings",
+        lambda *a, **k: _fake_kis_ws_settings(enabled=enabled),
+    )
+    monkeypatch.setattr("broker.kis_transport.StdlibKisHttpTransport", lambda *a, **k: object())
+    monkeypatch.setattr("data.kis_ws_auth.KisWsApprovalProvider", provider_cls)
+    monkeypatch.setattr("data.kis_ws_source.open_kis_websocket", open_ws)
+    monkeypatch.setattr("data.kis_ws_source.KisWsMarketEventSource", _CapturingWsSource)
+
+
+def _make_cli_factory(tmp_path: Path) -> Any:
+    return cli._live_source_factory(tmp_path / "config.toml", _live_startup_cfg(tmp_path))
+
+
+def test_cli_factory_disabled_is_config_gate_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_factory_deps(monkeypatch, enabled=False)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    with pytest.raises(LiveSourceConfigGateError):
+        _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+
+
+def test_cli_factory_missing_app_key_is_config_gate_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_factory_deps(monkeypatch, enabled=True)
+    monkeypatch.delenv("KIS_FAKE_APP_KEY", raising=False)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    with pytest.raises(LiveSourceConfigGateError):
+        _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+
+
+def test_cli_factory_missing_app_secret_is_config_gate_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_factory_deps(monkeypatch, enabled=True)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.delenv("KIS_FAKE_APP_SECRET", raising=False)
+    with pytest.raises(LiveSourceConfigGateError):
+        _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+
+
+def test_cli_factory_approval_failure_is_approval_error_and_no_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeApprovalBoom:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def issue_approval_key(self) -> str:
+            raise RuntimeError("approval endpoint returned non-200")
+
+    _patch_factory_deps(monkeypatch, enabled=True, provider_cls=_FakeApprovalBoom)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    with pytest.raises(LiveSourceApprovalError) as ei:
+        _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+    text = str(ei.value)
+    assert _APP_KEY_SENTINEL not in text
+    assert _APP_SECRET_SENTINEL not in text
+
+
+def test_cli_factory_approval_fatal_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeApprovalFatal:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def issue_approval_key(self) -> str:
+            raise MemoryError("oom during approval")
+
+    _patch_factory_deps(monkeypatch, enabled=True, provider_cls=_FakeApprovalFatal)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    with pytest.raises(MemoryError):
+        _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+
+
+def test_cli_factory_connect_failure_is_connect_error_and_no_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _open_ws_boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("websocket handshake refused")
+
+    _patch_factory_deps(monkeypatch, enabled=True, open_ws=_open_ws_boom)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    source = _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+    connect = source.kwargs["connect"]
+    with pytest.raises(LiveSourceConnectError) as ei:
+        asyncio.run(connect())
+    text = str(ei.value)
+    assert _APP_KEY_SENTINEL not in text
+    assert _APP_SECRET_SENTINEL not in text
+
+
+def test_cli_factory_connect_fatal_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _open_ws_fatal(*a: Any, **k: Any) -> Any:
+        raise MemoryError("oom during connect")
+
+    _patch_factory_deps(monkeypatch, enabled=True, open_ws=_open_ws_fatal)
+    monkeypatch.setenv("KIS_FAKE_APP_KEY", _APP_KEY_SENTINEL)
+    monkeypatch.setenv("KIS_FAKE_APP_SECRET", _APP_SECRET_SENTINEL)
+    source = _make_cli_factory(tmp_path)(lifecycle=_fake_lifecycle())
+    connect = source.kwargs["connect"]
+    with pytest.raises(MemoryError):
+        asyncio.run(connect())
