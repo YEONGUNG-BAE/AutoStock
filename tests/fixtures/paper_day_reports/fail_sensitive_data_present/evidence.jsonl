@@ -1,0 +1,3 @@
+{"event": "started", "stage": "startup", "recorded_at": "2026-06-22T09:30:00+09:00", "sensitive_data_present": false}
+{"event": "frame", "stage": "transport", "recorded_at": "2026-06-22T09:30:01+09:00", "reason_code": "redacted_payload", "sensitive_data_present": true}
+{"event": "finalized", "stage": "shutdown", "recorded_at": "2026-06-22T09:31:00+09:00", "sensitive_data_present": false}

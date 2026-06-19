@@ -22,6 +22,11 @@ Without `--envelope`, the cleanup/publication/lock clauses are
 `NEEDS_REVIEW`). A missing/empty/malformed envelope is treated as absent — the
 generator never invents envelope-only fields.
 
+For any `NO_GO` / `FAIL` / `NEEDS_REVIEW`, use
+`docs/PAPER_DAY_FAILURE_TRIAGE_PLAYBOOK.md` before retrying — it carries the
+per-stop_reason taxonomies plus the retry and escalation policy. Synthetic
+per-verdict report shapes are in `docs/examples/paper_day_reports/README.md`.
+
 Section skeleton (values shown are illustrative placeholders):
 
 ```markdown

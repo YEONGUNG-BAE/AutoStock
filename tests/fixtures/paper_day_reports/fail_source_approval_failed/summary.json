@@ -1,0 +1,31 @@
+{
+  "schema_version": "paper_day_diagnostic.v1",
+  "run_id": "paper-day-005930-260622-fail",
+  "session_date": "2026-06-22",
+  "market": "KR",
+  "symbol": "005930",
+  "source_kind": "kis_live",
+  "paper_only": true,
+  "activation_authorized": false,
+  "real_order_adapter_constructed": false,
+  "automatic_restart": false,
+  "multi_symbol": false,
+  "outcome": "FAIL",
+  "stop_reason": "source_approval_failed",
+  "nonterminal_journal": 0,
+  "counters": {
+    "counters": {
+      "normalized_trades": 0,
+      "normalized_quotes": 0,
+      "connect_attempts": 0,
+      "connected": 0,
+      "subscription_requests": 0,
+      "subscription_acks": 0,
+      "subscription_rejections": 0,
+      "all_subscribed": 0,
+      "disconnects": 0
+    },
+    "reason_counts": {"source_approval_failed": 1},
+    "timestamps": {"resource_close_completed_at": "2026-06-22T09:30:02+09:00"}
+  }
+}

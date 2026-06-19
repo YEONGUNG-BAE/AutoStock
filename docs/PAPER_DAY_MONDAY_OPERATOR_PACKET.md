@@ -197,6 +197,13 @@ artifacts — the report labels them operator-supplied, so capture them from the
 shell at run time. Include `$RUN_DIR/review-report.md` in the Reviewer handoff.
 See `docs/PAPER_DAY_REVIEW_REPORT_TEMPLATE.md` for the section skeleton.
 
+If the verdict is not PASS, classify the first failed stage using
+`docs/PAPER_DAY_FAILURE_TRIAGE_PLAYBOOK.md` (NO_GO / FAIL / NEEDS_REVIEW
+taxonomies + retry/escalation policy). Attach `review-report.md` and quote its
+**First failure** section in the handoff. Synthetic per-verdict report shapes are
+in `docs/examples/paper_day_reports/README.md`. Do not retry blindly; isolate the
+first failed stage first.
+
 ## PASS criteria
 
 A clean PASS requires **all** of:
@@ -352,6 +359,7 @@ attach $RUN_DIR/review-report.md (rendered by ops/render_paper_day_report.py)
 git status --short, git ls-files runtime
 ## Verdict
 PASS / NO_GO / FAIL and the first failed stage if not PASS
+(classify the first failed stage via docs/PAPER_DAY_FAILURE_TRIAGE_PLAYBOOK.md)
 ```
 
 Do not commit. The Operator commits after Reviewer review. The 1-day pilot

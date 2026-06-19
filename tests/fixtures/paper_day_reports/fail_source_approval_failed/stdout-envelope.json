@@ -1,0 +1,9 @@
+{
+  "summary_publication_outcome": "NOT_WRITTEN",
+  "summary_publication_reason_codes": ["operation_fatal_before_publish"],
+  "cleanup_outcome": "CLEAN",
+  "runtime_lock_fd_closed": true,
+  "runtime_lock_absent_confirmed": true,
+  "runtime_lock_identity_matched": true,
+  "runtime_lock_release_reason_code": null
+}

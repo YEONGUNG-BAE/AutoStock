@@ -1,0 +1,3 @@
+{"event": "started", "stage": "startup", "recorded_at": "2026-06-22T09:30:00+09:00", "sensitive_data_present": false}
+{"event": "health_hold", "stage": "health", "recorded_at": "2026-06-22T09:30:10+09:00", "reason_code": "health_not_ready", "sensitive_data_present": false}
+{"event": "failed_closed", "stage": "health", "recorded_at": "2026-06-22T09:35:00+09:00", "reason_code": "health_not_ready", "sensitive_data_present": false}

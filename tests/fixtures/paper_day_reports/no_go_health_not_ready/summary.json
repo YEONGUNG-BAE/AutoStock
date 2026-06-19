@@ -1,0 +1,38 @@
+{
+  "schema_version": "paper_day_diagnostic.v1",
+  "run_id": "paper-day-005930-260622-nogo",
+  "session_date": "2026-06-22",
+  "market": "KR",
+  "symbol": "005930",
+  "source_kind": "kis_live",
+  "paper_only": true,
+  "activation_authorized": false,
+  "real_order_adapter_constructed": false,
+  "automatic_restart": false,
+  "multi_symbol": false,
+  "outcome": "NO_GO",
+  "stop_reason": "health_not_ready",
+  "nonterminal_journal": 0,
+  "counters": {
+    "counters": {
+      "normalized_trades": 0,
+      "normalized_quotes": 3,
+      "connect_attempts": 1,
+      "connected": 1,
+      "subscription_requests": 2,
+      "subscription_acks": 2,
+      "subscription_rejections": 0,
+      "all_subscribed": 1,
+      "disconnects": 1,
+      "health_hold": 5,
+      "health_pass": 0,
+      "trigger_evaluations": 0,
+      "publication_slot_outcomes": 0,
+      "journal_committed": 0,
+      "orders": 0,
+      "fills": 0
+    },
+    "reason_counts": {"health_not_ready": 1},
+    "timestamps": {"resource_close_completed_at": "2026-06-22T09:35:00+09:00"}
+  }
+}

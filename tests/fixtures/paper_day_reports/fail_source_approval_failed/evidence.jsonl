@@ -1,0 +1,2 @@
+{"event": "started", "stage": "startup", "recorded_at": "2026-06-22T09:30:00+09:00", "sensitive_data_present": false}
+{"event": "failed_closed", "stage": "source", "recorded_at": "2026-06-22T09:30:02+09:00", "reason_code": "source_approval_failed", "sensitive_data_present": false}

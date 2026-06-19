@@ -249,6 +249,30 @@
   validator verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in the Monday
   Operator packet.
 
+## Reference — RTM-7c.9 Failure Triage Playbook and Offline Report Examples
+
+- RTM-7c.9 added `docs/PAPER_DAY_FAILURE_TRIAGE_PLAYBOOK.md`: an offline triage reference that
+  interprets `PASS` / `NO_GO` / `FAIL` / `NEEDS_REVIEW` from `summary.json` + `evidence.jsonl` +
+  `stdout-envelope.json` + `review-report.md`. It carries per-`stop_reason` NO_GO / FAIL / NEEDS_REVIEW
+  taxonomies (meaning / check / do-not / next), a first-failure rule, publication/envelope state rules
+  (`WRITTEN` vs `PUBLISHED_INCOMPLETE` / `PUBLICATION_UNCERTAIN` / `NOT_WRITTEN`), source-readiness and
+  journal/ledger sections, paper-only hard-FAIL conditions, and explicit retry/escalation policy
+  (never immediately retry `source_approval_failed` / `source_connect_failed` /
+  `summary_publication_uncertain` / `runtime_lock_release_uncertain` / `journal_uncertain` /
+  `reconcile_required` / `sensitive_data_present`). It recomputes no verdict — the mechanical verdict is
+  reused verbatim from `ops/validate_paper_day_summary.py` via `ops/render_paper_day_report.py`.
+- Five synthetic, secret-free report fixtures (`tests/fixtures/paper_day_reports/{pass_startup_like,
+  no_go_health_not_ready,fail_source_approval_failed,needs_review_missing_envelope,
+  fail_sensitive_data_present}/`) plus illustrative shapes in
+  `docs/examples/paper_day_reports/README.md`. `tests/test_paper_day_report_fixtures.py` renders each
+  fixture, asserts the expected verdict and first-failure / hard-FAIL surfacing, and scans for forbidden
+  secret sentinels. The Monday packet and review-report template now link the playbook for any non-PASS
+  verdict.
+- RTM-7c.9 added the failure triage playbook and offline report examples. No KIS network. No runtime
+  hot-path change. No live orders. No daemon, no activation, no startup retry, no 1-day pilot, no
+  commit. The 1-day attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and
+  NO-GO until Reviewer PASS.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live
