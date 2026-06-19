@@ -11,6 +11,10 @@ The KIS startup-only smoke has already reached PASS
 gate for a Monday attended paper diagnostic — it does **not** authorize runtime
 activation, automatic restart, or live orders.
 
+Before Monday's live run, optionally rehearse the validator/report/handoff flow
+offline using `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md` (synthetic fixtures,
+no KIS, no network).
+
 ## Preconditions
 
 ```text

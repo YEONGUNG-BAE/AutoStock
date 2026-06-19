@@ -273,6 +273,25 @@
   commit. The 1-day attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and
   NO-GO until Reviewer PASS.
 
+## Reference — RTM-7c.10 Monday Preflight Offline Rehearsal
+
+- RTM-7c.10 added `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md`: an offline, synthetic-fixture
+  rehearsal of the Monday handoff flow (validator + report generator + triage reference + handoff
+  bundle checklist) with a rehearsal matrix mapping each of the five RTM-7c.9 fixtures to its expected
+  verdict, report section, and triage action. The doc runs no real runtime — it copies a fixture into a
+  throwaway `RUN_DIR`-shaped dir and renders the report; `needs_review_missing_envelope` intentionally
+  omits `--envelope` to rehearse the `missing_from_persisted_summary` / `NEEDS_REVIEW` path.
+- Optional helper `ops/rehearse_paper_day_handoff.py` (tests `tests/test_rehearse_paper_day_handoff.py`)
+  is offline and read-only: it copies fixture files (never mutating the source), reuses
+  `build_report` (which reuses the validator verdict) to render `review-report.md` under `--work-dir`
+  only, optionally asserts `--expect-verdict`, and refuses a `--work-dir` inside the repository
+  `runtime/` tree unless `--allow-runtime-dir` is given. It reads no `config`, no credential, and opens
+  no network. `tests/test_paper_day_rehearsal_docs.py` guards the doc against fixture/command drift.
+- RTM-7c.10 added the Monday preflight offline rehearsal. No KIS network. No runtime hot-path change.
+  No live orders. No daemon, no activation, no startup retry, no 1-day pilot, no commit. The 1-day
+  attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and NO-GO until Reviewer
+  PASS.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live
