@@ -9,7 +9,9 @@ no network, no runtime execution. The point is muscle memory and a verified
 artifact shape before the real session, not a real run. The authoritative
 PASS/NO_GO/FAIL criteria live in `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`; the
 verdict here is reused verbatim from `ops/validate_paper_day_summary.py` via
-`ops/render_paper_day_report.py`.
+`ops/render_paper_day_report.py`. The ordered in-session run sheet for the real
+Monday run is `docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md`; this rehearsal walks
+the same validator/report/handoff steps offline first.
 
 ## Prohibitions
 

@@ -292,6 +292,29 @@
   attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and NO-GO until Reviewer
   PASS.
 
+## Reference — RTM-7c.11 Monday Execution Checklist Freeze
+
+- RTM-7c.11 added `docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md`: the single final in-session entry
+  point that freezes and orders RTM-7c.7–7c.10 (Operator packet, validator, report generator, failure
+  triage playbook, offline rehearsal) into one ordered run sheet — Status, Scope, Prohibitions, Runtime
+  freeze, Required HEAD, Pre-market checks (env length/strip/placeholder + config enabled/url checks,
+  no value printed), Market-session run (RTM-7c.7a shell-safe `--json > stdout-envelope.json` +
+  `PILOT_EXIT=$?`, no `tee`/`PIPESTATUS`), Immediate exit capture, Post-run collection, Offline
+  validation, Report rendering, Failure triage, Reviewer handoff, PASS criteria (`orders > 0` not
+  required), NO_GO/FAIL/NEEDS_REVIEW handling, and a Safety proof. It restates — does not relax — the
+  authoritative PASS/NO_GO/FAIL criteria in the Monday packet.
+- The checklist declares the runtime hot-path freeze (the five files
+  `src/composition/attended_paper_day.py`, `ops/run_attended_paper_day.py`, `src/data/kis_ws_source.py`,
+  `src/data/kis_ws_auth.py`, `src/broker/kis_transport.py` are not changed unless the Reviewer reopens
+  the runtime lane) and carries the `--live-kis` command only inside the Operator command and the
+  prohibition text — Cursor/Claude is told never to execute any step. The Monday packet and the
+  preflight rehearsal cross-link the checklist. `tests/test_paper_day_monday_execution_checklist_docs.py`
+  guards the doc against command/HEAD/hot-path drift.
+- RTM-7c.11 added the Monday execution checklist freeze. No KIS network. No runtime hot-path change.
+  No live orders. No daemon, no activation, no startup retry, no 1-day pilot, no commit. The 1-day
+  attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and NO-GO until Reviewer
+  PASS.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live

@@ -13,7 +13,9 @@ activation, automatic restart, or live orders.
 
 Before Monday's live run, optionally rehearse the validator/report/handoff flow
 offline using `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md` (synthetic fixtures,
-no KIS, no network).
+no KIS, no network). For the single ordered in-session run sheet (pre-market →
+run → capture → validate → render → triage → handoff), use
+`docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md`.
 
 ## Preconditions
 
