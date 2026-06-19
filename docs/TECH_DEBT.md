@@ -213,6 +213,42 @@
   Cursor. Operator docs (runbook + runtime/evidence contracts) synchronized with the new taxonomy.
   The 1-day pilot remains NO-GO until a KIS startup-only smoke reaches `PASS/startup_only`.
 
+## Reference — RTM-7c.7 Monday Paper-Day Diagnostic Readiness Packet
+
+- RTM-7c.7 incorporates the achieved KIS startup-only PASS (`runtime/paper-day/2026-06-18/startup-4`:
+  `PASS/startup_only`, `source_kind=kis_live`, `summary_publication_outcome=WRITTEN`,
+  `cleanup_outcome=CLEAN`, lock fd closed + absent confirmed, `nonterminal_journal=0`, `tracked
+  runtime=0`). The prior startup-3 failure was `FAIL/source_approval_failed` caused by quote
+  contamination in the copied `APP_KEY` / `APP_SECRET` (lengths `38`/`182` → `36`/`180` after a
+  plain-quote re-export). The 1-day attended paper diagnostic is HOLD until the Monday 2026-06-22
+  regular market session and remains NO-GO until Reviewer PASS. This pass was docs/offline tooling
+  only — Cursor ran no actual KIS network call, no startup retry, no 1-day pilot, no live order, no
+  daemon, no activation, and no commit.
+- New `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` is the in-session Operator run sheet for
+  2026-06-22: preconditions, length/`strip_same`-only env check (no value printed) with the
+  quote-contamination gotcha, market-session timing (regular session only, no daemon, no
+  auto-restart), a fresh-`RUN_DIR` run-command skeleton (`<MARKET_SESSION_BOUNDED_DURATION>` left as
+  an explicit Operator-set placeholder — no final duration is hardcoded), `tee` capture of the
+  single-line `--json` stdout envelope to `stdout-envelope.json`, post-run collection, strict PASS
+  criteria, NO_GO / FAIL stop-reason interpretation, a Safety proof block, and a Reviewer handoff
+  format. `orders > 0` is explicitly not required — a zero-paper-order day can be PASS when
+  trigger/health/decision conditions do not require an order and the runtime closes cleanly.
+- New `ops/validate_paper_day_summary.py` (tests `tests/test_validate_paper_day_summary.py`) is an
+  offline, network-free, secret-free, read-only validator/parser. It loads the persisted
+  `summary.json` + `evidence.jsonl` (and an optional `--envelope` stdout-envelope file), merges the
+  envelope (the post-finalize Operator verdict) over the mechanical summary, and classifies
+  `PASS` / `NO_GO` / `FAIL` / `NEEDS_REVIEW`. It applies the shared `is_clean_pass` clauses, treats a
+  `sensitive_data_present` evidence row or a wrong `paper_only` / `activation_authorized` /
+  `real_order_adapter_constructed` / `automatic_restart` scalar as a hard `FAIL`, surfaces the first
+  `failed_closed` evidence row + review counters + `reason_counts`, and — because the persisted file
+  omits the envelope-only cleanup/publication/lock keys — reports `missing_from_persisted_summary`
+  and returns `NEEDS_REVIEW` rather than inventing them when no envelope is supplied. Exit `0` only
+  for `PASS`. The validator never mutates files (asserted by test) and never reads config secrets.
+- Runbook + runtime/evidence contracts synchronized: startup-only PASS incorporated, the
+  quote-contamination troubleshooting note added, and the offline validator documented. The
+  validator verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in the Monday
+  Operator packet.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live

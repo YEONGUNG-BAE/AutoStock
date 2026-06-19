@@ -363,6 +363,23 @@ written after resource close and includes `resource_close_completed_at` (stamped
 when the resource stack finishes closing, not a whole-process shutdown time — the
 lock release and summary publish run after this stamp is serialized).
 
-Actual KIS network execution remains Operator-only. Cursor/test work must use
-replay or lifecycle-aware fakes. A 1-day pilot remains **NO-GO** until Reviewer
-PASS.
+Offline post-run validation: `ops/validate_paper_day_summary.py` reads a
+persisted `summary.json` and `evidence.jsonl` (plus an optional `--envelope`
+holding the captured stdout envelope) and classifies the run `PASS` / `NO_GO` /
+`FAIL` / `NEEDS_REVIEW`. It is offline, opens no network, reads no config/credential
+value, and mutates no file. It applies the `is_clean_pass` clauses
+(`outcome == PASS`, `summary_publication_outcome == WRITTEN`, `cleanup_outcome ==
+CLEAN`, `runtime_lock_fd_closed`, `runtime_lock_absent_confirmed`,
+`runtime_lock_release_reason_code is None`) over the merged summary+envelope view,
+treats a `sensitive_data_present` evidence row or a wrong `paper_only` /
+`activation_authorized` / `real_order_adapter_constructed` / `automatic_restart`
+scalar as a hard `FAIL`, and — because the persisted file omits the envelope-only
+cleanup/publication/lock keys — reports `missing_from_persisted_summary` and
+returns `NEEDS_REVIEW` rather than inventing them when no envelope is supplied.
+
+KIS startup-only readiness has reached `PASS/startup_only` (`source_kind=kis_live`,
+`runtime/paper-day/2026-06-18/startup-4`). Actual KIS network execution remains
+Operator-only. Cursor/test work must use replay or lifecycle-aware fakes. The
+1-day attended paper diagnostic is **HOLD** until the Monday 2026-06-22 regular
+market session (`docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`) and remains **NO-GO**
+until Reviewer PASS.

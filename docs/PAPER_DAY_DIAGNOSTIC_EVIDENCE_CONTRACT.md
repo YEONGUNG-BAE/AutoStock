@@ -109,3 +109,11 @@ Failure-stage principle: after a failed attended pilot, inspect the first failed
 stage in evidence and run only the corresponding partial verification. Do not
 expand scope to multi-symbol, daemonization, live orders, signing, or restart
 automation in this lane.
+
+Offline evidence inspection: `ops/validate_paper_day_summary.py` streams
+`evidence.jsonl` read-only and (a) treats **any** row with
+`sensitive_data_present != false` as a hard `FAIL` leak signal, (b) surfaces the
+first `event="failed_closed"` row (stage + sanitized `reason_code`) as the
+first-failure pointer, and (c) reports malformed rows as a PASS blocker. It never
+prints raw frames or credentials — only the sanitized `reason_code` and counters
+that already live in the artifacts.

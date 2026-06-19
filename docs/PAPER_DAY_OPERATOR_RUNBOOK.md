@@ -175,6 +175,36 @@ activation_authorized=true
 After the day, review `summary.json` first, then the earliest evidence record
 whose stage/reason explains the first failure.
 
-The actual live KIS startup/run and the 1-day pilot have **not** been performed.
-A 1-day pilot remains **NO-GO** until Reviewer PASS; Cursor/test work is limited
-to validate-only, offline fixtures, and lifecycle-aware fakes.
+Quote-contamination troubleshooting: if KIS approval fails with
+`source_approval_failed` while the env vars are present, check for copied quote
+characters around `APP_KEY` / `APP_SECRET`. Use length and `strip_same` — never
+print the value. In the observed startup-3 failure the `APP_KEY` / `APP_SECRET`
+lengths were `38` / `182`; after re-exporting from the KIS portal with plain
+shell quotes they were `36` / `180` and startup-4 passed.
+
+Offline summary/evidence validator: after a run (or to inspect any prior run's
+artifacts), classify `summary.json` + `evidence.jsonl` with the offline,
+network-free, secret-free, read-only helper:
+
+```bash
+PYTHONPATH=src uv run python ops/validate_paper_day_summary.py \
+  --summary "$RUN_DIR/summary.json" \
+  --evidence "$RUN_DIR/evidence.jsonl" \
+  --envelope "$RUN_DIR/stdout-envelope.json" \
+  --expect-source-kind kis_live \
+  --json
+```
+
+It emits `PASS` / `NO_GO` / `FAIL` / `NEEDS_REVIEW`. Because the persisted
+`summary.json` holds only the mechanical summary, the cleanup/publication/lock
+clauses must come from the captured stdout envelope (`--envelope`). Without it,
+the validator reports `missing_from_persisted_summary` and returns
+`NEEDS_REVIEW` rather than inventing those fields. The verdict is advisory; the
+authoritative PASS/NO_GO/FAIL criteria live in the Monday operator packet.
+
+KIS startup-only readiness is **PASS** (`runtime/paper-day/2026-06-18/startup-4`:
+`PASS/startup_only/kis_live`). The actual 1-day attended paper diagnostic has
+**not** been performed and is **HOLD** until the Monday 2026-06-22 regular market
+session — see `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` for the in-session run
+sheet. A 1-day pilot remains **NO-GO** until Reviewer PASS; Cursor/test work is
+limited to validate-only, offline fixtures, and lifecycle-aware fakes.
