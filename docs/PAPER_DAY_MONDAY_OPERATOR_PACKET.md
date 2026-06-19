@@ -177,6 +177,26 @@ not hand-edit `stdout-envelope.json` to fill in the missing fields.
 The validator verdict is advisory and mechanical; the PASS/NO_GO/FAIL criteria
 below are authoritative.
 
+Then render the offline Reviewer report (same offline, network-free, secret-free,
+read-only guarantee; the verdict is reused verbatim from the validator and never
+recomputed). Pass the same captured stdout envelope:
+
+```bash
+PYTHONPATH=src uv run python ops/render_paper_day_report.py \
+  --summary "$RUN_DIR/summary.json" \
+  --evidence "$RUN_DIR/evidence.jsonl" \
+  --envelope "$RUN_DIR/stdout-envelope.json" \
+  --expect-source-kind kis_live \
+  --out "$RUN_DIR/review-report.md"
+```
+
+Without `--envelope` the report's cleanup/publication/lock clauses are
+`missing_from_persisted_summary` and the verdict cannot be PASS (it is reported
+`NEEDS_REVIEW`). `PILOT_EXIT` and `tracked_runtime` are not present in the
+artifacts — the report labels them operator-supplied, so capture them from the
+shell at run time. Include `$RUN_DIR/review-report.md` in the Reviewer handoff.
+See `docs/PAPER_DAY_REVIEW_REPORT_TEMPLATE.md` for the section skeleton.
+
 ## PASS criteria
 
 A clean PASS requires **all** of:
@@ -324,6 +344,8 @@ publication_slot_outcomes, journal_committed, orders, fills, nonterminal_journal
 reason_counts
 ## Validator verdict
 PASS / NO_GO / FAIL / NEEDS_REVIEW (+ pass_blockers / hard_fail / first_failure)
+## Reviewer report
+attach $RUN_DIR/review-report.md (rendered by ops/render_paper_day_report.py)
 ## Safety proof
 (the Safety proof block above, with observed values)
 ## Git/runtime hygiene
