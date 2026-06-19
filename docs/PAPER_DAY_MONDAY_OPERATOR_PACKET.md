@@ -87,6 +87,7 @@ Use a fresh run directory. Do not reuse `startup-4` or any prior path.
 
 ```bash
 RUN_DIR="runtime/paper-day/2026-06-22/day-1"
+mkdir -p "$RUN_DIR"
 
 PYTHONPATH=src uv run python ops/run_attended_paper_day.py \
   --config config/config.toml \
@@ -98,9 +99,10 @@ PYTHONPATH=src uv run python ops/run_attended_paper_day.py \
   --db-dir "$RUN_DIR/db" \
   --confirm-attended-paper \
   --live-kis \
-  --json | tee "$RUN_DIR/stdout-envelope.json"
+  --json > "$RUN_DIR/stdout-envelope.json"
 
-PILOT_EXIT=${PIPESTATUS[0]}
+PILOT_EXIT=$?
+cat "$RUN_DIR/stdout-envelope.json"
 echo "PILOT_EXIT=$PILOT_EXIT"
 ```
 
@@ -108,12 +110,21 @@ echo "PILOT_EXIT=$PILOT_EXIT"
 Operator must set an explicit bounded duration (in seconds) that fits entirely
 inside the regular session before running. Do not hardcode a final duration here.
 
+Shell safety: create `RUN_DIR` with `mkdir -p` **before** the run so the
+redirect target's parent exists, and use plain stdout redirection (`>`), not a
+`tee` pipeline. Do not pipe through `tee` unless the shell and pipe status
+handling are explicitly verified. Use stdout redirection so `$?` captures the
+Python process exit code directly in **both bash and zsh** — the bash-only
+`${PIPESTATUS[0]}` is not safe under macOS's default zsh (its analogue is
+`$pipestatus[1]`), and a pipeline's `$?` reflects `tee`, not the Python process.
+
 The persisted `summary.json` holds only the mechanical summary; the
 cleanup/publication/lock fields (`summary_publication_outcome`, `cleanup_outcome`,
-`runtime_lock_*`) appear only in the stdout envelope. The `tee` above captures
+`runtime_lock_*`) appear only in the stdout envelope. The redirect above captures
 that envelope to `stdout-envelope.json` so the offline validator can read every
 clean-exit clause. (`--json` is single-line, so the captured file is a valid
-single JSON object.)
+single JSON object.) The stdout-envelope file is required for envelope-only
+clause verification — see the Post-run collection note below.
 
 ## Immediate stop conditions
 
@@ -154,6 +165,14 @@ PYTHONPATH=src uv run python ops/validate_paper_day_summary.py \
   --expect-source-kind kis_live \
   --json
 ```
+
+If `stdout-envelope.json` is missing, empty, malformed, or captured from the
+wrong run, the validator must not infer the envelope-only fields. It returns
+`NEEDS_REVIEW` (`missing_from_persisted_summary`) when the envelope is absent, or
+`NEEDS_REVIEW`/`FAIL` per its existing rules when the supplied JSON is malformed
+or contradicts the persisted summary. In that case re-capture the stdout envelope
+from the correct run (or treat the run as unverifiable) before claiming PASS — do
+not hand-edit `stdout-envelope.json` to fill in the missing fields.
 
 The validator verdict is advisory and mechanical; the PASS/NO_GO/FAIL criteria
 below are authoritative.

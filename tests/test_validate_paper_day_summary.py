@@ -351,6 +351,55 @@ def test_main_exit_one_on_needs_review(tmp_path: Path, capsys: pytest.CaptureFix
     assert payload["verdict"] == NEEDS_REVIEW
 
 
+def test_main_malformed_envelope_needs_review(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    summary_path, evidence_path, _ = _write(
+        tmp_path, _persisted_summary(), _evidence_lines()
+    )
+    bad_envelope = tmp_path / "envelope.json"
+    bad_envelope.write_text("{ broken", encoding="utf-8")
+    code = main(
+        [
+            "--summary",
+            str(summary_path),
+            "--evidence",
+            str(evidence_path),
+            "--envelope",
+            str(bad_envelope),
+            "--json",
+        ]
+    )
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == NEEDS_REVIEW
+    assert "envelope_malformed" in payload["error"]
+
+
+def test_main_empty_envelope_needs_review(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    summary_path, evidence_path, _ = _write(
+        tmp_path, _persisted_summary(), _evidence_lines()
+    )
+    empty_envelope = tmp_path / "envelope.json"
+    empty_envelope.write_text("", encoding="utf-8")
+    code = main(
+        [
+            "--summary",
+            str(summary_path),
+            "--evidence",
+            str(evidence_path),
+            "--envelope",
+            str(empty_envelope),
+            "--json",
+        ]
+    )
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == NEEDS_REVIEW
+
+
 def test_classify_is_pure_no_io() -> None:
     result = classify(
         summary={**_persisted_summary(), **_envelope()},

@@ -199,8 +199,20 @@ It emits `PASS` / `NO_GO` / `FAIL` / `NEEDS_REVIEW`. Because the persisted
 `summary.json` holds only the mechanical summary, the cleanup/publication/lock
 clauses must come from the captured stdout envelope (`--envelope`). Without it,
 the validator reports `missing_from_persisted_summary` and returns
-`NEEDS_REVIEW` rather than inventing those fields. The verdict is advisory; the
-authoritative PASS/NO_GO/FAIL criteria live in the Monday operator packet.
+`NEEDS_REVIEW` rather than inventing those fields. If the envelope file is
+missing, empty, malformed, or captured from the wrong run, the validator must not
+infer the envelope-only fields and returns `NEEDS_REVIEW`/`FAIL` per its existing
+rules. The verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in
+the Monday operator packet.
+
+Envelope capture shell safety: when capturing the stdout envelope for a live run,
+create the run directory first (`mkdir -p "$RUN_DIR"`) and use plain stdout
+redirection (`--json > "$RUN_DIR/stdout-envelope.json"`), then read
+`PILOT_EXIT=$?`. Do not pipe through `tee` unless the shell and pipe-status
+handling are explicitly verified: a pipeline's `$?` reflects `tee`, and the
+bash-only `${PIPESTATUS[0]}` is not safe under macOS's default zsh. Redirection
+makes `$?` capture the Python process exit code in both bash and zsh. See
+`docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` for the full run command.
 
 KIS startup-only readiness is **PASS** (`runtime/paper-day/2026-06-18/startup-4`:
 `PASS/startup_only/kis_live`). The actual 1-day attended paper diagnostic has
