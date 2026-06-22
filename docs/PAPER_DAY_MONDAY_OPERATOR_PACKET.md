@@ -17,6 +17,9 @@ no KIS, no network). For the single ordered in-session run sheet (pre-market →
 run → capture → validate → render → triage → handoff), use
 `docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md`.
 
+For phone/AnyDesk copy-paste operation, use
+`docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`.
+
 ## Preconditions
 
 ```text

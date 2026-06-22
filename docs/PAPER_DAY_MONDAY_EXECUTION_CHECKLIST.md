@@ -29,6 +29,9 @@ The authoritative PASS/NO_GO/FAIL criteria live in
 `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`; this checklist orders the steps and
 restates the criteria for in-session use.
 
+For phone/AnyDesk copy-paste operation, use
+`docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`.
+
 ## Prohibitions
 
 Cursor/Claude never runs any of the following — only the human Operator runs the

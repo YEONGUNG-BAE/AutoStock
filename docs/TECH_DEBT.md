@@ -315,6 +315,21 @@
   attended paper diagnostic remains HOLD until the Monday 2026-06-22 session and NO-GO until Reviewer
   PASS.
 
+## Reference — RTM-7c.12 Mobile Remote Operator Paste Packet
+
+- RTM-7c.12 added `docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`: a phone-friendly human Operator
+  sheet for the Tuesday 2026-06-23 attended diagnostic. It limits phone edits to `SESSION_DATE`,
+  `RUN_LABEL`, and `DURATION_SECONDS`, then provides exactly four whole-block pastes: preflight,
+  attended market-session run with shell-safe stdout-envelope capture, offline validation/report, and
+  Reviewer handoff. It includes remote-session operating rules, explicit abort conditions, secret
+  handling, and disconnect-to-`NEEDS_REVIEW` handling. The Monday checklist and Operator packet link
+  to it, and `tests/test_paper_day_mobile_remote_operator_packet_docs.py` guards the packet against
+  command and safety drift.
+- RTM-7c.12 is documentation and doc smoke coverage only. No actual KIS network, startup retry,
+  1-day pilot, paper diagnostic live run, live order, daemon, automatic restart, runtime activation,
+  secret persistence, raw HTTP response/frame persistence, runtime hot-path change, or commit was
+  performed. The 1-day attended paper diagnostic remains NO-GO until Reviewer PASS.
+
 ## P3 — Ops / KIS / Paper Review Backlog
 
 ### KIS read-only / tiny-live
