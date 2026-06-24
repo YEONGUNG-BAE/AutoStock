@@ -559,12 +559,13 @@ def test_evidence_never_leaks_price_or_raw_values() -> None:
     )
     summary = _run(monitor)
     assert summary.final_state is MonitorState.STOPPED
-    # drop evidence carries only a generic reason_code, never the exception text or price
+    # drop evidence carries only sanitized reason fields, never the exception text or price
     for e in evidence:
         assert sentinel not in str(e)
         assert "simulated transport drop" not in str(e)
     drops = [e for e in evidence if e.kind == "drop"]
     assert drops and all(e.reason_code == "source_error" for e in drops)
+    assert {e.reason_subcode for e in drops} == {"post_startup_source_iterator_error"}
 
 
 def test_require_fresh_missing_after_reset() -> None:
@@ -707,6 +708,36 @@ def test_factory_error_triggers_backoff_not_death() -> None:
     assert summary.connection_attempts == 2
     assert sleep.calls == [1.0]
     assert summary.final_state is MonitorState.STOPPED
+
+
+def test_factory_source_error_drop_has_sanitized_subreason() -> None:
+    store = LatestMarketStateStore()
+    sleep = _RecordingSleep()
+    evidence: list[MonitorEvidence] = []
+    calls = {"n": 0}
+
+    def factory() -> MarketEventSource:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("credentialed websocket url must not leak")
+        return ReplayMarketEventSource([])
+
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=factory,
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=5),
+        sleep=sleep,
+        session_id="hard-4c",
+        on_evidence=evidence.append,
+    )
+    summary = _run(monitor)
+    assert summary.final_state is MonitorState.STOPPED
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    assert drops[0].reason_code == "source_error"
+    assert drops[0].reason_subcode == "post_startup_source_factory_error"
+    assert "credentialed" not in str(drops[0])
 
 
 # --- hardening item 5: policy + budget argument validation -------------------

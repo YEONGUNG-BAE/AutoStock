@@ -628,6 +628,10 @@ class DiagnosticLifecycle:
     ) -> None:
         if accepted:
             self._counters.inc("subscription_acks")
+            if tr_id == TR_TRADE:
+                self._counters.inc("trade_subscription_acks")
+            elif tr_id == TR_QUOTE:
+                self._counters.inc("quote_subscription_acks")
         else:
             self.rejected = True
             self._counters.inc("subscription_rejections")
@@ -2016,6 +2020,7 @@ def _record_monitor_evidence(
             "event_type": evidence.event_type,
             "apply_status": evidence.apply_status,
             "sequence": evidence.sequence,
+            "reason_subcode": evidence.reason_subcode,
         },
     )
 
@@ -2041,6 +2046,10 @@ def _heartbeat_snapshot(
     return {
         "connected": counters.values.get("connected", 0) > 0,
         "subscriptions_ready": counters.values.get("subscription_acks", 0) >= 2,
+        "trade_subscription_ready": counters.values.get("trade_subscription_acks", 0) > 0,
+        "quote_subscription_ready": counters.values.get("quote_subscription_acks", 0) > 0,
+        "quote_frames": counters.values.get("quote_frames", 0),
+        "normalized_quotes": counters.values.get("normalized_quotes", 0),
         "last_trade_age_ms": _age_ms(latest.trade.trade_at, at) if latest and latest.trade else None,
         "last_quote_age_ms": _age_ms(latest.quote.quote_at, at) if latest and latest.quote else None,
         "transport_health": verdict.transport.value if verdict is not None else "UNKNOWN",

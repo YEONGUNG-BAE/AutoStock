@@ -124,6 +124,8 @@ def test_offline_e2e_commits_paper_order_and_writes_evidence(tmp_path: Path) -> 
     assert summary["nonterminal_journal"] == 0
     assert counters["normalized_trades"] == 1
     assert counters["normalized_quotes"] == 1
+    assert counters["trade_subscription_acks"] == 1
+    assert counters["quote_subscription_acks"] == 1
     assert counters["publication_slot_outcomes"] == 1
     assert counters["journal_committed"] == 1
     assert counters["orders"] == 1
@@ -144,10 +146,22 @@ def test_no_quote_classifies_health_hold_without_execution(tmp_path: Path) -> No
 
     counters = summary["counters"]["counters"]  # type: ignore[index]
     assert counters["normalized_trades"] == 1
+    assert counters["quote_subscription_acks"] == 1
     assert counters.get("normalized_quotes", 0) == 0
+    assert counters.get("quote_frames", 0) == 0
     assert counters["health_hold"] >= 1
     assert counters.get("orders", 0) == 0
     assert counters.get("fills", 0) == 0
+    heartbeat_rows = [
+        json.loads(line)
+        for line in cfg.evidence_out.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event") == "heartbeat"
+    ]
+    assert heartbeat_rows
+    heartbeat = heartbeat_rows[-1]["snapshot"]
+    assert heartbeat["quote_subscription_ready"] is True
+    assert heartbeat["quote_frames"] == 0
+    assert heartbeat["normalized_quotes"] == 0
 
 
 def test_startup_only_opens_and_closes_without_execution(tmp_path: Path) -> None:

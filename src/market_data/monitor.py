@@ -94,6 +94,7 @@ class MonitorEvidence:
     sequence: int | None = None
     apply_status: str | None = None
     reason_code: str | None = None
+    reason_subcode: str | None = None
     backoff_seconds: float | None = None
 
 
@@ -324,7 +325,7 @@ class MarketMonitor:
             self._emit_cancelled(attempt)
             raise
         except Exception:
-            self._emit("drop", attempt, reason_code="source_error")
+            self._emit_source_error_drop(attempt, subcode="post_startup_source_factory_error")
             return "drop"
 
         while True:
@@ -351,7 +352,7 @@ class MarketMonitor:
                 self._emit("drop", attempt, reason_code="heartbeat_stale")
                 return "drop"
             except Exception:
-                self._emit("drop", attempt, reason_code="source_error")
+                self._emit_source_error_drop(attempt, subcode="post_startup_source_iterator_error")
                 return "drop"
 
             # 이벤트 처리(_consume)는 transport try 밖이다. 내부 결함은 여기서
@@ -538,6 +539,7 @@ class MarketMonitor:
         *,
         apply_status: str | None = None,
         reason_code: str | None = None,
+        reason_subcode: str | None = None,
         backoff_seconds: float | None = None,
         provider: str | None = None,
         channel: str | None = None,
@@ -570,6 +572,7 @@ class MarketMonitor:
             sequence=fields["sequence"],  # type: ignore[arg-type]
             apply_status=apply_status,
             reason_code=reason_code,
+            reason_subcode=reason_subcode,
             backoff_seconds=backoff_seconds,
         )
         # evidence sink 결함(disk full, broken pipe, callback bug)은 transport 단절이
@@ -580,6 +583,19 @@ class MarketMonitor:
             raise
         except Exception as exc:
             raise MonitorInternalError("evidence sink failed") from exc
+
+    def _emit_source_error_drop(self, attempt: int, *, subcode: str) -> None:
+        """Emit a source drop without leaking raw exception details.
+
+        ``reason_code`` stays stable for existing counters, while ``reason_subcode``
+        separates post-startup factory/open failures from iterator/recv drops.
+        """
+        self._emit(
+            "drop",
+            attempt,
+            reason_code="source_error",
+            reason_subcode=subcode,
+        )
 
     def _emit_cancelled(self, attempt: int) -> None:
         """취소 경로 전용 best-effort emit. sink가 터져도 CancelledError 전파를
