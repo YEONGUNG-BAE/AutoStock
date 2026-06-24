@@ -42,6 +42,8 @@ def _persisted_summary(**overrides: object) -> dict[str, object]:
                 "normalized_trades": 1,
                 "normalized_quotes": 1,
                 "subscription_acks": 2,
+                "quote_subscription_acks": 1,
+                "quote_frames": 1,
                 "all_subscribed": 1,
             },
             "reason_counts": {"startup_only": 1},
@@ -268,6 +270,90 @@ def test_first_failure_surfaced(tmp_path: Path) -> None:
     ff = result["observations"]["first_failure"]
     assert ff["reason_code"] == "source_connect_failed"
     assert ff["stage"] == "runtime"
+
+
+def test_session_quote_readiness_and_source_subcode_are_surfaced(tmp_path: Path) -> None:
+    combined = {
+        **_persisted_summary(outcome="NO_GO", stop_reason="invalid_session_window"),
+        **_envelope(),
+    }
+    evidence = _evidence_lines(
+        {
+            "event": "heartbeat",
+            "stage": "heartbeat",
+            "reason_code": None,
+            "recorded_at": "2026-06-24T15:42:00+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "session_state": "POST_CLOSE",
+                "market_data_health": "NOT_EXPECTED",
+                "quote_subscription_ready": False,
+                "quote_frames": 0,
+                "normalized_quotes": 0,
+            },
+        },
+        {
+            "event": "drop",
+            "stage": "market_data",
+            "reason_code": "source_error",
+            "recorded_at": "2026-06-24T15:42:01+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "reason_subcode": "post_startup_source_iterator_error",
+            },
+        },
+    )
+    result = _run(tmp_path, combined, evidence)
+
+    assert result["verdict"] == NO_GO
+    assert result["observations"]["latest_session"]["session_state"] == "POST_CLOSE"
+    quote = result["observations"]["latest_quote_readiness"]
+    assert quote["market_data_health"] == "NOT_EXPECTED"
+    assert quote["quote_subscription_ready"] is False
+    assert quote["quote_frames"] == 0
+    assert quote["normalized_quotes"] == 0
+    assert result["observations"]["source_drop_subcodes"] == {
+        "post_startup_source_iterator_error": 1
+    }
+
+
+def test_validator_does_not_surface_raw_source_error_details(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    combined = {
+        **_persisted_summary(outcome="NO_GO", stop_reason="health_not_ready"),
+        **_envelope(),
+    }
+    evidence = _evidence_lines(
+        {
+            "event": "drop",
+            "stage": "market_data",
+            "reason_code": "source_error",
+            "recorded_at": "2026-06-24T15:42:02+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "reason_subcode": "post_startup_source_iterator_error",
+                "raw_url": "wss://credentialed.example.invalid/socket?appsecret=LEAK",
+                "traceback": "Traceback (most recent call last): secret frame",
+                "raw_websocket_frame": "0|H0STASP0|005930|SECRET",
+            },
+        },
+    )
+    summary_path, evidence_path, _ = _write(tmp_path, combined, evidence)
+
+    code = main(["--summary", str(summary_path), "--evidence", str(evidence_path)])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "post_startup_source_iterator_error" in out
+    for forbidden in (
+        "credentialed.example.invalid",
+        "appsecret",
+        "Traceback",
+        "raw_websocket_frame",
+        "SECRET",
+    ):
+        assert forbidden not in out
 
 
 def test_malformed_evidence_row_blocks_pass(tmp_path: Path) -> None:

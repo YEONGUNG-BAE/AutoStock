@@ -36,6 +36,8 @@ def _persisted_summary(**overrides: object) -> dict[str, object]:
                 "connected": 1,
                 "subscription_requests": 2,
                 "subscription_acks": 2,
+                "quote_subscription_acks": 1,
+                "quote_frames": 1,
                 "all_subscribed": 1,
                 "disconnects": 1,
             },
@@ -119,6 +121,7 @@ def test_pass_report_has_clean_clauses(tmp_path: Path) -> None:
     for section in (
         "## Run identity",
         "## Verdict",
+        "## Session timing",
         "## Paper-only safety proof",
         "## Evidence timeline",
         "## First failure",
@@ -176,6 +179,104 @@ def test_no_go_health_not_ready(tmp_path: Path) -> None:
     assert result["verdict"] == "NO_GO"
     assert "runtime outcome: NO_GO" in md
     assert "stop_reason: health_not_ready" in md
+
+
+def test_post_close_invalid_timing_is_surfaced(tmp_path: Path) -> None:
+    combined = {
+        **_persisted_summary(outcome="NO_GO", stop_reason="invalid_session_window"),
+        **_envelope(),
+    }
+    evidence = _evidence_lines(
+        {
+            "event": "session_window_check",
+            "stage": "preflight",
+            "reason_code": "invalid_session_window",
+            "recorded_at": "2026-06-24T15:42:00+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "session_state": "POST_CLOSE",
+                "required_session_state": "OPEN",
+                "calendar_reason": None,
+            },
+        },
+        {
+            "event": "failed_closed",
+            "stage": "preflight",
+            "reason_code": "invalid_session_window",
+            "recorded_at": "2026-06-24T15:42:00+09:00",
+            "sensitive_data_present": False,
+        },
+        {
+            "event": "heartbeat",
+            "stage": "heartbeat",
+            "reason_code": None,
+            "recorded_at": "2026-06-24T15:42:01+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "session_state": "POST_CLOSE",
+                "market_data_health": "NOT_EXPECTED",
+                "quote_subscription_ready": False,
+                "quote_frames": 0,
+                "normalized_quotes": 0,
+            },
+        },
+        {
+            "event": "drop",
+            "stage": "market_data",
+            "reason_code": "source_error",
+            "recorded_at": "2026-06-24T15:42:02+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "reason_subcode": "post_startup_source_iterator_error",
+            },
+        },
+    )
+    md, result = _build(tmp_path, combined, evidence)
+    assert result["verdict"] == "NO_GO"
+    assert "## Session timing" in md
+    assert "session_state | POST_CLOSE" in md
+    assert "required_session_state | OPEN" in md
+    assert "**invalid timing:** session_state=POST_CLOSE" in md
+    assert "market_data_health | NOT_EXPECTED" in md
+    assert "quote_subscription_ready | false" in md
+    assert "quote_frames | 0" in md
+    assert "normalized_quotes | 0" in md
+    assert "post_startup_source_iterator_error: 1" in md
+    assert "stop_reason: invalid_session_window" in md
+
+
+def test_report_does_not_surface_raw_source_error_details(tmp_path: Path) -> None:
+    combined = {
+        **_persisted_summary(outcome="NO_GO", stop_reason="health_not_ready"),
+        **_envelope(),
+    }
+    evidence = _evidence_lines(
+        {
+            "event": "drop",
+            "stage": "market_data",
+            "reason_code": "source_error",
+            "recorded_at": "2026-06-24T15:42:02+09:00",
+            "sensitive_data_present": False,
+            "snapshot": {
+                "reason_subcode": "post_startup_source_iterator_error",
+                "raw_url": "wss://credentialed.example.invalid/socket?appsecret=LEAK",
+                "traceback": "Traceback (most recent call last): secret frame",
+                "raw_websocket_frame": "0|H0STASP0|005930|SECRET",
+            },
+        },
+    )
+    md, result = _build(tmp_path, combined, evidence)
+
+    assert result["verdict"] == "NO_GO"
+    assert "post_startup_source_iterator_error: 1" in md
+    for forbidden in (
+        "credentialed.example.invalid",
+        "appsecret",
+        "Traceback",
+        "raw_websocket_frame",
+        "SECRET",
+    ):
+        assert forbidden not in md
 
 
 def test_sensitive_data_is_hard_fail(tmp_path: Path) -> None:

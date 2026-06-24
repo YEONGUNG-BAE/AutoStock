@@ -18,6 +18,9 @@ The authoritative criteria and runtime freeze remain in
 - Operator prepared environment variables before market session.
 - Operator will not paste or display secret values.
 - Operator will not leave the command running unattended.
+- Full pilot timing is regular-session only: `session_state=OPEN`.
+  `PRE_OPEN`, `POST_CLOSE`, `CLOSED`, or `UNKNOWN` means invalid timing and
+  must be treated as `NO_GO/invalid_session_window`.
 
 Use only an approved remote-control method. Do not bypass workplace policy.
 
@@ -214,6 +217,7 @@ cat "$RUN_DIR/review-report.md"
 | remote session unstable before run | delay run |
 | remote session disconnects during run | treat as NEEDS_REVIEW until artifacts validated |
 | PILOT_EXIT non-zero | run validator/report, then triage |
+| session_state is not OPEN | stop; invalid full-pilot timing |
 | sensitive_data_present=true | stop/escalate, do not paste artifact contents |
 
 ## What not to do from the phone

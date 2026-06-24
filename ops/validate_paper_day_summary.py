@@ -57,6 +57,8 @@ _ENVELOPE_ONLY = (
 
 # Counter names surfaced for Operator review (informational, never gating).
 _REVIEW_COUNTERS = (
+    "quote_subscription_acks",
+    "quote_frames",
     "normalized_trades",
     "normalized_quotes",
     "health_pass",
@@ -128,6 +130,9 @@ def _scan_evidence(path: Path) -> dict[str, Any]:
         "malformed_rows": 0,
         "sensitive_rows": 0,
         "first_failure": None,
+        "latest_session": None,
+        "latest_quote_readiness": None,
+        "source_drop_subcodes": {},
     }
     if not path.is_file():
         result["evidence_error"] = "evidence_missing"
@@ -160,6 +165,40 @@ def _scan_evidence(path: Path) -> dict[str, Any]:
                     "event": row.get("event"),
                     "reason_code": row.get("reason_code"),
                 }
+            snapshot = row.get("snapshot")
+            if isinstance(snapshot, dict):
+                if snapshot.get("session_state") is not None:
+                    result["latest_session"] = {
+                        "recorded_at": row.get("recorded_at"),
+                        "stage": row.get("stage"),
+                        "event": row.get("event"),
+                        "reason_code": row.get("reason_code"),
+                        "session_state": snapshot.get("session_state"),
+                        "market_data_health": snapshot.get("market_data_health"),
+                        "required_session_state": snapshot.get("required_session_state"),
+                    }
+                if any(
+                    key in snapshot
+                    for key in (
+                        "quote_subscription_ready",
+                        "quote_frames",
+                        "normalized_quotes",
+                    )
+                ):
+                    result["latest_quote_readiness"] = {
+                        "recorded_at": row.get("recorded_at"),
+                        "stage": row.get("stage"),
+                        "event": row.get("event"),
+                        "quote_subscription_ready": snapshot.get("quote_subscription_ready"),
+                        "quote_frames": snapshot.get("quote_frames"),
+                        "normalized_quotes": snapshot.get("normalized_quotes"),
+                        "market_data_health": snapshot.get("market_data_health"),
+                        "session_state": snapshot.get("session_state"),
+                    }
+                reason_subcode = snapshot.get("reason_subcode")
+                if row.get("reason_code") == "source_error" and isinstance(reason_subcode, str):
+                    subcodes = result["source_drop_subcodes"]
+                    subcodes[reason_subcode] = subcodes.get(reason_subcode, 0) + 1
     return result
 
 
@@ -305,6 +344,9 @@ def classify(
         "nonterminal_journal": None if nonterminal == "__absent__" else nonterminal,
         "evidence_rows": evidence["rows"],
         "first_failure": evidence["first_failure"],
+        "latest_session": evidence.get("latest_session"),
+        "latest_quote_readiness": evidence.get("latest_quote_readiness"),
+        "source_drop_subcodes": evidence.get("source_drop_subcodes", {}),
         "counters": _select_counters(merged),
         "reason_counts": _reason_counts(merged),
     }
@@ -410,6 +452,26 @@ def _emit(payload: dict[str, Any], *, as_json: bool, out: TextIO) -> None:
             f"first_failure: stage={ff['stage']} reason={ff['reason_code']} at={ff['recorded_at']}",
             file=out,
         )
+    if obs["latest_session"] is not None:
+        session = obs["latest_session"]
+        print(
+            "latest_session: "
+            f"session_state={session.get('session_state')} "
+            f"market_data_health={session.get('market_data_health')} "
+            f"at={session.get('recorded_at')}",
+            file=out,
+        )
+    if obs["latest_quote_readiness"] is not None:
+        quote = obs["latest_quote_readiness"]
+        print(
+            "latest_quote_readiness: "
+            f"quote_subscription_ready={quote.get('quote_subscription_ready')} "
+            f"quote_frames={quote.get('quote_frames')} "
+            f"normalized_quotes={quote.get('normalized_quotes')}",
+            file=out,
+        )
+    if obs["source_drop_subcodes"]:
+        print(f"source_drop_subcodes: {obs['source_drop_subcodes']}", file=out)
     if obs["counters"]:
         print(f"counters: {obs['counters']}", file=out)
     if obs["reason_counts"]:

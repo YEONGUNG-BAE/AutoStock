@@ -64,6 +64,7 @@ from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
 from market_data.latest_state import LatestMarketStateStore
 from market_data.market_session import (
     ExplicitMarketScheduleProvider,
+    MarketSessionState,
     SessionWindow,
 )
 from market_data.models import (
@@ -1103,6 +1104,27 @@ def run_attended_paper_day(
                     timeout_seconds=float(config.duration_seconds),
                 )
         else:
+            if config.source_kind == "kis_live":
+                session_now = now_fn()
+                session = _live_pilot_session(config, now=session_now)
+                record(
+                    session_now,
+                    "preflight",
+                    "session_window_check",
+                    reason=None if session.state is MarketSessionState.OPEN else "invalid_session_window",
+                    snapshot={
+                        "session_state": session.state.value,
+                        "required_session_state": MarketSessionState.OPEN.value,
+                        "calendar_reason": (
+                            session.calendar_reason.value
+                            if session.calendar_reason is not None
+                            else None
+                        ),
+                    },
+                )
+                if session.state is not MarketSessionState.OPEN:
+                    raise AttendedPaperDayRuntimeError("preflight", "invalid_session_window")
+
             publisher = DeterministicPaperDecisionPublisher(
                 store=stack.active_store,
                 session_date=config.session_date,
@@ -1127,17 +1149,7 @@ def run_attended_paper_day(
                     event_type=event_type, at=update.applied_at, now=update.applied_at
                 )
                 verdict = stack.tracker.evaluate(
-                    session=ExplicitMarketScheduleProvider(
-                        timezone=KST,
-                        schedule={
-                            config.session_date: SessionWindow(
-                                pre_open=time(8, 30),
-                                open=time(9, 0),
-                                close=time(15, 30),
-                                post_close_end=time(16, 0),
-                            )
-                        },
-                    ).session_at(PILOT_MARKET, update.applied_at),
+                    session=_live_pilot_session(config, now=update.applied_at),
                     now=update.applied_at,
                 )
                 if verdict.is_execution_ready:
@@ -1949,10 +1961,29 @@ def _critical_stop_from_exception(exc: BaseException) -> _CriticalStop | None:
     return None
 
 
+def _diagnostic_session_provider(day: date) -> ExplicitMarketScheduleProvider:
+    return ExplicitMarketScheduleProvider(
+        timezone=KST,
+        schedule={
+            day: SessionWindow(
+                pre_open=time(8, 30),
+                open=time(9, 0),
+                close=time(15, 30),
+                post_close_end=time(16, 0),
+            )
+        },
+    )
+
+
+def _live_pilot_session(config: AttendedPaperDayConfig, *, now: datetime):
+    return _diagnostic_session_provider(config.session_date).session_at(PILOT_MARKET, now)
+
+
 def _outcome_for_stop_reason(stop_reason: str) -> str:
     if stop_reason in {
         "health_not_ready",
         "transport_not_ready",
+        "invalid_session_window",
         "subscription_rejected",
         "trade_not_observed",
         "quote_not_observed",
@@ -2030,17 +2061,7 @@ def _heartbeat_snapshot(
 ) -> dict[str, object]:
     nonterminal = len(stack.journal.list_nonterminal()) if stack is not None else 0
     latest = stack.latest.peek(PILOT_MARKET, PILOT_SYMBOL, now=at) if stack is not None else None
-    session = ExplicitMarketScheduleProvider(
-        timezone=KST,
-        schedule={
-            at.astimezone(KST).date(): SessionWindow(
-                pre_open=time(8, 30),
-                open=time(9, 0),
-                close=time(15, 30),
-                post_close_end=time(16, 0),
-            )
-        },
-    ).session_at(PILOT_MARKET, at)
+    session = _diagnostic_session_provider(at.astimezone(KST).date()).session_at(PILOT_MARKET, at)
     verdict = stack.tracker.evaluate(session=session, now=at) if stack is not None else None
     active = stack.active_store.read_active(PILOT_MARKET, PILOT_SYMBOL) if stack is not None else None
     return {

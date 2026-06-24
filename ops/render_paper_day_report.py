@@ -55,6 +55,8 @@ _SOURCE_READINESS_COUNTERS = (
     "connected",
     "subscription_requests",
     "subscription_acks",
+    "trade_subscription_acks",
+    "quote_subscription_acks",
     "subscription_rejections",
     "all_subscribed",
     "disconnects",
@@ -73,6 +75,7 @@ _REVIEW_COUNTERS = (
 )
 
 _NOT_IN_ARTIFACTS = "operator-supplied, not present in artifacts"
+_SESSION_EVENTS = frozenset({"session_window_check", "heartbeat"})
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -144,6 +147,39 @@ def _present(merged: dict[str, Any], field: str) -> str:
 
 def _counter(values: dict[str, Any], name: str) -> str:
     return _fmt(values[name]) if name in values else "missing"
+
+
+def _session_observations(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    observed: list[dict[str, Any]] = []
+    for row in rows:
+        snapshot = row.get("snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        session_state = snapshot.get("session_state")
+        if session_state is None:
+            continue
+        observed.append(
+            {
+                "recorded_at": row.get("recorded_at"),
+                "stage": row.get("stage"),
+                "event": row.get("event"),
+                "reason_code": row.get("reason_code"),
+                "session_state": session_state,
+                "required_session_state": snapshot.get("required_session_state"),
+                "calendar_reason": snapshot.get("calendar_reason"),
+            }
+        )
+    first_invalid = next(
+        (
+            item
+            for item in observed
+            if item["event"] in _SESSION_EVENTS
+            and item["session_state"] not in (None, "OPEN")
+        ),
+        None,
+    )
+    latest = observed[-1] if observed else None
+    return {"observed": observed, "first_invalid": first_invalid, "latest": latest}
 
 
 def build_report(
@@ -295,6 +331,61 @@ def _render_markdown(
             w(f"- {key}: {source_reasons[key]}")
     else:
         w("source_* reason counts: none")
+    if obs["source_drop_subcodes"]:
+        w("")
+        w("source_error reason_subcodes:")
+        w("")
+        for key in sorted(obs["source_drop_subcodes"]):
+            w(f"- {key}: {obs['source_drop_subcodes'][key]}")
+    latest_quote = obs["latest_quote_readiness"]
+    if latest_quote is not None:
+        w("")
+        w("latest quote readiness evidence:")
+        w("")
+        w("| field | value |")
+        w("| --- | --- |")
+        for field in (
+            "recorded_at",
+            "stage",
+            "event",
+            "session_state",
+            "market_data_health",
+            "quote_subscription_ready",
+            "quote_frames",
+            "normalized_quotes",
+        ):
+            w(f"| {field} | {_fmt(latest_quote.get(field))} |")
+    w("")
+
+    # Session timing.
+    session_obs = _session_observations(timeline_rows)
+    w("## Session timing")
+    w("")
+    latest_session = session_obs["latest"]
+    display_session = session_obs["first_invalid"] or latest_session
+    if display_session is None:
+        w("No session_state evidence observed.")
+    else:
+        w("| field | value |")
+        w("| --- | --- |")
+        for field in (
+            "recorded_at",
+            "stage",
+            "event",
+            "reason_code",
+            "session_state",
+            "required_session_state",
+            "calendar_reason",
+        ):
+            w(f"| {field} | {_fmt(display_session.get(field))} |")
+        first_invalid = session_obs["first_invalid"]
+        if first_invalid is not None:
+            w("")
+            w(
+                "**invalid timing:** "
+                f"session_state={_fmt(first_invalid.get('session_state'))}; "
+                "attended 1-day live pilot requires OPEN."
+            )
     w("")
 
     # Paper-only safety proof.
@@ -427,6 +518,7 @@ def _render_markdown(
         "summary/envelope consistency reviewed",
         "evidence has no sensitive_data_present=true",
         "source readiness reviewed",
+        "session timing reviewed",
         "paper-only flags reviewed",
         "journal/completion state reviewed",
         "git status --short reviewed",

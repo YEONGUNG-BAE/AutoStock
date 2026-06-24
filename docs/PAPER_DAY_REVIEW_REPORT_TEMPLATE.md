@@ -63,8 +63,23 @@ Section skeleton (values shown are illustrative placeholders):
 | counter | value |
 | --- | --- |
 | connect_attempts / connected / subscription_requests / subscription_acks |
+| trade_subscription_acks / quote_subscription_acks |
 | subscription_rejections / all_subscribed / disconnects |
-(plus source_* reason counts, or "none")
+(plus source_* reason counts, sanitized source_error reason_subcodes, or "none")
+
+Latest quote readiness evidence must show:
+
+```text
+session_state
+market_data_health
+quote_subscription_ready
+quote_frames
+normalized_quotes
+```
+
+## Session timing
+Show `session_state`, `required_session_state`, and any invalid timing note.
+Full attended 1-day live pilot is valid only when `session_state=OPEN`.
 
 ## Paper-only safety proof
 | field | value | status |

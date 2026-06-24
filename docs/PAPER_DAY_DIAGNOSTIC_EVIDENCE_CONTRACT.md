@@ -39,6 +39,17 @@ approval key, raw HTTP request/response, raw websocket frame, traceback, or
 credentialed URL. The underlying exception cause is never serialized into evidence;
 only the stable reason reaches the `reason_code` field.
 
+Market monitor source drops use stable sanitized evidence only. A post-startup
+source iterator/receive exception is recorded as:
+
+```text
+reason_code = source_error
+snapshot.reason_subcode = post_startup_source_iterator_error
+```
+
+The evidence row must not include the raw exception, credentialed URL, HTTP
+payload, websocket frame, traceback, app key, app secret, or approval key.
+
 Counters cover actual observations only:
 
 - transport connect/subscription/disconnect
@@ -68,6 +79,10 @@ Heartbeat records include:
 ```text
 connected
 subscriptions_ready
+trade_subscription_ready
+quote_subscription_ready
+quote_frames
+normalized_quotes
 last_trade_age_ms
 last_quote_age_ms
 transport_health
@@ -83,6 +98,11 @@ nonterminal_journal
 Heartbeat values are read from `LatestMarketStateStore`, `MarketHealthTracker`,
 the session provider, and the active decision store. Placeholder health strings
 must not be emitted.
+
+Session evidence uses explicit market states: `PRE_OPEN`, `OPEN`, `POST_CLOSE`,
+`CLOSED`, or `UNKNOWN`. A full attended 1-day live pilot is valid only during
+`OPEN`; `PRE_OPEN`, `POST_CLOSE`, `CLOSED`, and `UNKNOWN` must close before any
+live market-data source is opened.
 
 Admission-failure evidence isolation: evidence is owned by the lock owner only.
 An admission failure (`invalid_input`, `runtime_lock_exists`) returns an

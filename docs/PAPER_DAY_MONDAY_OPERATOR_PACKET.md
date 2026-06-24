@@ -31,6 +31,8 @@ For phone/AnyDesk copy-paste operation, use
 - KIS env values set in the SAME shell that runs the command.
 - No secret values are printed to the terminal or any artifact.
 - Regular KR market session only (do not run pre-open, post-close, or weekend).
+- If a full pilot sees `session_state != OPEN`, treat it as
+  `NO_GO/invalid_session_window` and do not retry live KIS from Cursor/Claude.
 ```
 
 Confirm repo state before anything else:
@@ -226,6 +228,12 @@ runtime_lock_fd_closed = true
 runtime_lock_absent_confirmed = true
 runtime_lock_release_reason_code = null
 source_kind = kis_live
+session_state = OPEN
+market_data_health = HEALTHY
+quote_subscription_ready = true
+quote_frames >= 1
+normalized_quotes >= 1
+reason_subcode = null or sanitized stable string only
 paper_only = true
 activation_authorized = false
 automatic_restart = false
@@ -271,7 +279,15 @@ reconcile_required        stop and review journal/ledger consistency
 nonterminal_journal       journal left non-terminal — review journal/ledger
 resource_close_failure    cleanup/source lifecycle issue — do not rerun blindly
 runtime_lock_exists       a duplicate runtime lock was detected (admission refused, zero files written)
+invalid_session_window    full pilot started outside regular OPEN session; invalid timing, no live source open
 ```
+
+2026-06-24 pilot-2 was started after the regular session close. Its
+`POST_CLOSE`, `market_data_health=NOT_EXPECTED`, `quote_frames=0`,
+`normalized_quotes=0`, repeated sanitized
+`reason_subcode=post_startup_source_iterator_error`, and final
+`internal_runtime_error` make it invalid pilot timing rather than a valid
+regular-session 1-day pilot.
 
 NO_GO is not success. Do not retry blindly; isolate the gate that failed first.
 

@@ -230,6 +230,20 @@ disconnects are never prefilled by the runtime body. Offline replay may emit an
 explicit synthetic replay lifecycle (`source_kind=replay`); live KIS uses
 `KisWsMarketEventSource` transport events (`source_kind=kis_live`).
 
+Full live pilot admission:
+
+- startup-only smoke keeps its existing contract and may run as the operator
+  startup probe lane.
+- full attended 1-day live pilot requires `session_state=OPEN`.
+- `PRE_OPEN`, `POST_CLOSE`, `CLOSED`, and `UNKNOWN` are invalid full-pilot
+  timing. The runtime records `session_window_check` with
+  `required_session_state=OPEN`, returns `NO_GO/invalid_session_window`, and
+  must not construct or open the live market-data source.
+- The 2026-06-24 pilot-2 artifact started after market close with
+  `session_state=POST_CLOSE`, `market_data_health=NOT_EXPECTED`,
+  `quote_frames=0`, and `normalized_quotes=0`; this is invalid pilot timing,
+  not evidence of a valid 1-day regular-session pilot.
+
 Startup-only semantics:
 
 - offline startup-only: validate, lock, open pilot DB resources, close resources,

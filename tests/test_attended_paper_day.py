@@ -65,6 +65,10 @@ def _at() -> datetime:
     return datetime.combine(date(2026, 6, 17), time(9, 30), tzinfo=KST)
 
 
+def _post_close_at() -> datetime:
+    return datetime.combine(date(2026, 6, 17), time(15, 42), tzinfo=KST)
+
+
 def _quote(sequence: int = 1) -> NormalizedBestBidAsk:
     at = _at()
     return NormalizedBestBidAsk(
@@ -515,6 +519,47 @@ def test_completion_verdict_pass_requires_quote_and_trade(tmp_path: Path) -> Non
     counters = summary["counters"]["counters"]  # type: ignore[index]
     assert counters["connect_attempts"] == 1  # single owner, not double-counted
     assert counters["all_subscribed"] == 1
+
+
+def test_kis_live_full_pilot_post_close_is_blocked_before_source_open(tmp_path: Path) -> None:
+    cfg = AttendedPaperDayConfig(
+        session_date=date(2026, 6, 17),
+        symbol=PILOT_SYMBOL,
+        duration_seconds=5,
+        evidence_out=tmp_path / "runtime" / "evidence.jsonl",
+        summary_out=tmp_path / "runtime" / "summary.json",
+        db_dir=tmp_path / "runtime" / "db",
+        confirm_attended_paper=True,
+        startup_only=False,
+        source_kind="kis_live",
+    )
+
+    def source_factory(*, lifecycle: Any) -> ReplayMarketEventSource:
+        raise AssertionError("live source must not be constructed outside OPEN session")
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=source_factory,
+        run_id="post-close",
+        clock=_post_close_at,
+    )
+
+    assert summary["outcome"] == "NO_GO"
+    assert summary["stop_reason"] == "invalid_session_window"
+    counters = summary["counters"]["counters"]  # type: ignore[index]
+    assert counters.get("connect_attempts", 0) == 0
+    assert counters.get("connected", 0) == 0
+    rows = [
+        json.loads(line)
+        for line in cfg.evidence_out.read_text(encoding="utf-8").splitlines()
+    ]
+    timing = [row for row in rows if row["event"] == "session_window_check"]
+    assert timing
+    assert timing[-1]["reason_code"] == "invalid_session_window"
+    assert timing[-1]["snapshot"]["session_state"] == "POST_CLOSE"
+    assert timing[-1]["snapshot"]["required_session_state"] == "OPEN"
+    failures = [row for row in rows if row["event"] == "failed_closed"]
+    assert failures and failures[-1]["reason_code"] == "invalid_session_window"
 
 
 def test_dangling_final_symlink_is_rejected(tmp_path: Path) -> None:
