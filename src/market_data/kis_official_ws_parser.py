@@ -51,6 +51,10 @@ class KisOfficialWsParseError(MarketDataParserError):
     """공식 KIS 실시간 frame 파싱 실패. 메시지에 raw frame/credential을 담지 않는다."""
 
 
+class KisOfficialWsUnsupportedTrIdError(KisOfficialWsParseError):
+    """공식 KIS 실시간 frame의 TR ID가 지원 목록 밖인 경우."""
+
+
 class KisOfficialWsFrameParser:
     """공식 KIS 국내 실시간 text frame(`flag|tr_id|count|body`)을 정규화 MarketEvent로 변환한다.
 
@@ -89,7 +93,9 @@ class KisOfficialWsFrameParser:
         elif tr_id == TR_TRADE:
             record_len = _TRADE_FIELD_COUNT
         else:
-            raise KisOfficialWsParseError("unsupported tr_id; expected H0STASP0 or H0STCNT0.")
+            raise KisOfficialWsUnsupportedTrIdError(
+                "unsupported tr_id; expected H0STASP0 or H0STCNT0."
+            )
 
         count = _parse_count(count_str)
         fields = body.split("^")
@@ -254,4 +260,5 @@ __all__ = [
     "TR_TRADE",
     "KisOfficialWsFrameParser",
     "KisOfficialWsParseError",
+    "KisOfficialWsUnsupportedTrIdError",
 ]

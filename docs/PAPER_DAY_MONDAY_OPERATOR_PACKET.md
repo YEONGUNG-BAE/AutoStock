@@ -284,10 +284,14 @@ invalid_session_window    full pilot started outside regular OPEN session; inval
 
 2026-06-24 pilot-2 was started after the regular session close. Its
 `POST_CLOSE`, `market_data_health=NOT_EXPECTED`, `quote_frames=0`,
-`normalized_quotes=0`, repeated sanitized
+`normalized_quotes=0`, repeated pre-hardening collapsed
 `reason_subcode=post_startup_source_iterator_error`, and final
 `internal_runtime_error` make it invalid pilot timing rather than a valid
-regular-session 1-day pilot.
+regular-session 1-day pilot. New source drops are split into sanitized post-ACK
+subcodes such as `websocket_closed_after_ack`,
+`websocket_receive_timeout_after_ack`, `websocket_protocol_error_after_ack`,
+`malformed_market_frame_after_ack`, `unsupported_tr_id_after_ack`, or
+`source_iterator_unknown_after_ack`.
 
 NO_GO is not success. Do not retry blindly; isolate the gate that failed first.
 

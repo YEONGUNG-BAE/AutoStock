@@ -227,7 +227,7 @@ def test_post_close_invalid_timing_is_surfaced(tmp_path: Path) -> None:
             "recorded_at": "2026-06-24T15:42:02+09:00",
             "sensitive_data_present": False,
             "snapshot": {
-                "reason_subcode": "post_startup_source_iterator_error",
+                "reason_subcode": "websocket_closed_after_ack",
             },
         },
     )
@@ -241,7 +241,7 @@ def test_post_close_invalid_timing_is_surfaced(tmp_path: Path) -> None:
     assert "quote_subscription_ready | false" in md
     assert "quote_frames | 0" in md
     assert "normalized_quotes | 0" in md
-    assert "post_startup_source_iterator_error: 1" in md
+    assert "websocket_closed_after_ack: 1" in md
     assert "stop_reason: invalid_session_window" in md
 
 
@@ -258,7 +258,7 @@ def test_report_does_not_surface_raw_source_error_details(tmp_path: Path) -> Non
             "recorded_at": "2026-06-24T15:42:02+09:00",
             "sensitive_data_present": False,
             "snapshot": {
-                "reason_subcode": "post_startup_source_iterator_error",
+                "reason_subcode": "websocket_closed_after_ack",
                 "raw_url": "wss://credentialed.example.invalid/socket?appsecret=LEAK",
                 "traceback": "Traceback (most recent call last): secret frame",
                 "raw_websocket_frame": "0|H0STASP0|005930|SECRET",
@@ -268,7 +268,7 @@ def test_report_does_not_surface_raw_source_error_details(tmp_path: Path) -> Non
     md, result = _build(tmp_path, combined, evidence)
 
     assert result["verdict"] == "NO_GO"
-    assert "post_startup_source_iterator_error: 1" in md
+    assert "websocket_closed_after_ack: 1" in md
     for forbidden in (
         "credentialed.example.invalid",
         "appsecret",

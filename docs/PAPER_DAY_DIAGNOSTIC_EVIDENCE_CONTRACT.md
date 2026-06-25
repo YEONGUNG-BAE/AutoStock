@@ -39,12 +39,19 @@ approval key, raw HTTP request/response, raw websocket frame, traceback, or
 credentialed URL. The underlying exception cause is never serialized into evidence;
 only the stable reason reaches the `reason_code` field.
 
-Market monitor source drops use stable sanitized evidence only. A post-startup
-source iterator/receive exception is recorded as:
+Market monitor source drops use stable sanitized evidence only. A post-ACK
+source iterator/receive exception is recorded with stable `reason_code` and a
+sanitized subcode:
 
 ```text
 reason_code = source_error
-snapshot.reason_subcode = post_startup_source_iterator_error
+snapshot.reason_subcode = one of:
+  websocket_closed_after_ack
+  websocket_receive_timeout_after_ack
+  websocket_protocol_error_after_ack
+  malformed_market_frame_after_ack
+  unsupported_tr_id_after_ack
+  source_iterator_unknown_after_ack
 ```
 
 The evidence row must not include the raw exception, credentialed URL, HTTP

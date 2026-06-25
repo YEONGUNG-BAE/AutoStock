@@ -28,6 +28,14 @@ from market_data.monitor import (
 )
 from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
+from market_data.source_errors import (
+    MalformedMarketFrameAfterAck,
+    SourceIteratorUnknownAfterAck,
+    UnsupportedTrIdAfterAck,
+    WebSocketClosedAfterAck,
+    WebSocketProtocolErrorAfterAck,
+    WebSocketReceiveTimeoutAfterAck,
+)
 
 _BASE = datetime(2026, 6, 8, 0, 5, 0, tzinfo=UTC)
 
@@ -95,6 +103,15 @@ class _HeartbeatThenEof:
 
     async def events(self) -> AsyncIterator[MarketEvent]:
         yield self._beat
+
+
+class _RaiseImmediately:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def events(self) -> AsyncIterator[MarketEvent]:
+        raise self._exc
+        yield _heartbeat(received_at=_BASE)  # pragma: no cover
 
 
 class _RecordingSleep:
@@ -565,7 +582,56 @@ def test_evidence_never_leaks_price_or_raw_values() -> None:
         assert "simulated transport drop" not in str(e)
     drops = [e for e in evidence if e.kind == "drop"]
     assert drops and all(e.reason_code == "source_error" for e in drops)
-    assert {e.reason_subcode for e in drops} == {"post_startup_source_iterator_error"}
+    assert {e.reason_subcode for e in drops} == {"source_iterator_unknown_after_ack"}
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_subcode"),
+    [
+        (WebSocketClosedAfterAck(), "websocket_closed_after_ack"),
+        (WebSocketReceiveTimeoutAfterAck(), "websocket_receive_timeout_after_ack"),
+        (WebSocketProtocolErrorAfterAck(), "websocket_protocol_error_after_ack"),
+        (MalformedMarketFrameAfterAck(), "malformed_market_frame_after_ack"),
+        (UnsupportedTrIdAfterAck(), "unsupported_tr_id_after_ack"),
+        (SourceIteratorUnknownAfterAck(), "source_iterator_unknown_after_ack"),
+        (
+            RuntimeError("raw websocket URL wss://example.invalid?token=SECRET"),
+            "source_iterator_unknown_after_ack",
+        ),
+    ],
+)
+def test_source_iterator_error_drop_has_sanitized_subreason(
+    exc: BaseException, expected_subcode: str
+) -> None:
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _RaiseImmediately(exc),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="source-subcode",
+        on_evidence=evidence.append,
+    )
+
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    assert drops[0].reason_code == "source_error"
+    assert drops[0].reason_subcode == expected_subcode
+    rendered = str(drops[0])
+    for forbidden in (
+        "wss://",
+        "token=",
+        "SECRET",
+        "Traceback",
+        "approval",
+        "app_key",
+    ):
+        assert forbidden not in rendered
 
 
 def test_require_fresh_missing_after_reset() -> None:

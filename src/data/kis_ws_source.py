@@ -12,6 +12,17 @@ from market_data.kis_official_ws_parser import (
     TR_QUOTE,
     TR_TRADE,
     KisOfficialWsFrameParser,
+    KisOfficialWsParseError,
+    KisOfficialWsUnsupportedTrIdError,
+)
+from market_data.source_errors import (
+    MalformedMarketFrameAfterAck,
+    MarketSourceIteratorError,
+    SourceIteratorUnknownAfterAck,
+    UnsupportedTrIdAfterAck,
+    WebSocketClosedAfterAck,
+    WebSocketProtocolErrorAfterAck,
+    WebSocketReceiveTimeoutAfterAck,
 )
 from market_data.models import MarketEvent, MarketHeartbeat
 
@@ -142,13 +153,31 @@ class KisWsMarketEventSource:
             while True:
                 if self._max_events is not None and emitted >= self._max_events:
                     return
-                raw = await asyncio.wait_for(connection.recv(), self._receive_timeout_seconds)
+                try:
+                    raw = await asyncio.wait_for(
+                        connection.recv(), self._receive_timeout_seconds
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    if not self._pending_acks:
+                        raise WebSocketReceiveTimeoutAfterAck() from None
+                    raise
+                except Exception:
+                    if not self._pending_acks:
+                        raise WebSocketClosedAfterAck() from None
+                    raise
                 message = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-                async for event in self._handle_message(connection, message):
-                    yield event
-                    emitted += 1
-                    if self._max_events is not None and emitted >= self._max_events:
-                        return
+                try:
+                    async for event in self._handle_message(connection, message):
+                        yield event
+                        emitted += 1
+                        if self._max_events is not None and emitted >= self._max_events:
+                            return
+                except MarketSourceIteratorError:
+                    raise
+                except Exception:
+                    if not self._pending_acks:
+                        raise SourceIteratorUnknownAfterAck() from None
+                    raise
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -170,16 +199,25 @@ class KisWsMarketEventSource:
                     "market frame received before all subscriptions were acked."
                 )
             received_at = self._clock()
-            for event in self._parser.parse_frame(message, received_at=received_at):
+            try:
+                parsed_events = self._parser.parse_frame(message, received_at=received_at)
+            except KisOfficialWsUnsupportedTrIdError:
+                raise UnsupportedTrIdAfterAck() from None
+            except KisOfficialWsParseError:
+                raise MalformedMarketFrameAfterAck() from None
+            for event in parsed_events:
                 channel = _event_channel(event)
                 if channel not in self._subscribed_channels:
-                    raise KisWsSubscriptionError(
-                        f"received market frame for unsubscribed channel {channel}."
-                    )
+                    raise WebSocketProtocolErrorAfterAck() from None
                 yield event
             return
         # 제어(JSON) frame: PINGPONG 또는 구독 ack.
-        control = self._parse_control(message)
+        try:
+            control = self._parse_control(message)
+        except KisWsSourceError:
+            if not self._pending_acks:
+                raise WebSocketProtocolErrorAfterAck() from None
+            raise
         tr_id = _control_tr_id(control)
         if tr_id == _PINGPONG_TR_ID:
             await connection.pong(message.encode("utf-8"))
@@ -193,7 +231,12 @@ class KisWsMarketEventSource:
                 received_at=now,
             )
             return
-        self._handle_ack(control, tr_id)
+        try:
+            self._handle_ack(control, tr_id)
+        except KisWsSubscriptionError:
+            if not self._pending_acks:
+                raise WebSocketProtocolErrorAfterAck() from None
+            raise
 
     def _handle_ack(self, control: dict, tr_id: str | None) -> None:
         header = control.get("header")

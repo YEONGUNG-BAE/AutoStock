@@ -299,7 +299,7 @@ def test_session_quote_readiness_and_source_subcode_are_surfaced(tmp_path: Path)
             "recorded_at": "2026-06-24T15:42:01+09:00",
             "sensitive_data_present": False,
             "snapshot": {
-                "reason_subcode": "post_startup_source_iterator_error",
+                "reason_subcode": "websocket_closed_after_ack",
             },
         },
     )
@@ -313,7 +313,7 @@ def test_session_quote_readiness_and_source_subcode_are_surfaced(tmp_path: Path)
     assert quote["quote_frames"] == 0
     assert quote["normalized_quotes"] == 0
     assert result["observations"]["source_drop_subcodes"] == {
-        "post_startup_source_iterator_error": 1
+        "websocket_closed_after_ack": 1
     }
 
 
@@ -332,7 +332,7 @@ def test_validator_does_not_surface_raw_source_error_details(
             "recorded_at": "2026-06-24T15:42:02+09:00",
             "sensitive_data_present": False,
             "snapshot": {
-                "reason_subcode": "post_startup_source_iterator_error",
+                "reason_subcode": "websocket_closed_after_ack",
                 "raw_url": "wss://credentialed.example.invalid/socket?appsecret=LEAK",
                 "traceback": "Traceback (most recent call last): secret frame",
                 "raw_websocket_frame": "0|H0STASP0|005930|SECRET",
@@ -345,7 +345,7 @@ def test_validator_does_not_surface_raw_source_error_details(
     out = capsys.readouterr().out
 
     assert code == 1
-    assert "post_startup_source_iterator_error" in out
+    assert "websocket_closed_after_ack" in out
     for forbidden in (
         "credentialed.example.invalid",
         "appsecret",

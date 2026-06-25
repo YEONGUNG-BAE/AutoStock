@@ -21,6 +21,11 @@ from market_data.models import (
 )
 from market_data.protocols import MarketEventSource
 from market_data.rolling_window import RollingObserveStatus, RollingTradeHistoryStore
+from market_data.source_errors import (
+    MarketSourceIteratorError,
+    SourceIteratorUnknownAfterAck,
+    WebSocketReceiveTimeoutAfterAck,
+)
 
 from domain.enums import Market
 
@@ -34,6 +39,12 @@ __all__ = [
     "ReconnectPolicy",
     "MarketMonitor",
 ]
+
+
+def _source_iterator_reason_subcode(exc: BaseException) -> str:
+    if isinstance(exc, MarketSourceIteratorError):
+        return exc.reason_subcode
+    return SourceIteratorUnknownAfterAck.reason_subcode
 
 
 class MonitorState(StrEnum):
@@ -349,10 +360,19 @@ class MarketMonitor:
                     self._state = MonitorState.STOPPED
                     self._emit("stop", attempt, reason_code="runtime_timeout")
                     return "budget"
+                if timeout_reason is None:
+                    self._emit_source_error_drop(
+                        attempt,
+                        subcode=WebSocketReceiveTimeoutAfterAck.reason_subcode,
+                    )
+                    return "drop"
                 self._emit("drop", attempt, reason_code="heartbeat_stale")
                 return "drop"
-            except Exception:
-                self._emit_source_error_drop(attempt, subcode="post_startup_source_iterator_error")
+            except Exception as exc:
+                self._emit_source_error_drop(
+                    attempt,
+                    subcode=_source_iterator_reason_subcode(exc),
+                )
                 return "drop"
 
             # 이벤트 처리(_consume)는 transport try 밖이다. 내부 결함은 여기서

@@ -19,6 +19,14 @@ from data.kis_ws_source import (
     KisWsTransportEvent,
 )
 from market_data.models import MarketHeartbeat, NormalizedBestBidAsk, NormalizedTradeTick
+from market_data.source_errors import (
+    MalformedMarketFrameAfterAck,
+    SourceIteratorUnknownAfterAck,
+    UnsupportedTrIdAfterAck,
+    WebSocketClosedAfterAck,
+    WebSocketProtocolErrorAfterAck,
+    WebSocketReceiveTimeoutAfterAck,
+)
 
 _KST = ZoneInfo("Asia/Seoul")
 _NOW = datetime(2026, 6, 12, 10, 0, 0, tzinfo=_KST)
@@ -47,6 +55,14 @@ def _quote_frame(*, symbol: str = "005930") -> str:
     record[23] = "120"
     record[33] = "0"
     return f"0|H0STASP0|1|{'^'.join(record)}"
+
+
+def _unsupported_tr_id_frame() -> str:
+    return "0|H0STXXX0|1|005930^095959"
+
+
+def _malformed_quote_frame() -> str:
+    return "0|H0STASP0|1|005930^095959"
 
 
 def _pingpong() -> str:
@@ -103,6 +119,13 @@ class _FakeWebSocket:
 
 class _BlockingWebSocket(_FakeWebSocket):
     async def recv(self) -> str | bytes:
+        if self._inbox:
+            item = self._inbox.pop(0)
+            if isinstance(item, _Cancel):
+                raise asyncio.CancelledError()
+            if isinstance(item, Exception):
+                raise item
+            return item  # type: ignore[return-value]
         await asyncio.Event().wait()  # never returns -> forces receive timeout
         raise AssertionError("unreachable")  # pragma: no cover
 
@@ -231,7 +254,7 @@ def test_unsubscribed_symbol_frame_is_rejected() -> None:
     # 모든 구독이 ack됐어도, 구독하지 않은 종목 시세 frame은 fail-closed로 거부한다.
     ws = _FakeWebSocket([*_acks(), _trade_frame(symbol="000660")])
     source = _source(ws)
-    with pytest.raises(KisWsSubscriptionError, match="unsubscribed channel"):
+    with pytest.raises(WebSocketProtocolErrorAfterAck):
         asyncio.run(_drain(source, 5))
 
 
@@ -282,6 +305,41 @@ def test_receive_timeout_raises_for_monitor_drop() -> None:
     ws = _BlockingWebSocket([])
     source = _source(ws, receive_timeout_seconds=0.01)
     with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        asyncio.run(_drain(source, 1))
+
+
+@pytest.mark.parametrize(
+    ("inbox", "expected_error"),
+    [
+        ([*_acks()], WebSocketClosedAfterAck),
+        ([*_acks(), "garbage-not-json-not-data"], WebSocketProtocolErrorAfterAck),
+        ([*_acks(), _unsupported_tr_id_frame()], UnsupportedTrIdAfterAck),
+        ([*_acks(), _malformed_quote_frame()], MalformedMarketFrameAfterAck),
+    ],
+)
+def test_after_ack_source_errors_are_sanitized_subcode_types(
+    inbox: list[object], expected_error: type[Exception]
+) -> None:
+    source = _source(_FakeWebSocket(inbox))
+    with pytest.raises(expected_error):
+        asyncio.run(_drain(source, 1))
+
+
+def test_after_ack_receive_timeout_is_sanitized_subcode_type() -> None:
+    source = _source(_BlockingWebSocket([*_acks()]), receive_timeout_seconds=0.01)
+    with pytest.raises(WebSocketReceiveTimeoutAfterAck):
+        asyncio.run(_drain(source, 1))
+
+
+def test_after_ack_unexpected_iterator_error_is_sanitized_subcode_type() -> None:
+    source = _source(_FakeWebSocket([*_acks(), _trade_frame()]))
+
+    class _BoomParser:
+        def parse_frame(self, raw: str, *, received_at: datetime) -> list[object]:  # noqa: ARG002
+            raise RuntimeError("raw frame must not leak")
+
+    source._parser = _BoomParser()  # type: ignore[attr-defined]
+    with pytest.raises(SourceIteratorUnknownAfterAck):
         asyncio.run(_drain(source, 1))
 
 
