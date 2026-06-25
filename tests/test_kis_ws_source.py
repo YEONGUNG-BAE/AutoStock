@@ -57,6 +57,10 @@ def _quote_frame(*, symbol: str = "005930") -> str:
     return f"0|H0STASP0|1|{'^'.join(record)}"
 
 
+def _quote_frame_with_trailing_empty(*, symbol: str = "005930") -> str:
+    return _quote_frame(symbol=symbol) + "^"
+
+
 def _unsupported_tr_id_frame() -> str:
     return "0|H0STXXX0|1|005930^095959"
 
@@ -186,6 +190,15 @@ def test_data_frames_parsed_and_yielded() -> None:
     assert isinstance(events[0], NormalizedTradeTick)
     assert isinstance(events[1], NormalizedBestBidAsk)
     assert events[0].price == Decimal("70000")
+
+
+def test_quote_frame_with_trailing_empty_delimiter_is_yielded() -> None:
+    ws = _FakeWebSocket([*_acks(), _quote_frame_with_trailing_empty()])
+    source = _source(ws, max_events=1)
+    events = asyncio.run(_drain(source, 1))
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+    assert events[0].provider_sequence.channel == "H0STASP0|005930"
 
 
 def test_pingpong_triggers_pong_and_heartbeat() -> None:

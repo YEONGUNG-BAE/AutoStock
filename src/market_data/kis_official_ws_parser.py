@@ -76,7 +76,8 @@ class KisOfficialWsFrameParser:
         if not isinstance(raw, str) or not raw:
             raise KisOfficialWsParseError("frame must be a non-empty string.")
 
-        parts = raw.split("|", 3)
+        frame = raw.strip()
+        parts = frame.split("|", 3)
         if len(parts) != 4:
             raise KisOfficialWsParseError("frame must have flag|tr_id|count|body layout.")
         flag, tr_id, count_str, body = parts
@@ -98,11 +99,11 @@ class KisOfficialWsFrameParser:
             )
 
         count = _parse_count(count_str)
-        fields = body.split("^")
         expected = record_len * count
+        fields = _split_body_fields(body, expected=expected)
         if len(fields) != expected:
             raise KisOfficialWsParseError(
-                f"frame field count mismatch for {tr_id}: expected {expected}, got {len(fields)}."
+                "frame field count mismatch."
             )
 
         events: list[MarketEvent] = []
@@ -186,6 +187,16 @@ def _parse_count(count_str: str) -> int:
     if count < 1:
         raise KisOfficialWsParseError("frame data_count must be >= 1.")
     return count
+
+
+def _split_body_fields(body: str, *, expected: int) -> list[str]:
+    fields = body.split("^")
+    if len(fields) <= expected:
+        return fields
+    extra = fields[expected:]
+    if all(item == "" for item in extra):
+        return fields[:expected]
+    return fields
 
 
 def _require_field(record: list[str], index: int, name: str) -> str:

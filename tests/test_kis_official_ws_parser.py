@@ -69,6 +69,11 @@ def _frame(tr_id: str, records: list[list[str]], *, flag: str = "0") -> str:
     return f"{flag}|{tr_id}|{len(records)}|{body}"
 
 
+def _frame_with_count(tr_id: str, records: list[list[str]], count: str) -> str:
+    body = "^".join(field for record in records for field in record)
+    return f"0|{tr_id}|{count}|{body}"
+
+
 def test_parses_single_trade() -> None:
     parser = KisOfficialWsFrameParser()
     events = parser.parse_frame(_frame(TR_TRADE, [_trade_record()]), received_at=_RECEIVED)
@@ -118,6 +123,52 @@ def test_multi_record_frame_yields_sequenced_events() -> None:
     assert [e.price for e in events] == [Decimal("70000"), Decimal("70100")]
 
 
+def test_count_field_allows_zero_padded_digits() -> None:
+    parser = KisOfficialWsFrameParser()
+    events = parser.parse_frame(
+        _frame_with_count(TR_QUOTE, [_quote_record()], "001"),
+        received_at=_RECEIVED,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+
+
+def test_quote_frame_allows_trailing_empty_delimiter_variant() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_QUOTE, [_quote_record()]) + "^"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+    assert events[0].provider_sequence.channel == "H0STASP0|005930"
+
+
+def test_trade_frame_allows_trailing_empty_delimiter_variant() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_TRADE, [_trade_record()]) + "^"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedTradeTick)
+
+
+def test_multi_record_quote_allows_global_trailing_empty_delimiter() -> None:
+    parser = KisOfficialWsFrameParser()
+    records = [
+        _quote_record(bsop_hour="095958", askp1="70100"),
+        _quote_record(bsop_hour="095959", askp1="70200"),
+    ]
+    frame = _frame(TR_QUOTE, records) + "^"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert [e.provider_sequence.sequence for e in events] == [1, 2]
+    assert [e.ask_price for e in events] == [Decimal("70100"), Decimal("70200")]
+
+
+def test_frame_allows_surrounding_transport_whitespace() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = "\r\n" + _frame(TR_QUOTE, [_quote_record()]) + "\n"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert len(events) == 1
+
+
 def test_sequence_is_per_tr_id_and_symbol() -> None:
     parser = KisOfficialWsFrameParser()
     t1 = parser.parse_frame(_frame(TR_TRADE, [_trade_record(symbol="005930")]), received_at=_RECEIVED)
@@ -161,6 +212,17 @@ def test_field_count_mismatch_rejected() -> None:
     bad = f"0|{TR_TRADE}|1|{'^'.join(['0'] * 10)}"
     with pytest.raises(KisOfficialWsParseError, match="field count mismatch"):
         parser.parse_frame(bad, received_at=_RECEIVED)
+
+
+def test_non_empty_extra_field_still_rejected_without_raw_leak() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_QUOTE, [_quote_record()]) + "^SENSITIVE_EXTRA_FIELD"
+    with pytest.raises(KisOfficialWsParseError) as excinfo:
+        parser.parse_frame(frame, received_at=_RECEIVED)
+    message = str(excinfo.value)
+    assert "field count mismatch" in message
+    assert "SENSITIVE_EXTRA_FIELD" not in message
+    assert frame not in message
 
 
 def test_layout_without_pipes_rejected() -> None:

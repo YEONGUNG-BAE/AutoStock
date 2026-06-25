@@ -93,6 +93,9 @@ SHA `33e0e1e65cd1c8c8b639531483ec0b327087bab1`)에서 검증한 응답 구조:
   레코드당 필드 수 = 아래 표의 길이. body를 `^`로 split한 뒤 레코드 길이 단위로 끊는다.
 - `body`: `^`로 구분된 필드 문자열. 한 레코드의 필드는 아래 인덱스 표를 따른다.
 - 필드 수가 (레코드길이 × data_count)와 정확히 일치하지 않으면 malformed로 거부.
+  단, transport가 body 끝에 추가한 trailing `^`로 생기는 empty field만은
+  documented 컬럼 수 밖의 payload가 아니므로 제거한 뒤 검증한다. trailing empty가
+  아닌 초과 필드는 계속 malformed로 거부한다.
 
 ## 5. H0STASP0 (호가, best bid/ask) — 레코드 필드 인덱스
 
