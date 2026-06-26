@@ -205,14 +205,31 @@ infer the envelope-only fields and returns `NEEDS_REVIEW`/`FAIL` per its existin
 rules. The verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in
 the Monday operator packet.
 
-Envelope capture shell safety: when capturing the stdout envelope for a live run,
-create the run directory first (`mkdir -p "$RUN_DIR"`) and use plain stdout
-redirection (`--json > "$RUN_DIR/stdout-envelope.json"`), then read
-`PILOT_EXIT=$?`. Do not pipe through `tee` unless the shell and pipe-status
-handling are explicitly verified: a pipeline's `$?` reflects `tee`, and the
-bash-only `${PIPESTATUS[0]}` is not safe under macOS's default zsh. Redirection
-makes `$?` capture the Python process exit code in both bash and zsh. See
+Envelope capture: pass `--stdout-envelope-out "$RUN_DIR/stdout-envelope.json"` so
+the tool itself persists the envelope (the full `--json` payload plus a sanitized
+`_envelope_capture` block: exit code, run_id, summary/evidence/db paths, sanitized
+command args, captured_at, git HEAD). This is the primary, redirect-independent
+capture and removes the dependency on a manual shell redirect that can be
+forgotten (the 2026-06-26 pilot-3 gap). The builder reads no environment and
+redacts secret-like argv tokens (`KEY=<redacted>`, `--secret-flag <redacted>`), so
+no secret value, env value, URL, app key/secret, approval key, account, raw frame,
+or traceback reaches the envelope.
+
+Keep a belt-and-suspenders console capture with plain stdout redirection
+(`--json > "$RUN_DIR/stdout-envelope.shell.json"`), then read `PILOT_EXIT=$?`. Do
+not pipe through `tee` unless the shell and pipe-status handling are explicitly
+verified: a pipeline's `$?` reflects `tee`, and the bash-only `${PIPESTATUS[0]}`
+is not safe under macOS's default zsh. Redirection makes `$?` capture the Python
+process exit code in both bash and zsh. See
 `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` for the full run command.
+
+Result collection existence gate: before validating, confirm all four artifacts
+exist and the tree is clean of tracked runtime —
+`test -f "$RUN_DIR/summary.json"`, `test -f "$RUN_DIR/evidence.jsonl"`,
+`test -f "$RUN_DIR/stdout-envelope.json"`, `test -d "$RUN_DIR/db"`,
+`test -z "$(git status --short)"`, and `test -z "$(git ls-files runtime)"`. A
+missing envelope yields `NEEDS_REVIEW`; do not hand-edit the envelope to backfill
+the clean-exit clauses — re-capture from a fresh run.
 
 KIS startup-only readiness is **PASS** (`runtime/paper-day/2026-06-18/startup-4`:
 `PASS/startup_only/kis_live`). The actual 1-day attended paper diagnostic has

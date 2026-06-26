@@ -33,8 +33,11 @@ def test_mentions_all_hot_path_files(doc_text: str, path: str) -> None:
     assert path in doc_text
 
 
-def test_includes_shell_safe_redirect(doc_text: str) -> None:
-    assert '--json > "$RUN_DIR/stdout-envelope.json"' in doc_text
+def test_includes_tool_written_envelope_capture(doc_text: str) -> None:
+    # The tool flag is the primary, redirect-independent envelope capture.
+    assert '--stdout-envelope-out "$RUN_DIR/stdout-envelope.json"' in doc_text
+    # The shell redirect is a belt-and-suspenders console capture only.
+    assert '--json > "$RUN_DIR/stdout-envelope.shell.json"' in doc_text
     assert "PILOT_EXIT=$?" in doc_text
     assert "Do not pipe through tee." in doc_text
 

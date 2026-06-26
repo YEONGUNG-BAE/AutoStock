@@ -124,7 +124,7 @@ quote-contamination note (startup-3 lengths `38`/`182` → startup-4 `36`/`180`)
 
 ## Market-session run
 
-Operator-only command (shell-safe redirect — RTM-7c.7a pattern):
+Operator-only command (tool-written envelope — RTM-7c.12 pattern):
 
 ```bash
 RUN_DIR="runtime/paper-day/2026-06-22/day-1"
@@ -138,14 +138,21 @@ PYTHONPATH=src uv run python ops/run_attended_paper_day.py \
   --evidence-out "$RUN_DIR/evidence.jsonl" \
   --summary-out "$RUN_DIR/summary.json" \
   --db-dir "$RUN_DIR/db" \
+  --stdout-envelope-out "$RUN_DIR/stdout-envelope.json" \
   --confirm-attended-paper \
   --live-kis \
-  --json > "$RUN_DIR/stdout-envelope.json"
+  --json > "$RUN_DIR/stdout-envelope.shell.json"
 
 PILOT_EXIT=$?
 cat "$RUN_DIR/stdout-envelope.json"
 echo "PILOT_EXIT=$PILOT_EXIT"
 ```
+
+`--stdout-envelope-out` makes the tool persist `stdout-envelope.json` under
+`RUN_DIR` itself (the validator reads this file), so capture no longer depends on
+a manual redirect that can be forgotten — the 2026-06-26 pilot-3 gap. The
+`> "$RUN_DIR/stdout-envelope.shell.json"` redirect is a belt-and-suspenders
+console capture only.
 
 ```text
 Do not pipe through tee.
@@ -165,6 +172,23 @@ PILOT_EXIT=$?   # captured directly from the Python process via stdout redirecti
 ```
 
 ## Post-run artifact collection
+
+Existence gate first — all four artifacts must be present before validation, and
+the working tree must be clean of tracked runtime:
+
+```bash
+test -f "$RUN_DIR/summary.json"         && echo "summary.json OK"        || echo "summary.json MISSING"
+test -f "$RUN_DIR/evidence.jsonl"       && echo "evidence.jsonl OK"      || echo "evidence.jsonl MISSING"
+test -f "$RUN_DIR/stdout-envelope.json" && echo "stdout-envelope.json OK" || echo "stdout-envelope.json MISSING"
+test -d "$RUN_DIR/db"                   && echo "db OK"                  || echo "db MISSING"
+test -z "$(git status --short)"         && echo "git clean OK"          || echo "git DIRTY"
+test -z "$(git ls-files runtime)"       && echo "runtime untracked OK"  || echo "runtime TRACKED"
+```
+
+A missing `stdout-envelope.json` means the five clean-exit clauses cannot be
+verified from disk, so the offline validator reports `NEEDS_REVIEW`
+(`missing_from_persisted_summary`). Do not hand-edit the envelope to backfill it —
+re-capture from a fresh run.
 
 ```bash
 cat "$RUN_DIR/summary.json"

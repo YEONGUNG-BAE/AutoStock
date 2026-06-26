@@ -108,14 +108,28 @@ PYTHONPATH=src uv run python ops/run_attended_paper_day.py \
   --evidence-out "$RUN_DIR/evidence.jsonl" \
   --summary-out "$RUN_DIR/summary.json" \
   --db-dir "$RUN_DIR/db" \
+  --stdout-envelope-out "$RUN_DIR/stdout-envelope.json" \
   --confirm-attended-paper \
   --live-kis \
-  --json > "$RUN_DIR/stdout-envelope.json"
+  --json > "$RUN_DIR/stdout-envelope.shell.json"
 
 PILOT_EXIT=$?
 cat "$RUN_DIR/stdout-envelope.json"
 echo "PILOT_EXIT=$PILOT_EXIT"
 ```
+
+`--stdout-envelope-out` makes the tool persist `stdout-envelope.json` under
+`RUN_DIR` itself, after the run completes, removing the dependency on a manual
+shell redirect that can be forgotten or mishandled (the 2026-06-26 pilot-3 gap).
+The tool-written envelope is the full `--json` payload — the clean-exit clauses
+(`summary_publication_outcome`, `cleanup_outcome`, `runtime_lock_*`) stay at top
+level so the validator and report read them unchanged — plus a reserved
+`_envelope_capture` block holding the process `exit_code`, `run_id`, the
+summary/evidence/db paths, a **secret-sanitized** argv, a `captured_at` timestamp,
+and the git HEAD. It carries no secrets, env values, raw KIS frames, URLs, app
+keys/secrets, approval keys, account values, or tracebacks. The redundant shell
+redirect to `stdout-envelope.shell.json` is a belt-and-suspenders capture; the
+tool-written `stdout-envelope.json` is the file the validator reads.
 
 `<MARKET_SESSION_BOUNDED_DURATION>` is **not** settled by existing docs. The
 Operator must set an explicit bounded duration (in seconds) that fits entirely
@@ -157,9 +171,27 @@ automatic_restart = true
 
 ## Post-run collection
 
+First confirm every required artifact exists and the tree is clean. All six
+checks must hold before the validator verdict can be trusted as PASS:
+
+```bash
+test -f "$RUN_DIR/summary.json"         && echo "summary.json OK"
+test -f "$RUN_DIR/evidence.jsonl"       && echo "evidence.jsonl OK"
+test -d "$RUN_DIR/db"                   && echo "db OK"
+test -f "$RUN_DIR/stdout-envelope.json" && echo "stdout-envelope.json OK"
+test -z "$(git status --short)"         && echo "git tree clean OK"
+test -z "$(git ls-files runtime)"       && echo "no tracked runtime OK"
+```
+
+A missing `stdout-envelope.json` means the clean-exit clauses are not
+disk-verifiable: the validator returns `NEEDS_REVIEW`
+(`missing_from_persisted_summary`) and the run cannot be claimed PASS. Do not
+hand-edit an envelope to backfill the fields — re-run capture from the correct run.
+
 ```bash
 cat "$RUN_DIR/summary.json"
 cat "$RUN_DIR/evidence.jsonl"
+cat "$RUN_DIR/stdout-envelope.json"
 git status --short
 git ls-files runtime
 find "$RUN_DIR" -maxdepth 2 -type f | sort
