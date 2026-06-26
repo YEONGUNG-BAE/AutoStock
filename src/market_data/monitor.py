@@ -47,6 +47,12 @@ def _source_iterator_reason_subcode(exc: BaseException) -> str:
     return SourceIteratorUnknownAfterAck.reason_subcode
 
 
+def _source_iterator_parser_metadata(exc: BaseException) -> dict[str, object] | None:
+    if isinstance(exc, MarketSourceIteratorError):
+        return exc.parser_metadata
+    return None
+
+
 class MonitorState(StrEnum):
     IDLE = "idle"
     CONNECTING = "connecting"
@@ -107,6 +113,7 @@ class MonitorEvidence:
     reason_code: str | None = None
     reason_subcode: str | None = None
     backoff_seconds: float | None = None
+    parser_metadata: dict[str, object] | None = None
 
 
 @dataclass
@@ -372,6 +379,7 @@ class MarketMonitor:
                 self._emit_source_error_drop(
                     attempt,
                     subcode=_source_iterator_reason_subcode(exc),
+                    parser_metadata=_source_iterator_parser_metadata(exc),
                 )
                 return "drop"
 
@@ -564,6 +572,7 @@ class MarketMonitor:
         provider: str | None = None,
         channel: str | None = None,
         meta: dict[str, object | None] | None = None,
+        parser_metadata: dict[str, object] | None = None,
     ) -> None:
         if self._on_evidence is None:
             return
@@ -594,6 +603,7 @@ class MarketMonitor:
             reason_code=reason_code,
             reason_subcode=reason_subcode,
             backoff_seconds=backoff_seconds,
+            parser_metadata=parser_metadata,
         )
         # evidence sink 결함(disk full, broken pipe, callback bug)은 transport 단절이
         # 아니라 monitor 내부 계약 위반이므로 MonitorInternalError로 fail-closed 전파한다.
@@ -604,17 +614,25 @@ class MarketMonitor:
         except Exception as exc:
             raise MonitorInternalError("evidence sink failed") from exc
 
-    def _emit_source_error_drop(self, attempt: int, *, subcode: str) -> None:
+    def _emit_source_error_drop(
+        self,
+        attempt: int,
+        *,
+        subcode: str,
+        parser_metadata: dict[str, object] | None = None,
+    ) -> None:
         """Emit a source drop without leaking raw exception details.
 
         ``reason_code`` stays stable for existing counters, while ``reason_subcode``
         separates post-startup factory/open failures from iterator/recv drops.
+        ``parser_metadata`` carries only sanitized counts/identifiers when present.
         """
         self._emit(
             "drop",
             attempt,
             reason_code="source_error",
             reason_subcode=subcode,
+            parser_metadata=parser_metadata,
         )
 
     def _emit_cancelled(self, attempt: int) -> None:

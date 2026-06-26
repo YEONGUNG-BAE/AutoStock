@@ -2042,17 +2042,20 @@ def _record_monitor_evidence(
             counters.inc("parse_rejected")
     if evidence.reason_code:
         counters.reason(evidence.reason_code)
+    snapshot: dict[str, object | None] = {
+        "event_type": evidence.event_type,
+        "apply_status": evidence.apply_status,
+        "sequence": evidence.sequence,
+        "reason_subcode": evidence.reason_subcode,
+    }
+    if evidence.parser_metadata is not None:
+        snapshot["parser_metadata"] = evidence.parser_metadata
     record(
         evidence.timestamp,
         "market_data",
         evidence.kind,
         reason=evidence.reason_code,
-        snapshot={
-            "event_type": evidence.event_type,
-            "apply_status": evidence.apply_status,
-            "sequence": evidence.sequence,
-            "reason_subcode": evidence.reason_subcode,
-        },
+        snapshot=snapshot,
     )
 
 

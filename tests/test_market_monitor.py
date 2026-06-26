@@ -30,6 +30,7 @@ from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
 from market_data.source_errors import (
     MalformedMarketFrameAfterAck,
+    MalformedQuoteFieldCountAfterAck,
     SourceIteratorUnknownAfterAck,
     UnsupportedTrIdAfterAck,
     WebSocketClosedAfterAck,
@@ -632,6 +633,55 @@ def test_source_iterator_error_drop_has_sanitized_subreason(
         "app_key",
     ):
         assert forbidden not in rendered
+
+
+def test_source_error_drop_propagates_sanitized_parser_metadata() -> None:
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    metadata = {
+        "parser_stage": "field_count",
+        "tr_id": "H0STASP0",
+        "expected_field_count": 59,
+        "observed_field_count": 2,
+        "declared_count": 1,
+        "record_len": 59,
+        "has_trailing_empty_extra": False,
+    }
+    exc = MalformedQuoteFieldCountAfterAck(parser_metadata=metadata)
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _RaiseImmediately(exc),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="parser-metadata",
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    assert drops[0].reason_subcode == "malformed_quote_field_count_after_ack"
+    assert drops[0].parser_metadata == metadata
+
+
+def test_non_parser_source_error_drop_has_no_parser_metadata() -> None:
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _RaiseImmediately(WebSocketClosedAfterAck()),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="no-metadata",
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    assert drops[0].parser_metadata is None
 
 
 def test_require_fresh_missing_after_reset() -> None:

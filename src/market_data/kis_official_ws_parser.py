@@ -48,7 +48,32 @@ _T_BSOP_DATE = 33
 
 
 class KisOfficialWsParseError(MarketDataParserError):
-    """공식 KIS 실시간 frame 파싱 실패. 메시지에 raw frame/credential을 담지 않는다."""
+    """공식 KIS 실시간 frame 파싱 실패. 메시지에 raw frame/credential을 담지 않는다.
+
+    실패 ``parser_stage``와 sanitized ``parser_metadata``(비밀이 아닌 수치·불리언·tr_id만)를
+    함께 운반한다. source 계층이 이를 읽어 세분화된 reason_subcode로 매핑한다. metadata에는
+    절대 raw body/field 값/credential/URL/traceback을 넣지 않는다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        parser_stage: str = "unknown",
+        parser_metadata: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.parser_stage = parser_stage
+        metadata: dict[str, object] = {"parser_stage": parser_stage}
+        if parser_metadata:
+            metadata.update(parser_metadata)
+        self.parser_metadata = metadata
+
+    def enrich(self, **defaults: object) -> None:
+        """stage 무관 sanitized 식별자(tr_id/record_len 등)를 빠진 키에만 채운다."""
+        for key, value in defaults.items():
+            if value is not None:
+                self.parser_metadata.setdefault(key, value)
 
 
 class KisOfficialWsUnsupportedTrIdError(KisOfficialWsParseError):
@@ -74,20 +99,27 @@ class KisOfficialWsFrameParser:
         """
         aware_received = require_timezone_aware_datetime(received_at, field_name="received_at")
         if not isinstance(raw, str) or not raw:
-            raise KisOfficialWsParseError("frame must be a non-empty string.")
+            raise KisOfficialWsParseError(
+                "frame must be a non-empty string.", parser_stage="layout"
+            )
 
         frame = raw.strip()
         parts = frame.split("|", 3)
         if len(parts) != 4:
-            raise KisOfficialWsParseError("frame must have flag|tr_id|count|body layout.")
+            raise KisOfficialWsParseError(
+                "frame must have flag|tr_id|count|body layout.", parser_stage="layout"
+            )
         flag, tr_id, count_str, body = parts
 
         if flag == _ENCRYPTED_FLAG:
             raise KisOfficialWsParseError(
-                "encrypted frame (flag=1) is not supported on the read-only public path."
+                "encrypted frame (flag=1) is not supported on the read-only public path.",
+                parser_stage="layout",
             )
         if flag != _PLAINTEXT_FLAG:
-            raise KisOfficialWsParseError("frame flag must be '0' (plaintext) on this path.")
+            raise KisOfficialWsParseError(
+                "frame flag must be '0' (plaintext) on this path.", parser_stage="layout"
+            )
 
         if tr_id == TR_QUOTE:
             record_len = _QUOTE_FIELD_COUNT
@@ -95,15 +127,28 @@ class KisOfficialWsFrameParser:
             record_len = _TRADE_FIELD_COUNT
         else:
             raise KisOfficialWsUnsupportedTrIdError(
-                "unsupported tr_id; expected H0STASP0 or H0STCNT0."
+                "unsupported tr_id; expected H0STASP0 or H0STCNT0.", parser_stage="unsupported_tr_id"
             )
 
-        count = _parse_count(count_str)
+        try:
+            count = _parse_count(count_str)
+        except KisOfficialWsParseError as exc:
+            exc.enrich(tr_id=tr_id, record_len=record_len)
+            raise
         expected = record_len * count
-        fields = _split_body_fields(body, expected=expected)
+        fields, observed, has_trailing_empty_extra = _split_body_fields(body, expected=expected)
         if len(fields) != expected:
             raise KisOfficialWsParseError(
-                "frame field count mismatch."
+                "frame field count mismatch.",
+                parser_stage="field_count",
+                parser_metadata={
+                    "tr_id": tr_id,
+                    "expected_field_count": expected,
+                    "observed_field_count": observed,
+                    "declared_count": count,
+                    "record_len": record_len,
+                    "has_trailing_empty_extra": has_trailing_empty_extra,
+                },
             )
 
         events: list[MarketEvent] = []
@@ -122,52 +167,66 @@ class KisOfficialWsFrameParser:
         return nxt
 
     def _build_quote(self, record: list[str], received_at: datetime) -> NormalizedBestBidAsk:
-        symbol = _require_field(record, _Q_SYMBOL, "symbol")
-        quote_at = _kst_from_received_date(received_at, _require_field(record, _Q_BSOP_HOUR, "BSOP_HOUR"))
-        if quote_at > received_at:
-            raise KisOfficialWsParseError("quote time is in the future relative to received_at.")
-        channel = f"{TR_QUOTE}|{symbol}"
-        sequence = self._next_sequence(TR_QUOTE, symbol)
-        provider_sequence = _build_provider_sequence(channel, sequence, received_at)
-        return _build_model(
-            NormalizedBestBidAsk,
-            provider=PROVIDER,
-            symbol=symbol,
-            market=Market.KR,
-            currency=Currency.KRW,
-            bid_price=_require_field(record, _Q_BIDP1, "BIDP1"),
-            ask_price=_require_field(record, _Q_ASKP1, "ASKP1"),
-            bid_quantity=_require_field(record, _Q_BIDP_RSQN1, "BIDP_RSQN1"),
-            ask_quantity=_require_field(record, _Q_ASKP_RSQN1, "ASKP_RSQN1"),
-            quote_at=quote_at,
-            received_at=received_at,
-            provider_sequence=provider_sequence,
-        )
+        try:
+            symbol = _require_field(record, _Q_SYMBOL, "symbol")
+            quote_at = _kst_from_received_date(
+                received_at, _require_field(record, _Q_BSOP_HOUR, "BSOP_HOUR")
+            )
+            if quote_at > received_at:
+                raise KisOfficialWsParseError(
+                    "quote time is in the future relative to received_at.", parser_stage="control"
+                )
+            channel = f"{TR_QUOTE}|{symbol}"
+            sequence = self._next_sequence(TR_QUOTE, symbol)
+            provider_sequence = _build_provider_sequence(channel, sequence, received_at)
+            return _build_model(
+                NormalizedBestBidAsk,
+                provider=PROVIDER,
+                symbol=symbol,
+                market=Market.KR,
+                currency=Currency.KRW,
+                bid_price=_require_field(record, _Q_BIDP1, "BIDP1"),
+                ask_price=_require_field(record, _Q_ASKP1, "ASKP1"),
+                bid_quantity=_require_field(record, _Q_BIDP_RSQN1, "BIDP_RSQN1"),
+                ask_quantity=_require_field(record, _Q_ASKP_RSQN1, "ASKP_RSQN1"),
+                quote_at=quote_at,
+                received_at=received_at,
+                provider_sequence=provider_sequence,
+            )
+        except KisOfficialWsParseError as exc:
+            exc.enrich(tr_id=TR_QUOTE, record_len=_QUOTE_FIELD_COUNT)
+            raise
 
     def _build_trade(self, record: list[str], received_at: datetime) -> NormalizedTradeTick:
-        symbol = _require_field(record, _T_SYMBOL, "symbol")
-        trade_at = _kst_from_date_time(
-            _require_field(record, _T_BSOP_DATE, "BSOP_DATE"),
-            _require_field(record, _T_CNTG_HOUR, "STCK_CNTG_HOUR"),
-        )
-        if trade_at > received_at:
-            raise KisOfficialWsParseError("trade time is in the future relative to received_at.")
-        channel = f"{TR_TRADE}|{symbol}"
-        sequence = self._next_sequence(TR_TRADE, symbol)
-        provider_sequence = _build_provider_sequence(channel, sequence, received_at)
-        return _build_model(
-            NormalizedTradeTick,
-            provider=PROVIDER,
-            symbol=symbol,
-            market=Market.KR,
-            currency=Currency.KRW,
-            price=_require_field(record, _T_PRPR, "STCK_PRPR"),
-            quantity=_require_field(record, _T_CNTG_VOL, "CNTG_VOL"),
-            trade_at=trade_at,
-            received_at=received_at,
-            provider_sequence=provider_sequence,
-            cumulative_volume=_require_field(record, _T_ACML_VOL, "ACML_VOL"),
-        )
+        try:
+            symbol = _require_field(record, _T_SYMBOL, "symbol")
+            trade_at = _kst_from_date_time(
+                _require_field(record, _T_BSOP_DATE, "BSOP_DATE"),
+                _require_field(record, _T_CNTG_HOUR, "STCK_CNTG_HOUR"),
+            )
+            if trade_at > received_at:
+                raise KisOfficialWsParseError(
+                    "trade time is in the future relative to received_at.", parser_stage="control"
+                )
+            channel = f"{TR_TRADE}|{symbol}"
+            sequence = self._next_sequence(TR_TRADE, symbol)
+            provider_sequence = _build_provider_sequence(channel, sequence, received_at)
+            return _build_model(
+                NormalizedTradeTick,
+                provider=PROVIDER,
+                symbol=symbol,
+                market=Market.KR,
+                currency=Currency.KRW,
+                price=_require_field(record, _T_PRPR, "STCK_PRPR"),
+                quantity=_require_field(record, _T_CNTG_VOL, "CNTG_VOL"),
+                trade_at=trade_at,
+                received_at=received_at,
+                provider_sequence=provider_sequence,
+                cumulative_volume=_require_field(record, _T_ACML_VOL, "ACML_VOL"),
+            )
+        except KisOfficialWsParseError as exc:
+            exc.enrich(tr_id=TR_TRADE, record_len=_TRADE_FIELD_COUNT)
+            raise
 
 
 def _build_provider_sequence(channel: str, sequence: int, received_at: datetime) -> ProviderSequence:
@@ -182,33 +241,42 @@ def _build_provider_sequence(channel: str, sequence: int, received_at: datetime)
 
 def _parse_count(count_str: str) -> int:
     if not count_str.isdigit():
-        raise KisOfficialWsParseError("frame data_count must be a non-negative integer.")
+        raise KisOfficialWsParseError(
+            "frame data_count must be a non-negative integer.", parser_stage="count"
+        )
     count = int(count_str)
     if count < 1:
-        raise KisOfficialWsParseError("frame data_count must be >= 1.")
+        raise KisOfficialWsParseError("frame data_count must be >= 1.", parser_stage="count")
     return count
 
 
-def _split_body_fields(body: str, *, expected: int) -> list[str]:
-    fields = body.split("^")
-    if len(fields) <= expected:
-        return fields
-    extra = fields[expected:]
-    if all(item == "" for item in extra):
-        return fields[:expected]
-    return fields
+def _split_body_fields(body: str, *, expected: int) -> tuple[list[str], int, bool]:
+    """body를 `^`로 분할한다.
+
+    transport가 끝에 붙인 trailing `^`로 생기는 empty field만은 documented 컬럼 밖의
+    payload가 아니므로 제거한 뒤 검증한다. 반환: (검증용 fields, raw observed count,
+    trailing empty extra가 있었는지). has_trailing_empty_extra는 sanitized boolean이며
+    raw 값은 담지 않는다.
+    """
+    raw_fields = body.split("^")
+    observed = len(raw_fields)
+    extra = raw_fields[expected:]
+    has_trailing_empty_extra = bool(extra) and any(item == "" for item in extra)
+    if extra and all(item == "" for item in extra):
+        return raw_fields[:expected], observed, has_trailing_empty_extra
+    return raw_fields, observed, has_trailing_empty_extra
 
 
 def _require_field(record: list[str], index: int, name: str) -> str:
     value = record[index].strip()
     if not value:
-        raise KisOfficialWsParseError(f"field {name} is empty.")
+        raise KisOfficialWsParseError(f"field {name} is empty.", parser_stage="required_field")
     return value
 
 
 def _kst_from_date_time(date_str: str, time_str: str) -> datetime:
     if len(date_str) != 8 or not date_str.isdigit():
-        raise KisOfficialWsParseError("BSOP_DATE must be YYYYMMDD digits.")
+        raise KisOfficialWsParseError("BSOP_DATE must be YYYYMMDD digits.", parser_stage="control")
     hour, minute, second = _parse_hhmmss(time_str)
     try:
         return datetime(
@@ -221,7 +289,9 @@ def _kst_from_date_time(date_str: str, time_str: str) -> datetime:
             tzinfo=_KST,
         )
     except ValueError as exc:
-        raise KisOfficialWsParseError("invalid trade date/time fields.") from exc
+        raise KisOfficialWsParseError(
+            "invalid trade date/time fields.", parser_stage="control"
+        ) from exc
 
 
 def _kst_from_received_date(received_at: datetime, time_str: str) -> datetime:
@@ -238,12 +308,12 @@ def _kst_from_received_date(received_at: datetime, time_str: str) -> datetime:
             tzinfo=_KST,
         )
     except ValueError as exc:
-        raise KisOfficialWsParseError("invalid quote time fields.") from exc
+        raise KisOfficialWsParseError("invalid quote time fields.", parser_stage="control") from exc
 
 
 def _parse_hhmmss(time_str: str) -> tuple[int, int, int]:
     if len(time_str) != 6 or not time_str.isdigit():
-        raise KisOfficialWsParseError("time field must be HHMMSS digits.")
+        raise KisOfficialWsParseError("time field must be HHMMSS digits.", parser_stage="control")
     return int(time_str[0:2]), int(time_str[2:4]), int(time_str[4:6])
 
 
@@ -251,7 +321,9 @@ def _build_model(model: type, **fields: object) -> object:
     try:
         return model(**fields)
     except ValidationError as exc:
-        raise KisOfficialWsParseError(_sanitize_validation_error(model.__name__, exc)) from None
+        raise KisOfficialWsParseError(
+            _sanitize_validation_error(model.__name__, exc), parser_stage="model"
+        ) from None
 
 
 def _sanitize_validation_error(model_name: str, exc: ValidationError) -> str:

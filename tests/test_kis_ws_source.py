@@ -20,7 +20,13 @@ from data.kis_ws_source import (
 )
 from market_data.models import MarketHeartbeat, NormalizedBestBidAsk, NormalizedTradeTick
 from market_data.source_errors import (
+    MalformedControlAfterAck,
+    MalformedCountAfterAck,
+    MalformedLayoutAfterAck,
     MalformedMarketFrameAfterAck,
+    MalformedQuoteFieldCountAfterAck,
+    MalformedRequiredFieldAfterAck,
+    MalformedTradeFieldCountAfterAck,
     SourceIteratorUnknownAfterAck,
     UnsupportedTrIdAfterAck,
     WebSocketClosedAfterAck,
@@ -67,6 +73,33 @@ def _unsupported_tr_id_frame() -> str:
 
 def _malformed_quote_frame() -> str:
     return "0|H0STASP0|1|005930^095959"
+
+
+def _encrypted_quote_frame() -> str:
+    return "1|H0STASP0|1|" + "^".join(["0"] * _QUOTE_LEN)
+
+
+def _bad_count_quote_frame() -> str:
+    return "0|H0STASP0|x|" + "^".join(["0"] * _QUOTE_LEN)
+
+
+def _malformed_trade_frame() -> str:
+    return "0|H0STCNT0|1|" + "^".join(["0"] * 10)
+
+
+def _empty_required_trade_frame() -> str:
+    return _trade_frame(prpr="")
+
+
+def _future_quote_frame() -> str:
+    record = ["0"] * _QUOTE_LEN
+    record[0] = "005930"
+    record[1] = "100500"  # 10:05:00 KST is future relative to the _NOW clock (10:00:00)
+    record[3] = "70100"
+    record[13] = "69900"
+    record[23] = "120"
+    record[33] = "0"
+    return f"0|H0STASP0|1|{'^'.join(record)}"
 
 
 def _pingpong() -> str:
@@ -336,6 +369,73 @@ def test_after_ack_source_errors_are_sanitized_subcode_types(
     source = _source(_FakeWebSocket(inbox))
     with pytest.raises(expected_error):
         asyncio.run(_drain(source, 1))
+
+
+@pytest.mark.parametrize(
+    ("frame", "expected_error", "expected_subcode"),
+    [
+        (_encrypted_quote_frame(), MalformedLayoutAfterAck, "malformed_layout_after_ack"),
+        (_bad_count_quote_frame(), MalformedCountAfterAck, "malformed_count_after_ack"),
+        (
+            _malformed_quote_frame(),
+            MalformedQuoteFieldCountAfterAck,
+            "malformed_quote_field_count_after_ack",
+        ),
+        (
+            _malformed_trade_frame(),
+            MalformedTradeFieldCountAfterAck,
+            "malformed_trade_field_count_after_ack",
+        ),
+        (
+            _empty_required_trade_frame(),
+            MalformedRequiredFieldAfterAck,
+            "malformed_required_field_after_ack",
+        ),
+        (_future_quote_frame(), MalformedControlAfterAck, "malformed_control_after_ack"),
+    ],
+)
+def test_malformed_frame_maps_to_split_subcode(
+    frame: str, expected_error: type[MalformedMarketFrameAfterAck], expected_subcode: str
+) -> None:
+    source = _source(_FakeWebSocket([*_acks(), frame]))
+    with pytest.raises(expected_error) as excinfo:
+        asyncio.run(_drain(source, 1))
+    exc = excinfo.value
+    # 모든 split subcode는 공통 base(MalformedMarketFrameAfterAck)로 isinstance가 성립한다.
+    assert isinstance(exc, MalformedMarketFrameAfterAck)
+    assert exc.reason_subcode == expected_subcode
+
+
+def test_field_count_subcode_carries_only_whitelisted_metadata() -> None:
+    source = _source(_FakeWebSocket([*_acks(), _malformed_quote_frame()]))
+    with pytest.raises(MalformedQuoteFieldCountAfterAck) as excinfo:
+        asyncio.run(_drain(source, 1))
+    metadata = excinfo.value.parser_metadata
+    assert metadata is not None
+    assert set(metadata) <= {
+        "parser_stage",
+        "tr_id",
+        "expected_field_count",
+        "observed_field_count",
+        "declared_count",
+        "record_len",
+        "has_trailing_empty_extra",
+    }
+    assert metadata["tr_id"] == "H0STASP0"
+    assert metadata["expected_field_count"] == _QUOTE_LEN
+
+
+def test_non_empty_extra_quote_field_rejected_without_raw_leak() -> None:
+    leak = "SECRET_EXTRA_PAYLOAD"
+    frame = _quote_frame() + "^" + leak
+    source = _source(_FakeWebSocket([*_acks(), frame]))
+    with pytest.raises(MalformedQuoteFieldCountAfterAck) as excinfo:
+        asyncio.run(_drain(source, 1))
+    exc = excinfo.value
+    assert leak not in str(exc)
+    assert exc.parser_metadata is not None
+    assert leak not in str(exc.parser_metadata)
+    assert exc.parser_metadata["has_trailing_empty_extra"] is False
 
 
 def test_after_ack_receive_timeout_is_sanitized_subcode_type() -> None:

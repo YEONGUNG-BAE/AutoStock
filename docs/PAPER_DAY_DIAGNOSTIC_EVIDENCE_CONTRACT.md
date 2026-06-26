@@ -49,13 +49,34 @@ snapshot.reason_subcode = one of:
   websocket_closed_after_ack
   websocket_receive_timeout_after_ack
   websocket_protocol_error_after_ack
-  malformed_market_frame_after_ack
+  malformed_market_frame_after_ack        (generic base; concrete drops use a split below)
+  malformed_layout_after_ack              (flag|tr_id|count|body layout or flag rejected)
+  malformed_count_after_ack               (data_count not a positive integer)
+  malformed_quote_field_count_after_ack   (H0STASP0 field count mismatch)
+  malformed_trade_field_count_after_ack   (H0STCNT0 field count mismatch)
+  malformed_required_field_after_ack      (empty required field or model validation)
+  malformed_control_after_ack             (date/time control field or future-time)
   unsupported_tr_id_after_ack
   source_iterator_unknown_after_ack
 ```
 
+A malformed drop additionally carries `snapshot.parser_metadata`, an object built
+only from this sanitized whitelist (never raw body/field values/credentials):
+
+```text
+snapshot.parser_metadata keys (all sanitized, optional per stage):
+  parser_stage              (layout | count | field_count | required_field | control | model)
+  tr_id                     (H0STASP0 | H0STCNT0)
+  expected_field_count      (record_len * declared_count)
+  observed_field_count      (raw `^`-split field count)
+  declared_count            (data_count from the frame header)
+  record_len                (documented per-record column count)
+  has_trailing_empty_extra  (bool; trailing empty delimiter noise observed)
+```
+
 The evidence row must not include the raw exception, credentialed URL, HTTP
-payload, websocket frame, traceback, app key, app secret, or approval key.
+payload, websocket frame, raw field values, traceback, app key, app secret, or
+approval key.
 
 Counters cover actual observations only:
 

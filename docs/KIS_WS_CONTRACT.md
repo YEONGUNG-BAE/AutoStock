@@ -96,6 +96,11 @@ SHA `33e0e1e65cd1c8c8b639531483ec0b327087bab1`)에서 검증한 응답 구조:
   단, transport가 body 끝에 추가한 trailing `^`로 생기는 empty field만은
   documented 컬럼 수 밖의 payload가 아니므로 제거한 뒤 검증한다. trailing empty가
   아닌 초과 필드는 계속 malformed로 거부한다.
+- 파싱 실패는 `parser_stage`(layout/count/field_count/required_field/control/model)와
+  sanitized `parser_metadata`(tr_id, expected/observed/declared field count, record_len,
+  has_trailing_empty_extra만)를 함께 운반한다. source 계층은 이를 세분화된
+  `malformed_*_after_ack` reason_subcode로 매핑한다(개별 코드는 진단 증거 계약 문서 참조).
+  metadata에는 raw body/field 값/credential/URL/traceback을 절대 담지 않는다.
 
 ## 5. H0STASP0 (호가, best bid/ask) — 레코드 필드 인덱스
 

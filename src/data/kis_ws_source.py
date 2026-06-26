@@ -16,7 +16,13 @@ from market_data.kis_official_ws_parser import (
     KisOfficialWsUnsupportedTrIdError,
 )
 from market_data.source_errors import (
+    MalformedControlAfterAck,
+    MalformedCountAfterAck,
+    MalformedLayoutAfterAck,
     MalformedMarketFrameAfterAck,
+    MalformedQuoteFieldCountAfterAck,
+    MalformedRequiredFieldAfterAck,
+    MalformedTradeFieldCountAfterAck,
     MarketSourceIteratorError,
     SourceIteratorUnknownAfterAck,
     UnsupportedTrIdAfterAck,
@@ -203,8 +209,8 @@ class KisWsMarketEventSource:
                 parsed_events = self._parser.parse_frame(message, received_at=received_at)
             except KisOfficialWsUnsupportedTrIdError:
                 raise UnsupportedTrIdAfterAck() from None
-            except KisOfficialWsParseError:
-                raise MalformedMarketFrameAfterAck() from None
+            except KisOfficialWsParseError as exc:
+                raise _malformed_after_ack(exc) from None
             for event in parsed_events:
                 channel = _event_channel(event)
                 if channel not in self._subscribed_channels:
@@ -310,6 +316,49 @@ class KisWsMarketEventSource:
             return
         stamped = event if event.at is not None else replace(event, at=self._clock())
         self._on_transport_event(stamped)
+
+
+# parser_metadata로 surface를 허용하는 sanitized 키. 이 화이트리스트 밖의 키는
+# (혹여 parser가 추가하더라도) 증거 표면에 절대 통과시키지 않는다(fail-closed sanitization).
+_ALLOWED_PARSER_METADATA = frozenset(
+    {
+        "parser_stage",
+        "tr_id",
+        "expected_field_count",
+        "observed_field_count",
+        "declared_count",
+        "record_len",
+        "has_trailing_empty_extra",
+    }
+)
+
+
+def _malformed_after_ack(exc: KisOfficialWsParseError) -> MalformedMarketFrameAfterAck:
+    """parser_stage(+tr_id)를 세분화된 sanitized reason_subcode로 매핑한다.
+
+    raw body/field 값/credential/URL/traceback은 절대 surface하지 않는다 — 화이트리스트된
+    sanitized metadata만 운반한다.
+    """
+    raw = getattr(exc, "parser_metadata", None) or {}
+    metadata = {key: value for key, value in raw.items() if key in _ALLOWED_PARSER_METADATA}
+    stage = metadata.get("parser_stage")
+    tr_id = metadata.get("tr_id")
+    if stage == "layout":
+        cls: type[MalformedMarketFrameAfterAck] = MalformedLayoutAfterAck
+    elif stage == "count":
+        cls = MalformedCountAfterAck
+    elif stage == "field_count":
+        cls = (
+            MalformedQuoteFieldCountAfterAck
+            if tr_id == TR_QUOTE
+            else MalformedTradeFieldCountAfterAck
+        )
+    elif stage == "control":
+        cls = MalformedControlAfterAck
+    else:
+        # required_field / model / unknown 모두 required-field 계열로 모은다.
+        cls = MalformedRequiredFieldAfterAck
+    return cls(parser_metadata=metadata or None)
 
 
 def _event_channel(event: MarketEvent) -> str:

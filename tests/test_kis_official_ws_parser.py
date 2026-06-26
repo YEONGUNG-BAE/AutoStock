@@ -310,3 +310,163 @@ def test_error_message_does_not_leak_raw_frame() -> None:
     message = str(excinfo.value)
     assert sentinel not in message
     assert frame not in message
+
+
+# --- parser_stage + sanitized metadata --------------------------------------
+
+_ALLOWED_METADATA_KEYS = {
+    "parser_stage",
+    "tr_id",
+    "expected_field_count",
+    "observed_field_count",
+    "declared_count",
+    "record_len",
+    "has_trailing_empty_extra",
+}
+
+
+def _raise(parser: KisOfficialWsFrameParser, frame: str) -> KisOfficialWsParseError:
+    with pytest.raises(KisOfficialWsParseError) as excinfo:
+        parser.parse_frame(frame, received_at=_RECEIVED)
+    return excinfo.value
+
+
+def test_quote_field_count_mismatch_metadata() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, "0|H0STASP0|1|005930^095959")
+    assert exc.parser_stage == "field_count"
+    assert exc.parser_metadata == {
+        "parser_stage": "field_count",
+        "tr_id": TR_QUOTE,
+        "expected_field_count": _QUOTE_LEN,
+        "observed_field_count": 2,
+        "declared_count": 1,
+        "record_len": _QUOTE_LEN,
+        "has_trailing_empty_extra": False,
+    }
+
+
+def test_trade_field_count_mismatch_metadata() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, f"0|{TR_TRADE}|1|{'^'.join(['0'] * 10)}")
+    assert exc.parser_stage == "field_count"
+    assert exc.parser_metadata["tr_id"] == TR_TRADE
+    assert exc.parser_metadata["expected_field_count"] == _TRADE_LEN
+    assert exc.parser_metadata["observed_field_count"] == 10
+    assert exc.parser_metadata["declared_count"] == 1
+    assert exc.parser_metadata["has_trailing_empty_extra"] is False
+
+
+def test_non_empty_extra_field_count_metadata_flags_no_trailing_empty() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_QUOTE, [_quote_record()]) + "^NON_EMPTY_EXTRA"
+    exc = _raise(parser, frame)
+    assert exc.parser_stage == "field_count"
+    assert exc.parser_metadata["observed_field_count"] == _QUOTE_LEN + 1
+    # 마지막 extra가 비어있지 않으므로 trailing-empty 정리가 적용되지 않았다.
+    assert exc.parser_metadata["has_trailing_empty_extra"] is False
+    assert "NON_EMPTY_EXTRA" not in str(exc)
+    assert set(exc.parser_metadata) <= _ALLOWED_METADATA_KEYS
+
+
+def test_bad_count_metadata_stage_count() -> None:
+    parser = KisOfficialWsFrameParser()
+    body = "^".join(_trade_record())
+    exc = _raise(parser, f"0|{TR_TRADE}|x|{body}")
+    assert exc.parser_stage == "count"
+    assert exc.parser_metadata == {
+        "parser_stage": "count",
+        "tr_id": TR_TRADE,
+        "record_len": _TRADE_LEN,
+    }
+
+
+def test_layout_metadata_stage_layout_without_tr_id() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, "not-a-frame")
+    assert exc.parser_stage == "layout"
+    assert exc.parser_metadata == {"parser_stage": "layout"}
+    assert "tr_id" not in exc.parser_metadata
+
+
+def test_required_field_metadata_stage_required_field() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, _frame(TR_TRADE, [_trade_record(prpr="")]))
+    assert exc.parser_stage == "required_field"
+    assert exc.parser_metadata["tr_id"] == TR_TRADE
+    assert exc.parser_metadata["record_len"] == _TRADE_LEN
+
+
+def test_future_time_metadata_stage_control() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, _frame(TR_QUOTE, [_quote_record(bsop_hour="100500")]))
+    assert exc.parser_stage == "control"
+    assert exc.parser_metadata["tr_id"] == TR_QUOTE
+
+
+def test_bad_hhmmss_metadata_stage_control() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, _frame(TR_TRADE, [_trade_record(cntg_hour="9999")]))
+    assert exc.parser_stage == "control"
+    assert exc.parser_metadata["tr_id"] == TR_TRADE
+
+
+def test_crossed_book_metadata_stage_model() -> None:
+    parser = KisOfficialWsFrameParser()
+    exc = _raise(parser, _frame(TR_QUOTE, [_quote_record(askp1="69000", bidp1="70000")]))
+    assert exc.parser_stage == "model"
+    assert exc.parser_metadata["tr_id"] == TR_QUOTE
+
+
+def test_all_parser_metadata_keys_are_whitelisted_and_sanitized() -> None:
+    parser = KisOfficialWsFrameParser()
+    sentinel = "SENSITIVE_SENTINEL_VALUE"
+    frames = [
+        "not-a-frame",
+        "0|H0STASP0|1|005930^095959",
+        f"0|{TR_TRADE}|x|{'^'.join(_trade_record())}",
+        _frame(TR_TRADE, [_trade_record(prpr=sentinel)]),
+        _frame(TR_QUOTE, [_quote_record(bsop_hour="100500")]),
+        _frame(TR_QUOTE, [_quote_record(askp1="69000", bidp1="70000")]),
+    ]
+    for frame in frames:
+        exc = _raise(parser, frame)
+        assert set(exc.parser_metadata) <= _ALLOWED_METADATA_KEYS
+        for value in exc.parser_metadata.values():
+            assert isinstance(value, (str, int, bool))
+            assert sentinel not in str(value)
+
+
+# --- H0STASP0 (quote) variants ----------------------------------------------
+
+
+def test_quote_zero_padded_count_variant() -> None:
+    parser = KisOfficialWsFrameParser()
+    events = parser.parse_frame(
+        _frame_with_count(TR_QUOTE, [_quote_record()], "01"), received_at=_RECEIVED
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+
+
+def test_quote_allows_empty_optional_non_read_fields() -> None:
+    parser = KisOfficialWsFrameParser()
+    record = _quote_record()
+    # idx 2 is not one of the 6 fields the parser reads; an empty optional column
+    # within the documented 59-field record must still parse.
+    record[2] = ""
+    record[58] = ""
+    events = parser.parse_frame(_frame(TR_QUOTE, [record]), received_at=_RECEIVED)
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+
+
+def test_quote_multi_record_with_trailing_empty_extra() -> None:
+    parser = KisOfficialWsFrameParser()
+    records = [
+        _quote_record(bsop_hour="095958", askp1="70100"),
+        _quote_record(bsop_hour="095959", askp1="70200"),
+    ]
+    frame = _frame(TR_QUOTE, records) + "^^"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert [e.ask_price for e in events] == [Decimal("70100"), Decimal("70200")]
