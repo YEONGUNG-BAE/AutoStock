@@ -470,3 +470,85 @@ def test_quote_multi_record_with_trailing_empty_extra() -> None:
     frame = _frame(TR_QUOTE, records) + "^^"
     events = parser.parse_frame(frame, received_at=_RECEIVED)
     assert [e.ask_price for e in events] == [Decimal("70100"), Decimal("70200")]
+
+
+# --- H0STASP0 live 62-field variant (3 ignored extension fields) -------------
+
+_QUOTE_LEN_LIVE = 62
+
+
+def _quote_record_live(**kwargs: str) -> list[str]:
+    """Documented 59-field quote record + 3 ignored live extension fields = 62."""
+    return _quote_record(**kwargs) + ["0", "0", "0"]
+
+
+def test_documented_59_field_quote_still_parses() -> None:
+    parser = KisOfficialWsFrameParser()
+    events = parser.parse_frame(_frame(TR_QUOTE, [_quote_record()]), received_at=_RECEIVED)
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+
+
+def test_live_62_field_quote_parses() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_QUOTE, [_quote_record_live()])
+    assert frame.split("|")[2] == "1"  # declared_count
+    assert len(frame.split("|", 3)[3].split("^")) == _QUOTE_LEN_LIVE
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, NormalizedBestBidAsk)
+    assert event.symbol == "005930"
+    assert event.ask_price == Decimal("70100")
+    assert event.bid_price == Decimal("69900")
+    assert event.ask_quantity == Decimal("120")
+    assert event.bid_quantity == Decimal("0")
+    assert event.quote_at == datetime(2026, 6, 12, 9, 59, 59, tzinfo=_KST)
+
+
+def test_live_62_field_quote_ignores_extension_field_values() -> None:
+    parser = KisOfficialWsFrameParser()
+    record = _quote_record_live(askp1="71000", bidp1="70000")
+    # The 3 trailing extension fields must never shift required indexes or be read.
+    record[59] = "EXT_SENTINEL_A"
+    record[60] = "EXT_SENTINEL_B"
+    record[61] = "EXT_SENTINEL_C"
+    events = parser.parse_frame(_frame(TR_QUOTE, [record]), received_at=_RECEIVED)
+    assert events[0].ask_price == Decimal("71000")
+    assert events[0].bid_price == Decimal("70000")
+
+
+def test_multi_record_live_62_field_quote_parses() -> None:
+    parser = KisOfficialWsFrameParser()
+    records = [
+        _quote_record_live(bsop_hour="095958", askp1="70100"),
+        _quote_record_live(bsop_hour="095959", askp1="70200"),
+    ]
+    events = parser.parse_frame(_frame(TR_QUOTE, records), received_at=_RECEIVED)
+    assert [e.provider_sequence.sequence for e in events] == [1, 2]
+    assert [e.ask_price for e in events] == [Decimal("70100"), Decimal("70200")]
+
+
+def test_live_62_field_quote_allows_trailing_empty_delimiter() -> None:
+    parser = KisOfficialWsFrameParser()
+    frame = _frame(TR_QUOTE, [_quote_record_live()]) + "^"
+    events = parser.parse_frame(frame, received_at=_RECEIVED)
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+
+
+def test_quote_field_beyond_62_rejected_without_raw_leak() -> None:
+    parser = KisOfficialWsFrameParser()
+    leak = "EXTRA_FIELD_BEYOND_62"
+    frame = _frame(TR_QUOTE, [_quote_record_live()]) + "^" + leak
+    exc = _raise(parser, frame)
+    assert exc.parser_stage == "field_count"
+    assert exc.parser_metadata["tr_id"] == TR_QUOTE
+    assert exc.parser_metadata["observed_field_count"] == _QUOTE_LEN_LIVE + 1
+    # documented baseline은 안정적 참조값으로 보고된다.
+    assert exc.parser_metadata["record_len"] == _QUOTE_LEN
+    assert exc.parser_metadata["expected_field_count"] == _QUOTE_LEN
+    assert exc.parser_metadata["has_trailing_empty_extra"] is False
+    assert leak not in str(exc)
+    assert leak not in str(exc.parser_metadata)
+    assert set(exc.parser_metadata) <= _ALLOWED_METADATA_KEYS

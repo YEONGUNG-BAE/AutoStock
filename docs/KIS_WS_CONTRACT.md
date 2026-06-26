@@ -120,7 +120,17 @@ SHA `33e0e1e65cd1c8c8b639531483ec0b327087bab1`)에서 검증한 응답 구조:
 | 33 | BIDP_RSQN1 | 최우선 매수호가 잔량 → bid_quantity |
 | 34..42 | BIDP_RSQN2..10 | (미사용) |
 
-전체 레코드 길이: 59필드(idx 0..58). 본 parser는 길이 검증만 하고 위 6개 필드만 읽는다.
+전체 레코드 길이: 문서 baseline 59필드(idx 0..58). 본 parser는 길이 검증만 하고 위 6개
+필드만 읽는다.
+
+**Live observed variant (62필드):** 2026-06-26 live pilot 진단에서 KIS의 실제 H0STASP0
+record가 documented baseline 59필드가 아니라 **62필드**로 관측됐다(trailing delimiter
+noise가 아님 — `has_trailing_empty_extra=false`로 확정). 추가된 3개 필드(idx 59..61)는
+위 6개 required 인덱스(0..33)를 이동시키지 않는 append 확장으로 취급한다. parser는 59와
+62를 모두 허용하며, `data_count` 기준으로 후보 길이를 결정한다(두 길이의 기대 필드 수가
+달라 모호함이 없다). 확장 필드의 의미는 아직 매핑하지 않았고 **읽지 않으며**(값을 로깅하지
+않는다), 향후 공식 컬럼 정의로 확정되기 전까지 무시한다. 62필드를 초과하는(또는 trailing
+empty가 아닌) 필드는 계속 malformed로 거부한다.
 
 ## 6. H0STCNT0 (체결, trade) — 레코드 필드 인덱스
 

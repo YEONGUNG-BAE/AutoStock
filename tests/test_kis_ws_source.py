@@ -67,6 +67,19 @@ def _quote_frame_with_trailing_empty(*, symbol: str = "005930") -> str:
     return _quote_frame(symbol=symbol) + "^"
 
 
+def _live_quote_frame(*, symbol: str = "005930") -> str:
+    """Live H0STASP0 62-field variant: documented 59 fields + 3 ignored extensions."""
+    record = ["0"] * _QUOTE_LEN
+    record[0] = symbol
+    record[1] = "095959"
+    record[3] = "70100"
+    record[13] = "69900"
+    record[23] = "120"
+    record[33] = "0"
+    record += ["0", "0", "0"]
+    return f"0|H0STASP0|1|{'^'.join(record)}"
+
+
 def _unsupported_tr_id_frame() -> str:
     return "0|H0STXXX0|1|005930^095959"
 
@@ -232,6 +245,17 @@ def test_quote_frame_with_trailing_empty_delimiter_is_yielded() -> None:
     assert len(events) == 1
     assert isinstance(events[0], NormalizedBestBidAsk)
     assert events[0].provider_sequence.channel == "H0STASP0|005930"
+
+
+def test_live_62_field_quote_frame_is_yielded() -> None:
+    ws = _FakeWebSocket([*_acks(), _live_quote_frame()])
+    source = _source(ws, max_events=1)
+    events = asyncio.run(_drain(source, 1))
+    assert len(events) == 1
+    assert isinstance(events[0], NormalizedBestBidAsk)
+    assert events[0].provider_sequence.channel == "H0STASP0|005930"
+    assert events[0].ask_price == Decimal("70100")
+    assert events[0].bid_price == Decimal("69900")
 
 
 def test_pingpong_triggers_pong_and_heartbeat() -> None:

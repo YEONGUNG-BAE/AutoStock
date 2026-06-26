@@ -27,8 +27,14 @@ _PLAINTEXT_FLAG = "0"
 _ENCRYPTED_FLAG = "1"
 
 # 레코드당 필드 수(전체). docs/KIS_WS_CONTRACT.md의 검증된 컬럼 길이와 일치해야 한다.
+# H0STASP0(호가)는 문서 baseline 59필드에 더해, live KIS가 동일 prefix(idx 0..58)에 3개
+# 확장 필드를 덧붙인 62필드 variant를 함께 허용한다. 확장 필드(idx 59..61)는 읽지 않고
+# 무시한다 — 본 parser가 읽는 인덱스(0..33)는 두 길이에서 동일하게 유지된다.
 _QUOTE_FIELD_COUNT = 59
+_QUOTE_FIELD_COUNT_LIVE = 62
+_QUOTE_FIELD_COUNTS = (_QUOTE_FIELD_COUNT, _QUOTE_FIELD_COUNT_LIVE)
 _TRADE_FIELD_COUNT = 46
+_TRADE_FIELD_COUNTS = (_TRADE_FIELD_COUNT,)
 
 # H0STASP0 (quote) 필드 인덱스
 _Q_SYMBOL = 0
@@ -122,9 +128,9 @@ class KisOfficialWsFrameParser:
             )
 
         if tr_id == TR_QUOTE:
-            record_len = _QUOTE_FIELD_COUNT
+            record_lens = _QUOTE_FIELD_COUNTS
         elif tr_id == TR_TRADE:
-            record_len = _TRADE_FIELD_COUNT
+            record_lens = _TRADE_FIELD_COUNTS
         else:
             raise KisOfficialWsUnsupportedTrIdError(
                 "unsupported tr_id; expected H0STASP0 or H0STCNT0.", parser_stage="unsupported_tr_id"
@@ -133,21 +139,26 @@ class KisOfficialWsFrameParser:
         try:
             count = _parse_count(count_str)
         except KisOfficialWsParseError as exc:
-            exc.enrich(tr_id=tr_id, record_len=record_len)
+            exc.enrich(tr_id=tr_id, record_len=record_lens[0])
             raise
-        expected = record_len * count
-        fields, observed, has_trailing_empty_extra = _split_body_fields(body, expected=expected)
-        if len(fields) != expected:
+        raw_fields = body.split("^")
+        observed = len(raw_fields)
+        fields, record_len = _match_record_len(raw_fields, record_lens=record_lens, count=count)
+        if fields is None:
+            # documented baseline 길이를 metadata 기준으로 보고한다(가장 안정적인 참조값).
+            primary_len = record_lens[0]
             raise KisOfficialWsParseError(
                 "frame field count mismatch.",
                 parser_stage="field_count",
                 parser_metadata={
                     "tr_id": tr_id,
-                    "expected_field_count": expected,
+                    "expected_field_count": primary_len * count,
                     "observed_field_count": observed,
                     "declared_count": count,
-                    "record_len": record_len,
-                    "has_trailing_empty_extra": has_trailing_empty_extra,
+                    "record_len": primary_len,
+                    "has_trailing_empty_extra": _has_trailing_empty_extra(
+                        raw_fields, record_lens=record_lens, count=count
+                    ),
                 },
             )
 
@@ -155,9 +166,9 @@ class KisOfficialWsFrameParser:
         for index in range(count):
             record = fields[index * record_len : (index + 1) * record_len]
             if tr_id == TR_QUOTE:
-                events.append(self._build_quote(record, aware_received))
+                events.append(self._build_quote(record, aware_received, record_len=record_len))
             else:
-                events.append(self._build_trade(record, aware_received))
+                events.append(self._build_trade(record, aware_received, record_len=record_len))
         return events
 
     def _next_sequence(self, tr_id: str, symbol: str) -> int:
@@ -166,7 +177,9 @@ class KisOfficialWsFrameParser:
         self._sequence[key] = nxt
         return nxt
 
-    def _build_quote(self, record: list[str], received_at: datetime) -> NormalizedBestBidAsk:
+    def _build_quote(
+        self, record: list[str], received_at: datetime, *, record_len: int
+    ) -> NormalizedBestBidAsk:
         try:
             symbol = _require_field(record, _Q_SYMBOL, "symbol")
             quote_at = _kst_from_received_date(
@@ -194,10 +207,12 @@ class KisOfficialWsFrameParser:
                 provider_sequence=provider_sequence,
             )
         except KisOfficialWsParseError as exc:
-            exc.enrich(tr_id=TR_QUOTE, record_len=_QUOTE_FIELD_COUNT)
+            exc.enrich(tr_id=TR_QUOTE, record_len=record_len)
             raise
 
-    def _build_trade(self, record: list[str], received_at: datetime) -> NormalizedTradeTick:
+    def _build_trade(
+        self, record: list[str], received_at: datetime, *, record_len: int
+    ) -> NormalizedTradeTick:
         try:
             symbol = _require_field(record, _T_SYMBOL, "symbol")
             trade_at = _kst_from_date_time(
@@ -225,7 +240,7 @@ class KisOfficialWsFrameParser:
                 cumulative_volume=_require_field(record, _T_ACML_VOL, "ACML_VOL"),
             )
         except KisOfficialWsParseError as exc:
-            exc.enrich(tr_id=TR_TRADE, record_len=_TRADE_FIELD_COUNT)
+            exc.enrich(tr_id=TR_TRADE, record_len=record_len)
             raise
 
 
@@ -250,21 +265,40 @@ def _parse_count(count_str: str) -> int:
     return count
 
 
-def _split_body_fields(body: str, *, expected: int) -> tuple[list[str], int, bool]:
-    """body를 `^`로 분할한다.
+def _match_record_len(
+    raw_fields: list[str], *, record_lens: tuple[int, ...], count: int
+) -> tuple[list[str] | None, int | None]:
+    """관측된 필드 수를 허용 record 길이 후보 중 하나에 맞춘다.
 
-    transport가 끝에 붙인 trailing `^`로 생기는 empty field만은 documented 컬럼 밖의
-    payload가 아니므로 제거한 뒤 검증한다. 반환: (검증용 fields, raw observed count,
-    trailing empty extra가 있었는지). has_trailing_empty_extra는 sanitized boolean이며
-    raw 값은 담지 않는다.
+    documented baseline(예: 59)과 live variant(예: 62)를 모두 허용한다. data_count가
+    주어진 상태에서 후보 길이별 기대 필드 수는 서로 달라 모호함이 없다. 정확히 일치하는
+    후보를 우선하고, 그렇지 않으면 transport가 끝에 붙인 trailing `^` empty field만 제거해
+    재시도한다(trailing empty가 아닌 초과 필드는 매칭하지 않는다). 매칭 실패 시 (None, None).
     """
-    raw_fields = body.split("^")
     observed = len(raw_fields)
-    extra = raw_fields[expected:]
-    has_trailing_empty_extra = bool(extra) and any(item == "" for item in extra)
-    if extra and all(item == "" for item in extra):
-        return raw_fields[:expected], observed, has_trailing_empty_extra
-    return raw_fields, observed, has_trailing_empty_extra
+    for record_len in record_lens:
+        if observed == record_len * count:
+            return raw_fields, record_len
+    # trailing empty 정리는 가장 긴 후보부터 시도해 확장 variant를 우선 보존한다.
+    for record_len in sorted(record_lens, reverse=True):
+        expected = record_len * count
+        if observed > expected and all(item == "" for item in raw_fields[expected:]):
+            return raw_fields[:expected], record_len
+    return None, None
+
+
+def _has_trailing_empty_extra(
+    raw_fields: list[str], *, record_lens: tuple[int, ...], count: int
+) -> bool:
+    """매칭 실패 시 초과 필드가 trailing empty(delimiter noise)인지 sanitized boolean으로 보고한다.
+
+    관측 수 이하인 가장 큰 후보 기대값을 기준으로 초과분을 본다. raw 값은 담지 않는다.
+    """
+    observed = len(raw_fields)
+    fitting = [record_len * count for record_len in record_lens if record_len * count <= observed]
+    reference = max(fitting) if fitting else min(record_len * count for record_len in record_lens)
+    extra = raw_fields[reference:]
+    return bool(extra) and any(item == "" for item in extra)
 
 
 def _require_field(record: list[str], index: int, name: str) -> str:
