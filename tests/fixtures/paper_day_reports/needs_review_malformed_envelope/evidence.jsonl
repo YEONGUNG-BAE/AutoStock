@@ -1,0 +1,4 @@
+{"event": "started", "stage": "startup", "recorded_at": "2026-06-26T09:00:00+09:00", "sensitive_data_present": false}
+{"event": "subscription_ack", "stage": "transport", "recorded_at": "2026-06-26T09:00:02+09:00", "reason_code": "trade_acked", "sensitive_data_present": false}
+{"event": "subscription_ack", "stage": "transport", "recorded_at": "2026-06-26T09:00:03+09:00", "reason_code": "quote_acked", "sensitive_data_present": false}
+{"event": "finalized", "stage": "shutdown", "recorded_at": "2026-06-26T15:30:00+09:00", "reason_code": "completed", "sensitive_data_present": false}

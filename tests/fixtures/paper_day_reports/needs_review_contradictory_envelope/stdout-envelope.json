@@ -1,0 +1,23 @@
+{
+  "run_id": "paper-day-005930-260626-C",
+  "session_date": "2026-06-26",
+  "symbol": "005930",
+  "summary_publication_outcome": "NOT_WRITTEN",
+  "summary_publication_reason_codes": ["publish_failed"],
+  "cleanup_outcome": "INCOMPLETE",
+  "runtime_lock_fd_closed": false,
+  "runtime_lock_absent_confirmed": false,
+  "runtime_lock_identity_matched": true,
+  "runtime_lock_release_reason_code": "lock_release_failed",
+  "_envelope_capture": {
+    "schema_version": "paper_day_stdout_envelope.v1",
+    "captured_at": "2026-06-26T06:30:00+00:00",
+    "exit_code": 0,
+    "run_id": "paper-day-005930-260626-C",
+    "summary_path": "runtime/paper-day/2026-06-26/pilot/summary.json",
+    "evidence_path": "runtime/paper-day/2026-06-26/pilot/evidence.jsonl",
+    "db_dir": "runtime/paper-day/2026-06-26/pilot/db",
+    "command_args": ["--symbol", "005930", "--duration-seconds", "100"],
+    "git_head": null
+  }
+}

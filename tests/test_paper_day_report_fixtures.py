@@ -94,6 +94,44 @@ def test_fail_sensitive_data_present_fixture() -> None:
     assert "sensitive_data_present_any | true" in md
 
 
+def test_needs_review_malformed_envelope_fixture() -> None:
+    # A malformed stdout-envelope.json is treated as absent by the renderer: the
+    # envelope-only clauses become missing_from_persisted_summary, so the run can
+    # never be rendered as PASS even though the summary's outcome is PASS.
+    md, result = _render("needs_review_malformed_envelope")
+    assert result["verdict"] == "NEEDS_REVIEW"
+    assert result["verdict"] != "PASS"
+    assert "**verdict: NEEDS_REVIEW**" in md
+    assert "envelope_error: envelope_malformed" in md
+    assert "missing_from_persisted_summary" in md
+
+
+def test_needs_review_wrong_run_envelope_fixture() -> None:
+    # The envelope carries clean clauses but its identity (run_id/session_date/
+    # symbol) belongs to a different run. The identity cross-check blocks PASS.
+    md, result = _render("needs_review_wrong_run_envelope")
+    assert result["verdict"] == "NEEDS_REVIEW"
+    assert result["verdict"] != "PASS"
+    assert "envelope_run_mismatch" in result["pass_blockers"]
+    assert "envelope_run_mismatch" in md
+    # Renderer reuses the validator verdict verbatim.
+    assert "**verdict: NEEDS_REVIEW**" in md
+
+
+def test_needs_review_contradictory_envelope_fixture() -> None:
+    # Same run, but the envelope's clean-exit clauses are FAIL-like while the
+    # summary says PASS/completed. The clause checks block PASS without a hard
+    # safety failure, so the verdict is NEEDS_REVIEW (not PASS, not FAIL).
+    md, result = _render("needs_review_contradictory_envelope")
+    assert result["verdict"] == "NEEDS_REVIEW"
+    assert result["verdict"] not in ("PASS", "FAIL")
+    assert "summary_publication_outcome" in result["pass_blockers"]
+    assert "cleanup_outcome" in result["pass_blockers"]
+    assert "envelope_run_mismatch" not in result["pass_blockers"]
+    assert "summary_publication_outcome | NOT_WRITTEN" in md
+    assert "cleanup_outcome | INCOMPLETE" in md
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -102,6 +140,9 @@ def test_fail_sensitive_data_present_fixture() -> None:
         "fail_source_approval_failed",
         "needs_review_missing_envelope",
         "fail_sensitive_data_present",
+        "needs_review_malformed_envelope",
+        "needs_review_wrong_run_envelope",
+        "needs_review_contradictory_envelope",
     ],
 )
 def test_fixture_has_no_secret_sentinel(name: str) -> None:

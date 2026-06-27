@@ -29,8 +29,11 @@ from validate_paper_day_summary import (  # noqa: E402
     EXPECTED_SCHEMA_VERSION,
     NEEDS_REVIEW,
     PASS,
+    ValidatorError,
     run_validate,
 )
+
+_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "paper_day_reports"
 
 _CLI_PATH = REPO_ROOT / "ops" / "run_attended_paper_day.py"
 _spec = importlib.util.spec_from_file_location("run_attended_paper_day", _CLI_PATH)
@@ -408,6 +411,70 @@ def test_cli_generic_exception_path_writes_fail_envelope_no_traceback(
     # No traceback or raised-exception text leaks into the persisted envelope.
     assert secret_marker not in raw
     assert "Traceback" not in raw
+
+
+# --- envelope edge cases must never be misclassified as PASS -----------------
+
+
+def _validate_fixture(name: str, **overrides: object) -> dict[str, object]:
+    fixture = _FIXTURE_ROOT / name
+    envelope = fixture / "stdout-envelope.json"
+    kwargs: dict[str, object] = {
+        "summary_path": fixture / "summary.json",
+        "evidence_path": fixture / "evidence.jsonl",
+        "envelope_path": envelope if envelope.is_file() else None,
+        "expect_schema_version": EXPECTED_SCHEMA_VERSION,
+        "expect_source_kind": "kis_live",
+    }
+    kwargs.update(overrides)
+    return run_validate(**kwargs)  # type: ignore[arg-type]
+
+
+def test_validator_rejects_malformed_envelope_as_cli_error() -> None:
+    # run_validate surfaces a malformed --envelope as a CLI-level ValidatorError
+    # (NEEDS_REVIEW at the CLI boundary) — it never silently infers the clauses
+    # and never reaches PASS.
+    with pytest.raises(ValidatorError):
+        _validate_fixture("needs_review_malformed_envelope")
+
+
+def test_validator_wrong_run_envelope_is_needs_review() -> None:
+    result = _validate_fixture("needs_review_wrong_run_envelope")
+    assert result["verdict"] == NEEDS_REVIEW
+    assert result["verdict"] != PASS
+    assert "envelope_run_mismatch" in result["pass_blockers"]
+
+
+def test_validator_contradictory_envelope_is_needs_review() -> None:
+    result = _validate_fixture("needs_review_contradictory_envelope")
+    assert result["verdict"] == NEEDS_REVIEW
+    assert result["verdict"] != PASS
+    # Same-run identity, so the mismatch guard must NOT fire here.
+    assert "envelope_run_mismatch" not in result["pass_blockers"]
+    # The FAIL-like clean-exit clauses are what block PASS.
+    assert "summary_publication_outcome" in result["pass_blockers"]
+    assert "cleanup_outcome" in result["pass_blockers"]
+
+
+def test_validator_matching_identity_envelope_does_not_misfire(tmp_path: Path) -> None:
+    # A correct, same-run envelope must still PASS — the identity guard adds an
+    # "ok" check, never a spurious blocker.
+    summary_path = tmp_path / "summary.json"
+    evidence_path = tmp_path / "evidence.jsonl"
+    envelope_path = tmp_path / "stdout-envelope.json"
+    summary_path.write_text(json.dumps(_mechanical_summary()), encoding="utf-8")
+    _benign_evidence(evidence_path)
+    cli.write_stdout_envelope(envelope_path, _build_envelope(_full_pass_payload(), exit_code=0))
+
+    result = run_validate(
+        summary_path=summary_path,
+        evidence_path=evidence_path,
+        envelope_path=envelope_path,
+        expect_schema_version=EXPECTED_SCHEMA_VERSION,
+        expect_source_kind="kis_live",
+    )
+    assert result["verdict"] == PASS
+    assert "envelope_run_mismatch" not in result["pass_blockers"]
 
 
 def test_cli_fail_without_envelope_flag_writes_nothing(tmp_path: Path, capsys) -> None:

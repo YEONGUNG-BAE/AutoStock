@@ -206,6 +206,44 @@ def _check(name: str, status: str, detail: str) -> dict[str, str]:
     return {"name": name, "status": status, "detail": detail}
 
 
+# Identity fields that must agree between the persisted summary and a supplied
+# stdout envelope. A disagreement means the envelope belongs to a different run.
+_ENVELOPE_IDENTITY_FIELDS = ("run_id", "session_date", "symbol")
+
+
+def _envelope_identity_mismatch(
+    summary: dict[str, Any] | None, envelope: dict[str, Any] | None
+) -> list[str]:
+    """Report identity fields where a supplied envelope contradicts the summary.
+
+    Only compares values present on both sides — a missing field is handled by the
+    existing missing/clause logic, never inferred here. The reserved
+    ``_envelope_capture.run_id`` (always written by the run tool) is also checked
+    against the summary's ``run_id`` so a wrong-run envelope cannot pass clean
+    clauses through to a false PASS.
+    """
+    if not summary or not envelope:
+        return []
+    mismatches: list[str] = []
+    for field in _ENVELOPE_IDENTITY_FIELDS:
+        s_val = summary.get(field)
+        e_val = envelope.get(field)
+        if s_val is not None and e_val is not None and s_val != e_val:
+            mismatches.append(field)
+    capture = envelope.get("_envelope_capture")
+    if isinstance(capture, dict):
+        cap_run = capture.get("run_id")
+        s_run = summary.get("run_id")
+        if (
+            cap_run is not None
+            and s_run is not None
+            and cap_run != s_run
+            and "run_id" not in mismatches
+        ):
+            mismatches.append("_envelope_capture.run_id")
+    return mismatches
+
+
 def classify(
     *,
     summary: dict[str, Any] | None,
@@ -225,6 +263,18 @@ def classify(
     merged: dict[str, Any] = dict(summary or {})
     if envelope:
         merged.update(envelope)
+
+    # A supplied envelope must describe the same run as the persisted summary.
+    # A wrong-run envelope (different run_id/session_date/symbol) must never be
+    # allowed to overlay clean-exit clauses that flip the verdict to PASS.
+    envelope_mismatch = _envelope_identity_mismatch(summary, envelope)
+    if envelope_mismatch:
+        checks.append(
+            _check("envelope_run_identity", "fail", "mismatch: " + ", ".join(envelope_mismatch))
+        )
+        pass_blockers.append("envelope_run_mismatch")
+    elif envelope:
+        checks.append(_check("envelope_run_identity", "ok", "matches summary"))
 
     if summary_error is not None:
         checks.append(_check("summary_file", "fail", summary_error))
