@@ -203,7 +203,7 @@ the validator reports `missing_from_persisted_summary` and returns
 missing, empty, malformed, or captured from the wrong run, the validator must not
 infer the envelope-only fields and returns `NEEDS_REVIEW`/`FAIL` per its existing
 rules. The verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in
-the Monday operator packet.
+the operator packet.
 
 Envelope capture: pass `--stdout-envelope-out "$RUN_DIR/stdout-envelope.json"` so
 the tool itself persists the envelope (the full `--json` payload plus a sanitized
@@ -220,8 +220,10 @@ Keep a belt-and-suspenders console capture with plain stdout redirection
 not pipe through `tee` unless the shell and pipe-status handling are explicitly
 verified: a pipeline's `$?` reflects `tee`, and the bash-only `${PIPESTATUS[0]}`
 is not safe under macOS's default zsh. Redirection makes `$?` capture the Python
-process exit code in both bash and zsh. See
-`docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` for the full run command.
+process exit code in both bash and zsh. For the full run command, use the current
+reusable next-session packet `docs/PAPER_DAY_NEXT_OPERATOR_PACKET.md`; the
+2026-06-22 `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` is retained only as
+historical safety/runbook reference.
 
 Result collection existence gate: before validating, confirm all four artifacts
 exist and the tree is clean of tracked runtime —
@@ -245,6 +247,7 @@ tool-written envelope on both PASS and FAIL paths via `--stdout-envelope-out`
 (hardening commit `7d70ba0`, locally verified). **Any future live run is for
 envelope/runbook validation only — not for parser verification, which is already
 complete.** A future run still requires a fresh, Operator-selected
-session/date/duration during a regular KR market session; the 2026-06-22 Monday
-run sheet is **historical**. Cursor/test work remains limited to validate-only,
+session/date/duration during a regular KR market session: use the current reusable
+next-session packet `docs/PAPER_DAY_NEXT_OPERATOR_PACKET.md` (the 2026-06-22 Monday
+run sheet is **historical**). Cursor/test work remains limited to validate-only,
 offline fixtures, and lifecycle-aware fakes.
