@@ -1,7 +1,16 @@
-# Paper-Day Monday Execution Checklist
+# Paper-Day Monday Execution Checklist — HISTORICAL (2026-06-22, pre-pilot)
 
-Single final entry point for the Monday **2026-06-22** 1-day attended paper
-diagnostic. It freezes and orders everything prepared in RTM-7c.7–7c.10 (Operator
+> **HISTORICAL — do not use as the current entry point.** This is the run sheet
+> that was prepared for the **2026-06-22** Monday diagnostic. The 1-day attended
+> paper diagnostic has since been performed (pilot-3, 2026-06-26, clean operator
+> terminal PASS; H0STASP0 parser fix verified). It is retained for its frozen
+> safety criteria and step ordering. **Before any future market-session run it
+> must be refreshed** with an Operator-selected session date, RUN_DIR, and
+> duration during a regular KR market session. See
+> `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md` for current state and
+> `docs/PAPER_DAY_OPERATOR_RUNBOOK.md` for the live capture pattern.
+
+This document froze and ordered everything prepared in RTM-7c.7–7c.10 (Operator
 packet, offline validator, report generator, failure triage playbook, offline
 rehearsal) into one in-session run sheet. Cursor/Claude never executes any step
 here — it is consumed by a human Operator during a regular KR market session.
@@ -11,7 +20,10 @@ here — it is consumed by a human Operator during a regular KR market session.
 ```text
 KIS startup-only readiness: PASS
 startup run: runtime/paper-day/2026-06-18/startup-4
-1-day attended paper diagnostic: HOLD until Monday 2026-06-22 regular KR market session
+1-day attended paper diagnostic: PERFORMED (pilot-3 2026-06-26, operator terminal PASS)
+pilot-3 parser fix: VERIFIED (on-disk evidence)
+pilot-3 formal reproducible verdict: NEEDS_REVIEW (stdout-envelope.json not captured)
+this 2026-06-22 run sheet: HISTORICAL — refresh before any future run
 live order: prohibited
 runtime activation: prohibited
 automatic restart: prohibited

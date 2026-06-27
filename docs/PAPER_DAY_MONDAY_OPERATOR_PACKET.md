@@ -1,15 +1,25 @@
-# Paper-Day Monday Operator Packet — 2026-06-22 (1-Day Attended Paper Diagnostic)
+# Paper-Day Monday Operator Packet — HISTORICAL 2026-06-22 (1-Day Attended Paper Diagnostic)
 
-This packet is the in-session run sheet for the **Operator** on Monday
+> **HISTORICAL 2026-06-22 packet — not the next run sheet.** The 1-day attended
+> paper diagnostic has been performed (pilot-3, 2026-06-26): clean operator
+> terminal PASS, H0STASP0 parser fix verified on disk; pilot-3's formal
+> reproducible verdict is `NEEDS_REVIEW` only because `stdout-envelope.json` was
+> not captured that day (now closed at the tooling level — see
+> `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md`). The safety criteria, run command, and
+> capture/validation flow below remain authoritative and reusable, but the dates
+> and RUN_DIR are historical: a future run needs an Operator-selected session
+> date, RUN_DIR, and duration chosen during a regular KR market session.
+
+This packet was the in-session run sheet for the **Operator** on Monday
 **2026-06-22**. It is consumed by a human Operator during a regular KR market
 session. Cursor/Claude never executes any step in this packet: no `--live-kis`,
 no actual KIS network call, no live order, no daemon, no activation, no commit.
 
-The KIS startup-only smoke has already reached PASS
+The KIS startup-only smoke reached PASS
 (`runtime/paper-day/2026-06-18/startup-4`, `outcome=PASS`,
-`stop_reason=startup_only`, `source_kind=kis_live`). That clears the readiness
-gate for a Monday attended paper diagnostic — it does **not** authorize runtime
-activation, automatic restart, or live orders.
+`stop_reason=startup_only`, `source_kind=kis_live`), and the subsequent pilot-3
+attended diagnostic reached an operator-observed terminal PASS. Neither clears
+runtime activation, automatic restart, or live orders — those remain prohibited.
 
 Before Monday's live run, optionally rehearse the validator/report/handoff flow
 offline using `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md` (synthetic fixtures,

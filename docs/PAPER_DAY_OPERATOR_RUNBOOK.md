@@ -232,8 +232,19 @@ missing envelope yields `NEEDS_REVIEW`; do not hand-edit the envelope to backfil
 the clean-exit clauses — re-capture from a fresh run.
 
 KIS startup-only readiness is **PASS** (`runtime/paper-day/2026-06-18/startup-4`:
-`PASS/startup_only/kis_live`). The actual 1-day attended paper diagnostic has
-**not** been performed and is **HOLD** until the Monday 2026-06-22 regular market
-session — see `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md` for the in-session run
-sheet. A 1-day pilot remains **NO-GO** until Reviewer PASS; Cursor/test work is
-limited to validate-only, offline fixtures, and lifecycle-aware fakes.
+`PASS/startup_only/kis_live`). The 1-day attended paper diagnostic **has been
+performed**: pilot-3 on 2026-06-26 reached a clean operator-observed terminal
+**PASS**, and the H0STASP0 62-field live quote parser fix is **verified** by the
+on-disk evidence (46,865 live quote frames normalized 1:1, zero parse failures).
+The **formal reproducible verdict for pilot-3 remains `NEEDS_REVIEW`** because
+`stdout-envelope.json` was not captured that day, so the five clean-exit clauses
+cannot be confirmed from disk (see `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md`).
+
+That capture gap is now closed at the tooling level: the CLI persists the
+tool-written envelope on both PASS and FAIL paths via `--stdout-envelope-out`
+(hardening commit `7d70ba0`, locally verified). **Any future live run is for
+envelope/runbook validation only — not for parser verification, which is already
+complete.** A future run still requires a fresh, Operator-selected
+session/date/duration during a regular KR market session; the 2026-06-22 Monday
+run sheet is **historical**. Cursor/test work remains limited to validate-only,
+offline fixtures, and lifecycle-aware fakes.

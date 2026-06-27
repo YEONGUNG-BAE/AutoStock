@@ -332,6 +332,12 @@
 
 ## P3 — Ops / KIS / Paper Review Backlog
 
+### Paper-day pilot-3 reconnect/source-error operational noise (P3 backlog)
+- pilot-3 (2026-06-26) reached a clean operator terminal PASS and the H0STASP0 parser fix is verified on disk; the source-error/reconnect noise observed during the run **did not block PASS**.
+- Backlog items (benign reconnect noise): `malformed_control_after_ack=656` and `websocket_closed_after_ack=1` remain an operational-noise backlog to characterize later — not a correctness defect.
+- Analyze later with sanitized/fake tests where possible (replay/lifecycle fakes); do not log raw frames/payloads/URLs/tokens/keys/tracebacks while investigating.
+- **No live KIS rerun is required solely for this backlog.** A future live run is only for envelope/runbook validation; parser verification is already complete. See `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md`.
+
 ### KIS read-only / tiny-live
 - ~~Add manual KIS read-only smoke ops entrypoint.~~ Done: `ops/run_kis_read_only_smoke.py` (explicit `--run` opt-in; no orders).
 - Verify KIS OpenAPI endpoint paths and TR IDs in `src/broker/kis_client.py` against the official KIS Open API documentation before real read-only smoke.

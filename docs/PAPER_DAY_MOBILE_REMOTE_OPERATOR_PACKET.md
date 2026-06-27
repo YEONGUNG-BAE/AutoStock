@@ -1,4 +1,12 @@
-# Paper-Day Mobile Remote Operator Packet
+# Paper-Day Mobile Remote Operator Packet — HISTORICAL example values
+
+> **HISTORICAL example values.** The `SESSION_DATE="2026-06-23"`,
+> `RUN_LABEL="day-1"`, and `DURATION_SECONDS="1800"` below are **example values
+> from the original 2026-06-22/23 window — not a scheduled run.** The 1-day
+> diagnostic has been performed (pilot-3, 2026-06-26). **Any future run requires
+> a fresh `SESSION_DATE`, `RUN_LABEL`, and `DURATION_SECONDS` selected by the
+> Operator during a regular KR market session** (`session_state=OPEN`); never
+> reuse these literals. See `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md`.
 
 ## Scope
 
@@ -57,7 +65,8 @@ src/broker/kis_transport.py
 
 ## Variables to confirm before pasting
 
-Only these three values are intended for confirmation:
+Only these three values are intended for confirmation. **The literals below are
+historical examples — replace them with fresh values for the actual session:**
 
 ```bash
 SESSION_DATE="2026-06-23"
@@ -66,7 +75,8 @@ DURATION_SECONDS="1800"
 ```
 
 Do not edit the long command body from the phone.
-Only confirm SESSION_DATE, RUN_LABEL, and DURATION_SECONDS before the session.
+Only confirm SESSION_DATE, RUN_LABEL, and DURATION_SECONDS before the session —
+chosen for the actual market day, not copied from these historical examples.
 
 ## Paste block 1 — preflight
 

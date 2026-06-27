@@ -89,11 +89,20 @@ These lift the run to a clean operator-observed PASS but were not persisted to
 `stdout-envelope.json`, so the offline validator cannot confirm them.
 
 ### Process note (next run)
-Capture the stdout envelope via redirection so the clean-exit clauses are
-verifiable from disk and the formal verdict can reach PASS:
-`... --json > "$RUN_DIR/stdout-envelope.json"` then `PILOT_EXIT=$?`
-(see `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`). Do not hand-edit an envelope
-file to backfill the missing fields.
+Capture the stdout envelope with the **tool-written** flag so the clean-exit
+clauses are verifiable from disk and the formal verdict can reach PASS. The
+`stdout-envelope.json` that the offline validator reads is produced by
+`--stdout-envelope-out`, not by the shell redirect:
+
+```bash
+--stdout-envelope-out "$RUN_DIR/stdout-envelope.json"
+--json > "$RUN_DIR/stdout-envelope.shell.json"
+```
+
+`stdout-envelope.json` is tool-written and validator-read;
+`stdout-envelope.shell.json` is only a belt-and-suspenders console capture (see
+`docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`). Do not hand-edit an envelope file to
+backfill the missing fields.
 
 ---
 
