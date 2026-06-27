@@ -352,7 +352,10 @@ daemon / auto-restart              none
 
 ## Handoff format
 
-Report back to the Reviewer with:
+The Reviewer accepts this handoff using
+`docs/PAPER_DAY_REVIEWER_INTAKE_CHECKLIST.md`, which lists exactly what to verify
+on the `RUN_DIR` artifacts (offline, secret-free, no raw frames). Report back to
+the Reviewer with:
 
 ```text
 ## Run identity
