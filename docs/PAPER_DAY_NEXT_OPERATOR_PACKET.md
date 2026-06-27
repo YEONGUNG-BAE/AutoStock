@@ -262,6 +262,17 @@ criteria and `stop_reason` taxonomies are authoritative in
 reference) and `docs/PAPER_DAY_OPERATOR_RUNBOOK.md`. Do not retry blindly; isolate
 the first failed stage first.
 
+## Offline rehearsal (optional, before the live run)
+
+To rehearse the validator/report/handoff flow before the session, walk the offline
+synthetic rehearsal in `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md`. It is
+**offline, synthetic, network-free, and not a live KIS run** — it touches only
+fixtures and a throwaway working directory, never `config`, credentials, or the
+network. The rehearsal fixtures live under
+`tests/fixtures/paper_day_reports/<fixture_name>/` (e.g.
+`tests/fixtures/paper_day_reports/pass_startup_like`). The rehearsal helper's
+`--fixture` flag takes that **directory path**, not a bare fixture key.
+
 ## Safety prohibitions
 
 This run is a bounded, attended paper diagnostic for **envelope/runbook validation

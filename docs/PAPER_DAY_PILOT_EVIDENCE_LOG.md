@@ -126,3 +126,32 @@ verification only — no live KIS, no network, no live rerun.
   `test_paper_day_monday_execution_checklist_docs.py`,
   `test_kis_official_ws_parser.py`, `test_kis_ws_source.py`).
 - No live KIS rerun performed or required for this hardening review.
+
+---
+
+## 2026-06-27 — offline handoff rehearsal (synthetic fixtures)
+
+Operator walked the offline validator/report/handoff flow against the five
+synthetic fixtures. Offline, read-only, network-free — **no live KIS, no network,
+no startup smoke, no attended pilot** was run.
+
+- Expected verdict matrix **passed** for all five fixtures:
+
+  ```text
+  pass_startup_like              -> PASS
+  no_go_health_not_ready         -> NO_GO
+  fail_source_approval_failed    -> FAIL
+  needs_review_missing_envelope  -> NEEDS_REVIEW
+  fail_sensitive_data_present    -> FAIL
+  ```
+
+- Detailed signals confirmed as expected: `needs_review_missing_envelope` had
+  `envelope present: False` with `pass_blockers: missing_from_persisted_summary`;
+  `fail_sensitive_data_present` surfaced `hard_fail: sensitive_data_present`;
+  `fail_source_approval_failed` reported `pass_blockers: summary_publication_outcome`.
+- Confirmed the report renderer reuses the validator verdict verbatim (no
+  recomputation), the missing-envelope path is handled, and hard fails surface.
+- Usage correction recorded: `ops/rehearse_paper_day_handoff.py --fixture` takes a
+  fixture **directory path** (`tests/fixtures/paper_day_reports/<fixture_name>`),
+  not a bare fixture key; a bare key aborts with `fixture dir not found`. The
+  rehearsal doc and next-session packet now state this explicitly.

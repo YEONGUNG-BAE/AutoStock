@@ -112,6 +112,20 @@ PYTHONPATH=src uv run python ops/rehearse_paper_day_handoff.py \
   --expect-verdict PASS
 ```
 
+**`--fixture` expects a fixture *directory path*, not a bare fixture key.** It must
+point at a `tests/fixtures/paper_day_reports/<fixture_name>/` directory containing
+`summary.json` + `evidence.jsonl` (+ optional `stdout-envelope.json`); the helper
+resolves the path and aborts with a precondition error (`fixture dir not found`) if
+it is not a directory. So:
+
+```text
+valid:   --fixture tests/fixtures/paper_day_reports/pass_startup_like
+INVALID: --fixture pass_startup_like   # bare key — aborts: fixture dir not found
+```
+
+Substitute any other fixture name from the matrix as the final path component
+(e.g. `tests/fixtures/paper_day_reports/no_go_health_not_ready`).
+
 The helper refuses a `--work-dir` inside the repository `runtime/` tree unless
 `--allow-runtime-dir` is given, so a rehearsal can never masquerade as a real run
 artifact. Exit `1` on a verdict mismatch, `2` on a precondition error.

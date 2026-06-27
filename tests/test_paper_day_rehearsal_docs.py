@@ -53,3 +53,24 @@ def test_doc_says_missing_envelope_omits_envelope(doc_text: str) -> None:
 
 def test_doc_references_triage_playbook(doc_text: str) -> None:
     assert "PAPER_DAY_FAILURE_TRIAGE_PLAYBOOK.md" in doc_text
+
+
+def test_fixture_examples_use_directory_path(doc_text: str) -> None:
+    # The runnable --fixture example must use the full fixture directory path.
+    assert (
+        "--fixture tests/fixtures/paper_day_reports/pass_startup_like" in doc_text
+    )
+    # The doc must state that --fixture expects a directory path, not a bare key.
+    assert "directory path" in doc_text
+
+
+def test_bare_fixture_key_only_appears_as_invalid(doc_text: str) -> None:
+    # A bare `--fixture <name>` (no path prefix) must never appear as a runnable
+    # command — only labeled INVALID. Guard every fixture name.
+    for name in _FIXTURES:
+        bare = f"--fixture {name}"
+        for line in doc_text.splitlines():
+            if bare in line and "tests/fixtures/paper_day_reports/" not in line:
+                assert "INVALID" in line, (
+                    f"bare `{bare}` must be labeled INVALID, not runnable: {line!r}"
+                )

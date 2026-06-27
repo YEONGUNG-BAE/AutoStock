@@ -83,6 +83,16 @@ def test_envelope_runbook_validation_only(doc_text: str) -> None:
     assert "not for parser\nverification" in doc_text or "not for parser verification" in doc_text
 
 
+def test_rehearsal_mention_includes_fixture_path_location(doc_text: str) -> None:
+    # If the packet references the offline rehearsal, it must point at where the
+    # rehearsal fixtures live (a directory path under tests/fixtures/...), and
+    # frame it as offline/synthetic/not-a-live-KIS run.
+    if "rehearsal" in doc_text.lower():
+        assert "tests/fixtures/paper_day_reports/" in doc_text
+        assert "not a live KIS run" in doc_text
+        assert "network-free" in doc_text
+
+
 def test_safety_prohibitions_present(doc_text: str) -> None:
     assert "no live orders" in doc_text
     assert "no activation" in doc_text
