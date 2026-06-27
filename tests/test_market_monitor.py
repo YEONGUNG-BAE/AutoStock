@@ -29,6 +29,7 @@ from market_data.monitor import (
 from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
 from market_data.source_errors import (
+    MalformedControlAfterAck,
     MalformedMarketFrameAfterAck,
     MalformedQuoteFieldCountAfterAck,
     SourceIteratorUnknownAfterAck,
@@ -113,6 +114,24 @@ class _RaiseImmediately:
     async def events(self) -> AsyncIterator[MarketEvent]:
         raise self._exc
         yield _heartbeat(received_at=_BASE)  # pragma: no cover
+
+
+class _RaiseTypedFromSecret:
+    """Raises a typed MarketSourceIteratorError chained from a secret-bearing cause.
+
+    Proves the monitor surfaces only the sanitized subcode/whitelisted metadata on the
+    drop evidence and never the chained cause, its message, or a traceback."""
+
+    def __init__(self, exc: BaseException, secret: str) -> None:
+        self._exc = exc
+        self._secret = secret
+
+    async def events(self) -> AsyncIterator[MarketEvent]:
+        try:
+            raise RuntimeError(self._secret)
+        except RuntimeError as cause:
+            raise self._exc from cause
+        yield _heartbeat(received_at=_BASE)  # pragma: no cover - unreachable
 
 
 class _RecordingSleep:
@@ -682,6 +701,89 @@ def test_non_parser_source_error_drop_has_no_parser_metadata() -> None:
     drops = [e for e in evidence if e.kind == "drop"]
     assert len(drops) == 1
     assert drops[0].parser_metadata is None
+
+
+def test_pilot3_malformed_control_drop_evidence_is_sanitized() -> None:
+    """pilot-3 operational noise (malformed_control_after_ack=656): a source raising
+    MalformedControlAfterAck yields a sanitized source_error drop with the stable subcode,
+    whitelist-only parser_metadata, and no raw frame/cause/traceback leak."""
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    secret = "wss://kis.invalid?approval_key=SECRET&account=12345678"
+    exc = MalformedControlAfterAck(
+        parser_metadata={"parser_stage": "control", "tr_id": "H0STASP0"}
+    )
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _RaiseTypedFromSecret(exc, secret),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="pilot3-control",
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    drop = drops[0]
+    assert drop.reason_code == "source_error"
+    assert drop.reason_subcode == "malformed_control_after_ack"
+    assert drop.parser_metadata is None or set(drop.parser_metadata) <= {
+        "parser_stage",
+        "tr_id",
+        "expected_field_count",
+        "observed_field_count",
+        "declared_count",
+        "record_len",
+        "has_trailing_empty_extra",
+    }
+    rendered = str(drop)
+    for forbidden in (
+        "wss://",
+        "approval_key",
+        "SECRET",
+        "account",
+        "12345678",
+        "Traceback",
+    ):
+        assert forbidden not in rendered
+
+
+def test_pilot3_websocket_closed_drop_evidence_is_sanitized() -> None:
+    """pilot-3 operational noise (websocket_closed_after_ack=1): a source raising
+    WebSocketClosedAfterAck yields a sanitized source_error drop with the stable subcode,
+    no parser_metadata, and no raw close-reason/cause/traceback leak."""
+    store = LatestMarketStateStore()
+    evidence: list[MonitorEvidence] = []
+    secret = "wss://kis.invalid?token=SECRET_TOKEN&account=87654321"
+    monitor = MarketMonitor(
+        store=store,
+        source_factory=lambda: _RaiseTypedFromSecret(WebSocketClosedAfterAck(), secret),
+        clock=_fixed_clock(_BASE + timedelta(seconds=5)),
+        policy=ReconnectPolicy(initial_delay_seconds=0.0, max_attempts=1),
+        sleep=_RecordingSleep(),
+        session_id="pilot3-closed",
+        on_evidence=evidence.append,
+    )
+    with pytest.raises(MonitorExhaustedError):
+        _run(monitor)
+    drops = [e for e in evidence if e.kind == "drop"]
+    assert len(drops) == 1
+    drop = drops[0]
+    assert drop.reason_code == "source_error"
+    assert drop.reason_subcode == "websocket_closed_after_ack"
+    assert drop.parser_metadata is None
+    rendered = str(drop)
+    for forbidden in (
+        "wss://",
+        "token=",
+        "SECRET_TOKEN",
+        "account",
+        "87654321",
+        "Traceback",
+    ):
+        assert forbidden not in rendered
 
 
 def test_require_fresh_missing_after_reset() -> None:

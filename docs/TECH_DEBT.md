@@ -337,6 +337,7 @@
 - Backlog items (benign reconnect noise): `malformed_control_after_ack=656` and `websocket_closed_after_ack=1` remain an operational-noise backlog to characterize later — not a correctness defect.
 - Analyze later with sanitized/fake tests where possible (replay/lifecycle fakes); do not log raw frames/payloads/URLs/tokens/keys/tracebacks while investigating.
 - **No live KIS rerun is required solely for this backlog.** A future live run is only for envelope/runbook validation; parser verification is already complete. See `docs/PAPER_DAY_PILOT_EVIDENCE_LOG.md`.
+- Coverage: both subcodes are pinned by fake/sanitized regression tests — `tests/test_kis_ws_source.py` (post-ack source close → `websocket_closed_after_ack`; post-ack future/control-like frame → `malformed_control_after_ack`) and `tests/test_market_monitor.py` (each maps to a `kind=="drop"`/`reason_code=="source_error"` evidence with the stable subcode, whitelist-only-or-`None` `parser_metadata`, and no raw frame/cause/traceback leak). No live rerun was used.
 
 ### KIS read-only / tiny-live
 - ~~Add manual KIS read-only smoke ops entrypoint.~~ Done: `ops/run_kis_read_only_smoke.py` (explicit `--run` opt-in; no orders).

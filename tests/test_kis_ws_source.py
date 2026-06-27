@@ -462,6 +462,47 @@ def test_non_empty_extra_quote_field_rejected_without_raw_leak() -> None:
     assert exc.parser_metadata["has_trailing_empty_extra"] is False
 
 
+def test_pilot3_websocket_closed_after_ack_carries_stable_subcode() -> None:
+    """pilot-3 operational noise: a post-ack source close maps to a stable, sanitized
+    WebSocketClosedAfterAck subcode and never leaks the underlying close reason."""
+    leak = "wss://example.invalid?token=SECRET_TOKEN&account=87654321"
+    ws = _FakeWebSocket([*_acks(), RuntimeError(leak)])
+    source = _source(ws)
+    with pytest.raises(WebSocketClosedAfterAck) as excinfo:
+        asyncio.run(_drain(source, 1))
+    exc = excinfo.value
+    assert exc.reason_subcode == "websocket_closed_after_ack"
+    assert exc.parser_metadata is None
+    for forbidden in ("wss://", "token=", "SECRET_TOKEN", "account", "87654321"):
+        assert forbidden not in str(exc)
+
+
+def test_pilot3_malformed_control_after_ack_carries_stable_subcode() -> None:
+    """pilot-3 operational noise: a post-ack future/control-like frame maps to a stable,
+    sanitized MalformedControlAfterAck subcode with whitelist-only metadata."""
+    frame = _future_quote_frame()
+    ws = _FakeWebSocket([*_acks(), frame])
+    source = _source(ws)
+    with pytest.raises(MalformedControlAfterAck) as excinfo:
+        asyncio.run(_drain(source, 1))
+    exc = excinfo.value
+    assert exc.reason_subcode == "malformed_control_after_ack"
+    metadata = exc.parser_metadata
+    if metadata is not None:
+        assert set(metadata) <= {
+            "parser_stage",
+            "tr_id",
+            "expected_field_count",
+            "observed_field_count",
+            "declared_count",
+            "record_len",
+            "has_trailing_empty_extra",
+        }
+    # the raw frame and its field values never surface on the sanitized evidence path.
+    assert frame not in str(exc)
+    assert frame not in str(metadata)
+
+
 def test_after_ack_receive_timeout_is_sanitized_subcode_type() -> None:
     source = _source(_BlockingWebSocket([*_acks()]), receive_timeout_seconds=0.01)
     with pytest.raises(WebSocketReceiveTimeoutAfterAck):
