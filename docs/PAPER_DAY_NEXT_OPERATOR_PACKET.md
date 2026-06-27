@@ -24,6 +24,10 @@ activation, no automatic restart, no commit. Live KIS is **Operator-only**.
 For a one-page go/no-go status summary before the session, read
 `docs/PAPER_DAY_CURRENT_STATUS.md` first.
 
+To rehearse this packet's command flow offline (variables, ordering, artifact
+paths) without executing any live command, walk
+`docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md`.
+
 For phone/AnyDesk copy-paste operation, use
 `docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`.
 

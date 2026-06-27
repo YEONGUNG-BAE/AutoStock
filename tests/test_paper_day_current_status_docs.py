@@ -75,3 +75,7 @@ def test_known_backlog_present(doc_text: str) -> None:
     assert "backlog" in lowered
     assert "p3" in lowered
     assert "tech_debt" in lowered or "tech debt" in lowered
+
+
+def test_links_to_dry_run_rehearsal(doc_text: str) -> None:
+    assert "docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md" in doc_text
