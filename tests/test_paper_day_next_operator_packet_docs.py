@@ -77,6 +77,22 @@ def test_offline_validator_and_report_use_envelope(doc_text: str) -> None:
     assert '--envelope "$RUN_DIR/stdout-envelope.json"' in doc_text
 
 
+def test_readiness_checker_documented_before_run_command(doc_text: str) -> None:
+    # The offline readiness checker must be referenced, and must appear before the
+    # live run command so the Operator runs it first.
+    checker_ref = "ops/check_next_paper_day_readiness.py"
+    run_ref = "ops/run_attended_paper_day.py"
+    assert checker_ref in doc_text
+    assert run_ref in doc_text
+    assert doc_text.index(checker_ref) < doc_text.index(run_ref)
+    # It must be framed as offline/read-only and remind about live session state.
+    assert "offline" in doc_text.lower()
+    assert "session_state=OPEN must still be confirmed" in doc_text
+    # It must pass the Operator-selected variables, not a frozen date.
+    assert '--session-date "$SESSION_DATE"' in doc_text
+    assert '--run-dir "$RUN_DIR"' in doc_text
+
+
 def test_wrong_run_envelope_guard_documented(doc_text: str) -> None:
     # The packet must warn that the envelope has to come from the same run, name
     # the validator's identity cross-check, and the envelope_run_mismatch verdict.

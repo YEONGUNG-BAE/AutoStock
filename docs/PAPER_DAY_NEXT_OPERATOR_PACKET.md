@@ -124,6 +124,38 @@ Do not auto-restart.
 Run once, attended, bounded duration. Watch the terminal for the whole run.
 ```
 
+## Next-session readiness check (offline, run before the live command)
+
+Before the live run, run the offline readiness checker. It is **offline,
+network-free, and read-only**: it never opens a network connection, never imports
+a live KIS source/client path, never runs startup smoke or an attended pilot, and
+never reads or prints `config/config.toml` contents or any secret value. It
+inspects only env-var *metadata* (present / length / strip_same / placeholder) and
+read-only `git` queries, and confirms the Operator-selected run variables.
+
+```bash
+PYTHONPATH=src uv run python ops/check_next_paper_day_readiness.py \
+  --session-date "$SESSION_DATE" \
+  --run-label "$RUN_LABEL" \
+  --duration-seconds "$DURATION_SECONDS" \
+  --run-dir "$RUN_DIR" \
+  --config config/config.toml \
+  --json
+```
+
+It checks: repo HEAD is readable, `git status --short` is clean, `git ls-files
+runtime` is empty, the config path exists (contents never read) and
+`config/config.toml` stays untracked/gitignored, the four required env vars
+(`KIS_LIVE_APP_KEY`, `KIS_LIVE_APP_SECRET`, `KIS_LIVE_ACCOUNT`,
+`KIS_WS_READONLY_CONFIRM`) are present/strip-clean/non-placeholder, `SESSION_DATE`
+parses as `YYYY-MM-DD`, `RUN_LABEL` is a safe path component, `DURATION_SECONDS` is
+a positive integer, `RUN_DIR` equals `runtime/paper-day/$SESSION_DATE/$RUN_LABEL`,
+and `RUN_DIR` holds no stale `summary.json`/`evidence.jsonl`/`stdout-envelope.json`/`db`.
+The checker exits `0` only when every hard check passes; do not proceed to the live
+run on a nonzero exit. It also reminds you that a **regular KR market session with
+session_state=OPEN must still be confirmed by the Operator at run time** — the
+offline checker cannot verify live session state.
+
 ## Run command
 
 Use the fresh Operator-selected `RUN_DIR`. Do not reuse `startup-4` or any prior
