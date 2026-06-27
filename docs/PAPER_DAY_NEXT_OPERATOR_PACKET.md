@@ -207,6 +207,14 @@ disk-verifiable: the validator returns `NEEDS_REVIEW`
 (`missing_from_persisted_summary`) and the run cannot be claimed PASS. Do not
 hand-edit an envelope to backfill the fields — re-run capture from the correct run.
 
+**Same-run envelope only.** The `stdout-envelope.json` you validate must come from
+this same `RUN_DIR`/run as its `summary.json` and `evidence.jsonl`. Do not copy,
+hand-edit, or reuse a `stdout-envelope.json` from another run (a prior pilot, a
+different `RUN_DIR`, or a different symbol/date). The validator cross-checks the
+envelope's identity against the summary — `run_id`, `session_date`, `symbol`, and
+the reserved `_envelope_capture.run_id` — and a wrong-run envelope yields
+`NEEDS_REVIEW` with `envelope_run_mismatch`; it can never be PASS.
+
 ```bash
 cat "$RUN_DIR/summary.json"
 cat "$RUN_DIR/evidence.jsonl"
@@ -234,8 +242,11 @@ If `stdout-envelope.json` is missing, empty, malformed, or captured from the wro
 run, the validator must not infer the envelope-only fields. It returns
 `NEEDS_REVIEW` (`missing_from_persisted_summary`) when the envelope is absent, or
 `NEEDS_REVIEW`/`FAIL` per its existing rules when the supplied JSON is malformed or
-contradicts the persisted summary. Re-capture from the correct run before claiming
-PASS — do not hand-edit `stdout-envelope.json`.
+contradicts the persisted summary. A **wrong-run** envelope — one whose `run_id`,
+`session_date`, `symbol`, or `_envelope_capture.run_id` does not match the
+summary — is blocked as `envelope_run_mismatch` and returns `NEEDS_REVIEW`; it can
+never be PASS. Re-capture from the correct run before claiming PASS — do not copy,
+reuse, or hand-edit `stdout-envelope.json`.
 
 Then render the offline Reviewer report (same offline, network-free, secret-free,
 read-only guarantee; the verdict is reused verbatim from the validator and never

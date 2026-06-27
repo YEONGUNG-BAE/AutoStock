@@ -199,11 +199,18 @@ It emits `PASS` / `NO_GO` / `FAIL` / `NEEDS_REVIEW`. Because the persisted
 `summary.json` holds only the mechanical summary, the cleanup/publication/lock
 clauses must come from the captured stdout envelope (`--envelope`). Without it,
 the validator reports `missing_from_persisted_summary` and returns
-`NEEDS_REVIEW` rather than inventing those fields. If the envelope file is
-missing, empty, malformed, or captured from the wrong run, the validator must not
-infer the envelope-only fields and returns `NEEDS_REVIEW`/`FAIL` per its existing
-rules. The verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in
-the operator packet.
+`NEEDS_REVIEW` rather than inventing those fields. The validator never infers or
+repairs envelope-only fields. If the envelope file is missing, empty, or malformed,
+it returns `NEEDS_REVIEW`/`FAIL` per its existing rules.
+
+The envelope must belong to the **same run** as the summary/evidence. The
+validator runs an envelope identity check, cross-checking the envelope's `run_id`,
+`session_date`, `symbol`, and reserved `_envelope_capture.run_id` against the
+persisted summary. A wrong-run or mismatched envelope — copied, reused, or
+hand-edited from a different run, `RUN_DIR`, symbol, or date — is blocked as
+`envelope_run_mismatch` and returns `NEEDS_REVIEW`; it can never be PASS. The
+verdict is advisory; the authoritative PASS/NO_GO/FAIL criteria live in the
+operator packet.
 
 Envelope capture: pass `--stdout-envelope-out "$RUN_DIR/stdout-envelope.json"` so
 the tool itself persists the envelope (the full `--json` payload plus a sanitized

@@ -77,6 +77,22 @@ def test_offline_validator_and_report_use_envelope(doc_text: str) -> None:
     assert '--envelope "$RUN_DIR/stdout-envelope.json"' in doc_text
 
 
+def test_wrong_run_envelope_guard_documented(doc_text: str) -> None:
+    # The packet must warn that the envelope has to come from the same run, name
+    # the validator's identity cross-check, and the envelope_run_mismatch verdict.
+    assert "envelope_run_mismatch" in doc_text
+    assert "_envelope_capture.run_id" in doc_text
+    # The four cross-checked identity fields must be named.
+    for field in ("run_id", "session_date", "symbol"):
+        assert field in doc_text
+    # Operator must be told not to copy/reuse an envelope from another run.
+    lowered = doc_text.lower()
+    assert "reuse" in lowered
+    assert "another run" in lowered
+    # A wrong-run envelope can never be PASS.
+    assert "can never be PASS" in doc_text or "cannot be PASS" in doc_text
+
+
 def test_envelope_runbook_validation_only(doc_text: str) -> None:
     # Any future run is for envelope/runbook validation only — not parser verification.
     assert "envelope/runbook validation only" in doc_text
