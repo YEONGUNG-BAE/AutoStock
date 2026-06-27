@@ -2,6 +2,9 @@
 
 Diagnostic mode is attended and bounded. It is not activation.
 
+For a one-page go/no-go status summary before the session, read
+`docs/PAPER_DAY_CURRENT_STATUS.md` first.
+
 Validate only:
 
 ```bash

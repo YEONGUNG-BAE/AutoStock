@@ -21,6 +21,9 @@ Operator during a regular KR market session. Cursor/Claude never executes any st
 here: no `--live-kis`, no actual KIS network call, no live order, no daemon, no
 activation, no automatic restart, no commit. Live KIS is **Operator-only**.
 
+For a one-page go/no-go status summary before the session, read
+`docs/PAPER_DAY_CURRENT_STATUS.md` first.
+
 For phone/AnyDesk copy-paste operation, use
 `docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`.
 
