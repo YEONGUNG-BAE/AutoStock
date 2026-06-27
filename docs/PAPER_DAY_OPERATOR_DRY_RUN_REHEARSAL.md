@@ -60,7 +60,9 @@ PYTHONPATH=src uv run python ops/check_next_paper_day_readiness.py \
 
 Check by inspection: it uses `SESSION_DATE`, `RUN_LABEL`, `DURATION_SECONDS`, and
 `RUN_DIR`, and it appears **above** the live run command in step 2. Do not proceed
-to step 2 on a nonzero exit.
+to step 2 on a nonzero exit. If it prints `NOT_READY`, interpret each hard failure
+with `docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md` (secret-safe, offline) — and do
+not bypass the checker to force a run.
 
 ### 2. Live run command — Operator-only, DO NOT EXECUTE here
 

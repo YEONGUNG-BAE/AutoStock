@@ -53,6 +53,8 @@ no raw frame / payload / field-value / URL / token / app key / approval key /
   (Operator-selected date/label/duration/RUN_DIR/HEAD; no baked-in date).
 - `ops/check_next_paper_day_readiness.py` — offline, network-free, read-only
   readiness checker to run **before** any live command.
+- `docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md` — secret-safe, offline guide for
+  interpreting a `NOT_READY` / nonzero readiness-checker exit (do not bypass).
 - `docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md` — offline, docs-only command-flow
   rehearsal to finger-trace the variables/ordering/paths before the live session.
 

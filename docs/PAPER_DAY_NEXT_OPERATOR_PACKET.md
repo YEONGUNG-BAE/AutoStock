@@ -163,6 +163,11 @@ run on a nonzero exit. It also reminds you that a **regular KR market session wi
 session_state=OPEN must still be confirmed by the Operator at run time** — the
 offline checker cannot verify live session state.
 
+If the checker prints `NOT_READY` / exits nonzero, interpret each hard failure
+with `docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md` (secret-safe, offline). A
+nonzero exit means **do not run the live command** until the cause is resolved or
+the Operator classifies it as an intentional NO_GO — do not bypass the checker.
+
 ## Run command
 
 Use the fresh Operator-selected `RUN_DIR`. Do not reuse `startup-4` or any prior

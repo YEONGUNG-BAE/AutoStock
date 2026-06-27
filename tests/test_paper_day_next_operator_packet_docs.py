@@ -129,6 +129,15 @@ def test_links_to_dry_run_rehearsal(doc_text: str) -> None:
     assert "docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md" in doc_text
 
 
+def test_links_to_readiness_troubleshooting(doc_text: str) -> None:
+    # The readiness-checker section must point at the NOT_READY troubleshooting
+    # guide and reinforce do-not-bypass on a nonzero exit.
+    assert "docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md" in doc_text
+    lowered = doc_text.lower()
+    assert "not_ready" in lowered
+    assert "do not bypass" in lowered
+
+
 def test_safety_prohibitions_present(doc_text: str) -> None:
     assert "no live orders" in doc_text
     assert "no activation" in doc_text

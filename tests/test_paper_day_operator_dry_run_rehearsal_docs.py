@@ -85,6 +85,10 @@ def test_references_current_status_and_reviewer_intake(doc_text: str) -> None:
     assert "docs/PAPER_DAY_REVIEWER_INTAKE_CHECKLIST.md" in doc_text
 
 
+def test_links_to_readiness_troubleshooting(doc_text: str) -> None:
+    assert "docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md" in doc_text
+
+
 def test_monday_morning_final_manual_checks_section(doc_text: str) -> None:
     lowered = doc_text.lower()
     assert "monday morning final manual checks" in lowered

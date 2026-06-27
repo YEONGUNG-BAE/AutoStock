@@ -79,3 +79,7 @@ def test_known_backlog_present(doc_text: str) -> None:
 
 def test_links_to_dry_run_rehearsal(doc_text: str) -> None:
     assert "docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md" in doc_text
+
+
+def test_links_to_readiness_troubleshooting(doc_text: str) -> None:
+    assert "docs/PAPER_DAY_READINESS_TROUBLESHOOTING.md" in doc_text
