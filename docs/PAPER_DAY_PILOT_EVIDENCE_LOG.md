@@ -94,3 +94,26 @@ verifiable from disk and the formal verdict can reach PASS:
 `... --json > "$RUN_DIR/stdout-envelope.json"` then `PILOT_EXIT=$?`
 (see `docs/PAPER_DAY_MONDAY_OPERATOR_PACKET.md`). Do not hand-edit an envelope
 file to backfill the missing fields.
+
+---
+
+## 2026-06-27 — stdout-envelope hardening verification (offline)
+
+Closes the pilot-3 envelope gap at the tooling level. Local sanitized
+verification only — no live KIS, no network, no live rerun.
+
+- stdout-envelope hardening local verification **passed** (commit `7d70ba0`).
+- Both PASS and FAIL CLI paths now persist a tool-written
+  `stdout-envelope.json` when `--stdout-envelope-out` is supplied (the FAIL
+  exception paths previously did not).
+- A missing envelope remains the explicit `NEEDS_REVIEW` fallback; the tool
+  never fabricates or backfills the clean-exit clauses.
+- The Monday operator packet now distinguishes `stdout-envelope.json`
+  (tool-written via `--stdout-envelope-out`, the file the validator reads) from
+  `stdout-envelope.shell.json` (belt-and-suspenders console redirect).
+- Focused local sanitized tests: **106 passed**
+  (`test_paper_day_stdout_envelope.py`,
+  `test_paper_day_monday_operator_packet_docs.py`,
+  `test_paper_day_monday_execution_checklist_docs.py`,
+  `test_kis_official_ws_parser.py`, `test_kis_ws_source.py`).
+- No live KIS rerun performed or required for this hardening review.
