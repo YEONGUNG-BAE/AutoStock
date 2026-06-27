@@ -21,11 +21,16 @@ The KIS startup-only smoke reached PASS
 attended diagnostic reached an operator-observed terminal PASS. Neither clears
 runtime activation, automatic restart, or live orders — those remain prohibited.
 
-Before Monday's live run, optionally rehearse the validator/report/handoff flow
-offline using `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md` (synthetic fixtures,
-no KIS, no network). For the single ordered in-session run sheet (pre-market →
-run → capture → validate → render → triage → handoff), use
-`docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md`.
+This packet is retained as **historical safety/runbook reference**, not the
+current or next run sheet — do not run it as-is. Any future run must first be
+refreshed with a fresh Operator-selected session date, RUN_DIR, and duration, and
+must run against the current reviewed HEAD; the purpose of any future run is
+**envelope/runbook validation only**, since the H0STASP0 parser fix is already
+verified. The companion `docs/PAPER_DAY_MONDAY_EXECUTION_CHECKLIST.md` step
+ordering (pre-market → run → capture → validate → render → triage → handoff) and
+the offline rehearsal `docs/PAPER_DAY_MONDAY_PREFLIGHT_REHEARSAL.md` (synthetic
+fixtures, no KIS, no network) are likewise historical references to refresh before
+reuse.
 
 For phone/AnyDesk copy-paste operation, use
 `docs/PAPER_DAY_MOBILE_REMOTE_OPERATOR_PACKET.md`.
@@ -95,7 +100,9 @@ PY
 ## Market-session timing
 
 ```text
-Run only during the regular KR market session on Monday 2026-06-22.
+Historical: this packet targeted the regular KR session on Monday 2026-06-22.
+Any future run uses a fresh Operator-selected market day, not this date.
+Run only during a regular KR market session (session_state=OPEN).
 Do not run after close.
 Do not run as a daemon.
 Do not auto-restart.

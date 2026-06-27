@@ -43,3 +43,22 @@ def test_post_run_existence_gate_present(doc_text: str) -> None:
     assert 'test -f "$RUN_DIR/stdout-envelope.json"' in doc_text
     assert 'test -f "$RUN_DIR/summary.json"' in doc_text
     assert 'test -f "$RUN_DIR/evidence.jsonl"' in doc_text
+
+
+def test_marked_historical_reference_only(doc_text: str) -> None:
+    # The packet must read as historical reference, not the current/next run sheet.
+    assert "HISTORICAL" in doc_text
+    assert "historical safety/runbook reference" in doc_text
+    assert "not the\ncurrent or next run sheet" in doc_text or "not the current or next run sheet" in doc_text
+    # Any future run is for envelope/runbook validation only (parser already verified).
+    assert "envelope/runbook validation only" in doc_text
+    # The stale forward-looking phrasing must not return.
+    assert "Before Monday's live run" not in doc_text
+
+
+def test_safety_prohibitions_intact(doc_text: str) -> None:
+    # Reframing as historical must not drop the safety prohibitions.
+    assert "no live order" in doc_text
+    assert "no daemon" in doc_text
+    assert "no activation" in doc_text
+    assert "Do not auto-restart." in doc_text
