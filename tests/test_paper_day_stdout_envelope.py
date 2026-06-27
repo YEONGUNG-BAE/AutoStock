@@ -310,3 +310,131 @@ def test_cli_offline_fixture_writes_envelope(tmp_path: Path, capsys) -> None:
     assert (run_dir / "evidence.jsonl").is_file()
     # The captured argv carries no secret marker (none were passed).
     assert "--stdout-envelope-out" in cap["command_args"]
+
+
+# --- CLI FAIL paths also persist the envelope -------------------------------
+
+
+def test_cli_input_error_path_writes_fail_envelope(tmp_path: Path, capsys) -> None:
+    # A bad --session-date raises CliError inside _config_from_args, before any
+    # config/source/credential work. The FAIL envelope must still be written.
+    run_dir = tmp_path / "runtime" / "run"
+    envelope_path = run_dir / "stdout-envelope.json"
+    rc = cli.main(
+        [
+            "--config",
+            "config/config.toml.example",
+            "--session-date",
+            "not-a-date",
+            "--symbol",
+            "005930",
+            "--duration-seconds",
+            "2",
+            "--evidence-out",
+            str(run_dir / "evidence.jsonl"),
+            "--summary-out",
+            str(run_dir / "summary.json"),
+            "--db-dir",
+            str(run_dir / "db"),
+            "--stdout-envelope-out",
+            str(envelope_path),
+            "--confirm-attended-paper",
+            "--offline-fixture",
+            "deterministic",
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 1
+    assert envelope_path.is_file()
+    written = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert written["outcome"] == "FAIL"
+    cap = written["_envelope_capture"]
+    assert cap["exit_code"] == 1
+    assert cap["schema_version"] == cli.STDOUT_ENVELOPE_SCHEMA_VERSION
+    assert cap["summary_path"].endswith("summary.json")
+    assert cap["evidence_path"].endswith("evidence.jsonl")
+    assert cap["db_dir"].endswith("db")
+
+
+def test_cli_generic_exception_path_writes_fail_envelope_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # Force an unexpected error from the runtime entrypoint; the generic except must
+    # persist a FAIL envelope without leaking the exception text/traceback.
+    secret_marker = "boom_secret_/private/path/token"
+
+    def _explode(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError(secret_marker)
+
+    monkeypatch.setattr(cli, "run_attended_paper_day", _explode)
+
+    run_dir = tmp_path / "runtime" / "run"
+    envelope_path = run_dir / "stdout-envelope.json"
+    rc = cli.main(
+        [
+            "--config",
+            "config/config.toml.example",
+            "--session-date",
+            "2026-06-17",
+            "--symbol",
+            "005930",
+            "--duration-seconds",
+            "2",
+            "--evidence-out",
+            str(run_dir / "evidence.jsonl"),
+            "--summary-out",
+            str(run_dir / "summary.json"),
+            "--db-dir",
+            str(run_dir / "db"),
+            "--stdout-envelope-out",
+            str(envelope_path),
+            "--confirm-attended-paper",
+            "--offline-fixture",
+            "deterministic",
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 1
+    assert envelope_path.is_file()
+    raw = envelope_path.read_text(encoding="utf-8")
+    written = json.loads(raw)
+    assert written["outcome"] == "FAIL"
+    assert written["reason"] == "internal_runtime_error"
+    assert written["_envelope_capture"]["exit_code"] == 1
+    # No traceback or raised-exception text leaks into the persisted envelope.
+    assert secret_marker not in raw
+    assert "Traceback" not in raw
+
+
+def test_cli_fail_without_envelope_flag_writes_nothing(tmp_path: Path, capsys) -> None:
+    # Without --stdout-envelope-out, a FAIL path must not create any envelope file.
+    run_dir = tmp_path / "runtime" / "run"
+    rc = cli.main(
+        [
+            "--config",
+            "config/config.toml.example",
+            "--session-date",
+            "not-a-date",
+            "--symbol",
+            "005930",
+            "--duration-seconds",
+            "2",
+            "--evidence-out",
+            str(run_dir / "evidence.jsonl"),
+            "--summary-out",
+            str(run_dir / "summary.json"),
+            "--db-dir",
+            str(run_dir / "db"),
+            "--confirm-attended-paper",
+            "--offline-fixture",
+            "deterministic",
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+    assert rc == 1
+    assert not (run_dir / "stdout-envelope.json").exists()

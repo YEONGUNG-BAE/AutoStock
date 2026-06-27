@@ -145,11 +145,13 @@ Python process exit code directly in **both bash and zsh** — the bash-only
 
 The persisted `summary.json` holds only the mechanical summary; the
 cleanup/publication/lock fields (`summary_publication_outcome`, `cleanup_outcome`,
-`runtime_lock_*`) appear only in the stdout envelope. The redirect above captures
-that envelope to `stdout-envelope.json` so the offline validator can read every
-clean-exit clause. (`--json` is single-line, so the captured file is a valid
-single JSON object.) The stdout-envelope file is required for envelope-only
-clause verification — see the Post-run collection note below.
+`runtime_lock_*`) appear only in the stdout envelope. The `--stdout-envelope-out`
+flag above makes the tool write that envelope to `stdout-envelope.json` so the
+offline validator can read every clean-exit clause; this is the file the validator
+reads, and it is produced by the flag, not by the shell redirect. The
+`--json > "$RUN_DIR/stdout-envelope.shell.json"` redirect is only a
+belt-and-suspenders console capture. The `stdout-envelope.json` file is required
+for envelope-only clause verification — see the Post-run collection note below.
 
 ## Immediate stop conditions
 

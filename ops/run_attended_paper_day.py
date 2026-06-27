@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    command_args = list(argv) if argv is not None else sys.argv[1:]
     try:
         config = _config_from_args(args)
         validate_attended_paper_day_inputs(config)
@@ -113,43 +114,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         exit_code = _cli_exit_code(summary)
         _emit(summary, json_mode=args.json)
         if args.stdout_envelope_out is not None:
-            _persist_stdout_envelope(
+            _persist_envelope_safe(
                 out_path=args.stdout_envelope_out,
                 summary=summary,
                 exit_code=exit_code,
-                config=config,
-                command_args=list(argv) if argv is not None else sys.argv[1:],
+                summary_path=config.summary_out,
+                evidence_path=config.evidence_out,
+                db_dir=config.db_dir,
+                command_args=command_args,
             )
         return exit_code
     except (AttendedPaperDayInputError, CliError) as exc:
-        _emit(
-            {
-                "outcome": "FAIL",
-                "reason": str(exc),
-                "network_called": False,
-                "credential_read": False,
-                "db_open": False,
-                "filesystem_written": False,
-                "activation_authorized": False,
-            },
-            json_mode=args.json,
-        )
+        payload = {
+            "outcome": "FAIL",
+            "reason": str(exc),
+            "network_called": False,
+            "credential_read": False,
+            "db_open": False,
+            "filesystem_written": False,
+            "activation_authorized": False,
+        }
+        _emit(payload, json_mode=args.json)
+        _persist_fail_envelope(args=args, payload=payload, command_args=command_args)
         return 1
     except Exception:
-        _emit(
-            {
-                "outcome": "FAIL",
-                "reason": "internal_runtime_error",
-                "network_called": False,
-                "credential_read": False,
-                "db_open": False,
-                "filesystem_written": False,
-                "activation_authorized": False,
-                "paper_only": True,
-                "real_order_adapter_constructed": False,
-            },
-            json_mode=args.json,
-        )
+        payload = {
+            "outcome": "FAIL",
+            "reason": "internal_runtime_error",
+            "network_called": False,
+            "credential_read": False,
+            "db_open": False,
+            "filesystem_written": False,
+            "activation_authorized": False,
+            "paper_only": True,
+            "real_order_adapter_constructed": False,
+        }
+        _emit(payload, json_mode=args.json)
+        _persist_fail_envelope(args=args, payload=payload, command_args=command_args)
         return 1
 
 
@@ -438,25 +439,58 @@ def write_stdout_envelope(path: Path, envelope: Mapping[str, object]) -> None:
     tmp.replace(path)
 
 
-def _persist_stdout_envelope(
+def _persist_envelope_safe(
     *,
     out_path: Path,
     summary: Mapping[str, object],
     exit_code: int,
-    config: AttendedPaperDayConfig,
+    summary_path: Path,
+    evidence_path: Path,
+    db_dir: Path,
     command_args: Sequence[str],
 ) -> None:
-    envelope = build_stdout_envelope(
-        summary=summary,
-        exit_code=exit_code,
-        summary_path=config.summary_out,
-        evidence_path=config.evidence_out,
-        db_dir=config.db_dir,
+    """Persist the envelope without ever raising into the CLI exit path. A write
+    failure must not surface a traceback or a secret-bearing path; on failure we
+    skip silently — the offline validator then reports the explicit missing-envelope
+    gap (NEEDS_REVIEW), which is the correct, safe degradation."""
+    try:
+        envelope = build_stdout_envelope(
+            summary=summary,
+            exit_code=exit_code,
+            summary_path=summary_path,
+            evidence_path=evidence_path,
+            db_dir=db_dir,
+            command_args=command_args,
+            captured_at=datetime.now(tz=timezone.utc).isoformat(),
+            git_head=_git_head(),
+        )
+        write_stdout_envelope(out_path, envelope)
+    except Exception:
+        # Never leak a traceback or path into stdout/stderr; the validator's
+        # missing-envelope gap is the safe, explicit fallback.
+        pass
+
+
+def _persist_fail_envelope(
+    *,
+    args: argparse.Namespace,
+    payload: Mapping[str, object],
+    command_args: Sequence[str],
+) -> None:
+    """Persist the FAIL envelope on the CLI exception paths. Uses only the parsed
+    argparse paths (config may not have been built), so no secret or env value is
+    read. Exit code is always 1 on these paths."""
+    if args.stdout_envelope_out is None:
+        return
+    _persist_envelope_safe(
+        out_path=args.stdout_envelope_out,
+        summary=payload,
+        exit_code=1,
+        summary_path=args.summary_out,
+        evidence_path=args.evidence_out,
+        db_dir=args.db_dir,
         command_args=command_args,
-        captured_at=datetime.now(tz=timezone.utc).isoformat(),
-        git_head=_git_head(),
     )
-    write_stdout_envelope(out_path, envelope)
 
 
 if __name__ == "__main__":
