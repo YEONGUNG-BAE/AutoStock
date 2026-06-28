@@ -129,3 +129,4 @@ checklist authorizes it.
 
 - `docs/CONTROLLED_DAY1_NO_WRITE_ORDER_DECISION_BOUNDARY.md` — static boundary inventory.
 - `tests/test_controlled_day1_no_write_order_decision_contract.py` — no-write contract tests.
+- `docs/CONTROLLED_DAY1_NO_WRITE_READINESS_ROLLUP.md` — no-write readiness rollup / exit criteria.
