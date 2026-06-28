@@ -181,5 +181,10 @@ and leave the evidence-emission assertion to that future gap.
 - the acceptance path (ops/acceptance_check.sh) remains green
 ```
 
+The operator evidence checklist for this no-write boundary lives in
+`docs/CONTROLLED_DAY1_NO_WRITE_OPERATOR_EVIDENCE_CHECKLIST.md`. It tells the
+Operator which offline/synthetic evidence to collect and when to stop, and
+authorizes no live / tiny / write command.
+
 Tiny-live order validation is a **separate, later** track. It is explicitly out
 of scope here, and nothing in Controlled Day 1 no-write readiness authorizes it.
