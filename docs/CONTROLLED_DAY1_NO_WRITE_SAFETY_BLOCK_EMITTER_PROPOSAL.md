@@ -146,3 +146,4 @@ Before any future implementation, these decisions must be made on their own trac
 - `tests/test_controlled_day1_no_write_order_decision_contract.py` — 2B no-write contract tests.
 - `docs/CONTROLLED_DAY1_NO_WRITE_OPERATOR_EVIDENCE_CHECKLIST.md` — 2C operator evidence checklist.
 - `docs/CONTROLLED_DAY1_NO_WRITE_READINESS_ROLLUP.md` — 2D readiness rollup / exit criteria.
+- `docs/TINY_LIVE_READINESS_REQUIREMENTS_INVENTORY.md` — 2F tiny-live readiness requirements inventory (separate, later track).

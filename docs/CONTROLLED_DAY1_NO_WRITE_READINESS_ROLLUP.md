@@ -119,7 +119,8 @@ authorizes it.
     implementation. Drafted in
     `docs/CONTROLLED_DAY1_NO_WRITE_SAFETY_BLOCK_EMITTER_PROPOSAL.md`.
   - **B. Tiny-live readiness requirements inventory** — docs/tests only, no
-    runbook and no live commands.
+    runbook and no live commands. Drafted in
+    `docs/TINY_LIVE_READINESS_REQUIREMENTS_INVENTORY.md`.
 - Actual tiny-live order validation remains later and
   requires explicit human approval.
 
