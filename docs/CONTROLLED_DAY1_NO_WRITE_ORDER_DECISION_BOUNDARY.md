@@ -172,6 +172,9 @@ tests therefore assert the constructible/blocked surfaces (intent generation,
 blocked live submit, no `src/` live-adapter construction, paper-role enforcement)
 and leave the evidence-emission assertion to that future gap.
 
+A docs-only design proposal for closing this gap later (no implementation) lives in
+`docs/CONTROLLED_DAY1_NO_WRITE_SAFETY_BLOCK_EMITTER_PROPOSAL.md`.
+
 ## Do not proceed to tiny live until
 
 ```text

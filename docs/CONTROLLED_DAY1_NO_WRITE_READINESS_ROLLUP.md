@@ -116,7 +116,8 @@ authorizes it.
 - **Do not start tiny-live automatically.**
 - The next possible offline work may be **either**:
   - **A. Safety-block emitter design proposal** — docs/tests only, no runtime
-    implementation.
+    implementation. Drafted in
+    `docs/CONTROLLED_DAY1_NO_WRITE_SAFETY_BLOCK_EMITTER_PROPOSAL.md`.
   - **B. Tiny-live readiness requirements inventory** — docs/tests only, no
     runbook and no live commands.
 - Actual tiny-live order validation remains later and
