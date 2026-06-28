@@ -155,6 +155,23 @@ inventory is reviewed):
   orders=0 / fills=0, sensitive_data_present=false)
 ```
 
+## Future contract gap — evidence/safety-invariant assertion
+
+The evidence/safety invariant (`paper_only` true, `activation_authorized` false,
+`real_order_adapter_constructed` false, `orders == 0`, `fills == 0`) is **a future
+contract gap**: there is **no standalone public function or model** that emits this
+safety block without running the attended Paper-Day diagnostic. The only emitter is
+the safety/evidence dict inside `src/composition/attended_paper_day.py`, which
+requires an `AttendedPaperDayConfig` + `DiagnosticCounters` and a full diagnostic
+run — and `is_clean_pass(...)` does **not** even assert these flags. Per the
+no-invention rule, no standalone API is created just to make a test pass. The
+invariant is **covered in this inventory** (categories 7 and 8 above) and remains a
+**future contract gap** until either a public, run-free safety-block accessor exists
+or a Paper-Day-scoped evidence test is wired on its own track. No-write contract
+tests therefore assert the constructible/blocked surfaces (intent generation,
+blocked live submit, no `src/` live-adapter construction, paper-role enforcement)
+and leave the evidence-emission assertion to that future gap.
+
 ## Do not proceed to tiny live until
 
 ```text
