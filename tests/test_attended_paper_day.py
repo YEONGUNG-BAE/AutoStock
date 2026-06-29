@@ -44,7 +44,12 @@ from market_data.monitor import (
     MonitorState,
     MonitorSummary,
 )
-from market_data.models import NormalizedBestBidAsk, NormalizedTradeTick, ProviderSequence
+from market_data.models import (
+    MarketEventType,
+    NormalizedBestBidAsk,
+    NormalizedTradeTick,
+    ProviderSequence,
+)
 from market_data.replay_source import ReplayMarketEventSource
 
 _CLI_PATH = Path(__file__).resolve().parents[1] / "ops" / "run_attended_paper_day.py"
@@ -575,13 +580,79 @@ class _ExhaustedMonitor:
 
     async def run(self) -> MonitorSummary:
         at = _at()
+        for attempt in range(1, 3):
+            self._on_evidence(
+                MonitorEvidence(
+                    timestamp=at,
+                    monitor_session_id=self._session_id,
+                    state=MonitorState.CONNECTING,
+                    connection_attempt=attempt,
+                    consecutive_failures=attempt,
+                    kind="drop",
+                    reason_code="source_error",
+                    reason_subcode="malformed_control_after_ack",
+                )
+            )
+        self._on_evidence(
+            MonitorEvidence(
+                timestamp=at,
+                monitor_session_id=self._session_id,
+                state=MonitorState.EXHAUSTED,
+                connection_attempt=2,
+                consecutive_failures=2,
+                kind="exhausted",
+            )
+        )
+        raise MonitorExhaustedError(
+            MonitorSummary(
+                monitor_session_id=self._session_id,
+                connection_attempts=2,
+                consecutive_failures=2,
+                applied=0,
+                duplicate=0,
+                out_of_order=0,
+                stream_mismatch=0,
+                future_event_error=0,
+                final_state=MonitorState.EXHAUSTED,
+            )
+        )
+
+
+class _PostReadinessExhaustedMonitor:
+    def __init__(self, **kwargs: Any) -> None:
+        self._on_evidence = kwargs["on_evidence"]
+        self._session_id = kwargs["session_id"]
+
+    async def run(self) -> MonitorSummary:
+        at = _at()
+        for event_type, channel, sequence in (
+            (MarketEventType.BEST_BID_ASK.value, f"{TR_QUOTE}|{PILOT_SYMBOL}", 1),
+            (MarketEventType.TRADE.value, f"{TR_TRADE}|{PILOT_SYMBOL}", 2),
+        ):
+            self._on_evidence(
+                MonitorEvidence(
+                    timestamp=at,
+                    monitor_session_id=self._session_id,
+                    state=MonitorState.RUNNING,
+                    connection_attempt=1,
+                    consecutive_failures=0,
+                    kind="apply",
+                    event_type=event_type,
+                    provider="kis",
+                    channel=channel,
+                    market=PILOT_MARKET.value,
+                    symbol=PILOT_SYMBOL,
+                    sequence=sequence,
+                    apply_status="applied",
+                )
+            )
         self._on_evidence(
             MonitorEvidence(
                 timestamp=at,
                 monitor_session_id=self._session_id,
                 state=MonitorState.CONNECTING,
-                connection_attempt=5,
-                consecutive_failures=5,
+                connection_attempt=2,
+                consecutive_failures=1,
                 kind="drop",
                 reason_code="source_error",
                 reason_subcode="malformed_control_after_ack",
@@ -592,17 +663,17 @@ class _ExhaustedMonitor:
                 timestamp=at,
                 monitor_session_id=self._session_id,
                 state=MonitorState.EXHAUSTED,
-                connection_attempt=5,
-                consecutive_failures=5,
+                connection_attempt=2,
+                consecutive_failures=1,
                 kind="exhausted",
             )
         )
         raise MonitorExhaustedError(
             MonitorSummary(
                 monitor_session_id=self._session_id,
-                connection_attempts=5,
-                consecutive_failures=5,
-                applied=0,
+                connection_attempts=2,
+                consecutive_failures=1,
+                applied=2,
                 duplicate=0,
                 out_of_order=0,
                 stream_mismatch=0,
@@ -620,7 +691,7 @@ class _UnexpectedMonitor:
         raise RuntimeError("SENSITIVE_MARKER_SHOULD_NOT_APPEAR")
 
 
-def test_monitor_exhaustion_is_classified_as_source_exhausted_after_reconnects(
+def test_monitor_exhaustion_snapshot_marks_pre_readiness_source_churn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(apd, "MarketMonitor", _ExhaustedMonitor)
@@ -664,7 +735,53 @@ def test_monitor_exhaustion_is_classified_as_source_exhausted_after_reconnects(
     terminal = failed[-1]
     assert terminal["stage"] == "runtime"
     assert terminal["reason_code"] == "source_exhausted_after_reconnects"
-    assert terminal["snapshot"]["reason_subcode"] == "malformed_control_after_ack"
+    snapshot = terminal["snapshot"]
+    assert snapshot["reason_subcode"] == "malformed_control_after_ack"
+    assert snapshot["terminal_exhaustion_phase"] == "pre_market_data_readiness"
+    assert snapshot["quote_readiness_reached"] is False
+    assert snapshot["trade_readiness_reached"] is False
+    assert snapshot["source_drop_subcode_counts"] == {"malformed_control_after_ack": 2}
+    assert snapshot["quote_frames"] == 0
+    assert snapshot["normalized_quotes"] == 0
+    assert snapshot["trade_frames"] == 0
+    assert snapshot["normalized_trades"] == 0
+    assert snapshot["parse_success"] == 0
+    assert snapshot["latest_heartbeat_at"] is None
+
+
+def test_monitor_exhaustion_snapshot_marks_post_readiness_source_churn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(apd, "MarketMonitor", _PostReadinessExhaustedMonitor)
+    cfg = _config(tmp_path)
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([]),
+        run_id="monitor-exhausted-post-readiness",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_exhausted_after_reconnects"
+    rows = [
+        json.loads(line)
+        for line in cfg.evidence_out.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    failed = [row for row in rows if row["event"] == "failed_closed"]
+    assert failed
+    snapshot = failed[-1]["snapshot"]
+    assert snapshot["reason_subcode"] == "malformed_control_after_ack"
+    assert snapshot["terminal_exhaustion_phase"] == "post_market_data_readiness"
+    assert snapshot["quote_readiness_reached"] is True
+    assert snapshot["trade_readiness_reached"] is True
+    assert snapshot["source_drop_subcode_counts"] == {"malformed_control_after_ack": 1}
+    assert snapshot["quote_frames"] == 1
+    assert snapshot["normalized_quotes"] == 1
+    assert snapshot["trade_frames"] == 1
+    assert snapshot["normalized_trades"] == 1
+    assert snapshot["parse_success"] == 2
 
 
 def test_unexpected_monitor_exception_remains_internal_runtime_error(

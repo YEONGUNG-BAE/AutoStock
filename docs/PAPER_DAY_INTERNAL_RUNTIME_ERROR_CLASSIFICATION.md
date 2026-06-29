@@ -105,6 +105,31 @@ Generic unexpected monitor exceptions are still classified as
 quote/trade parser behavior, market-data source behavior, activation behavior,
 automatic restart behavior, and live order behavior are unchanged.
 
+Future `source_exhausted_after_reconnects` terminal `failed_closed` snapshots now
+carry sanitized diagnostics so post-run review can distinguish pre-readiness
+source churn from post-readiness source churn without opening raw frames or
+payloads:
+
+- `reason_subcode`
+- `source_drop_subcode_counts`
+- `quote_readiness_reached`
+- `trade_readiness_reached`
+- `latest_session_state`
+- `latest_market_data_health`
+- `latest_heartbeat_at`
+- `terminal_exhaustion_phase`
+- `quote_frames`
+- `normalized_quotes`
+- `trade_frames`
+- `normalized_trades`
+- `parse_success`
+
+`terminal_exhaustion_phase` is `pre_market_data_readiness` when neither quote nor
+trade readiness was reached before exhaustion, `post_market_data_readiness` when
+both were reached, and `unknown` for partial readiness. These fields are
+diagnostic only: they do not change reconnect policy, parser behavior, source
+behavior, outcome, or validator verdict.
+
 The formal verdict remains FAIL unless a future policy and code change explicitly
 changes classification. Do not retroactively convert this run to PASS.
 

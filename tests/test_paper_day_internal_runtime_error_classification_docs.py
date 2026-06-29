@@ -59,6 +59,28 @@ def test_doc_describes_normalized_regression_coverage(doc_text: str) -> None:
     assert "live order behavior are unchanged" in doc_text
 
 
+def test_doc_describes_source_exhaustion_terminal_diagnostics(doc_text: str) -> None:
+    for token in (
+        "source_drop_subcode_counts",
+        "quote_readiness_reached",
+        "trade_readiness_reached",
+        "latest_session_state",
+        "latest_market_data_health",
+        "latest_heartbeat_at",
+        "terminal_exhaustion_phase",
+        "quote_frames",
+        "normalized_quotes",
+        "trade_frames",
+        "normalized_trades",
+        "parse_success",
+        "pre_market_data_readiness",
+        "post_market_data_readiness",
+        "unknown",
+    ):
+        assert token in doc_text
+    assert "diagnostic only" in doc_text
+
+
 def test_doc_includes_safety_invariants(doc_text: str) -> None:
     for invariant in (
         "paper_only=true",

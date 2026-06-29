@@ -969,6 +969,12 @@ def run_attended_paper_day(
     now_fn = clock or (lambda: datetime.now(tz=KST))
     last_heartbeat: datetime | None = None
     last_source_error_subcode: str | None = None
+    source_drop_subcode_counts: Counter[str] = Counter()
+    quote_readiness_reached = False
+    trade_readiness_reached = False
+    latest_session_state: str | None = None
+    latest_market_data_health: str | None = None
+    latest_heartbeat_at: datetime | None = None
     execution_results: list[FastLoopExecutionResult] = []
     lock = PilotRuntimeLock(config.db_dir / ".paper_day.lock")
     lifecycle: DiagnosticLifecycle | None = None
@@ -1000,11 +1006,19 @@ def run_attended_paper_day(
         )
 
     def heartbeat(at: datetime) -> None:
-        nonlocal last_heartbeat
+        nonlocal last_heartbeat, latest_heartbeat_at, latest_market_data_health, latest_session_state
         if last_heartbeat is not None and (at - last_heartbeat).total_seconds() < HEARTBEAT_SECONDS:
             return
         last_heartbeat = at
-        record(at, "heartbeat", "heartbeat", snapshot=_heartbeat_snapshot(stack, counters, at))
+        latest_heartbeat_at = at
+        snapshot = _heartbeat_snapshot(stack, counters, at)
+        session_state = snapshot.get("session_state")
+        market_data_health = snapshot.get("market_data_health")
+        latest_session_state = session_state if isinstance(session_state, str) else None
+        latest_market_data_health = (
+            market_data_health if isinstance(market_data_health, str) else None
+        )
+        record(at, "heartbeat", "heartbeat", snapshot=snapshot)
 
     # --- Admission phase 1: validation. A validation failure writes NOTHING: no
     #     evidence, no summary, no symlink target — only a memory result is returned.
@@ -1116,6 +1130,7 @@ def run_attended_paper_day(
             if config.source_kind == "kis_live":
                 session_now = now_fn()
                 session = _live_pilot_session(config, now=session_now)
+                latest_session_state = session.state.value
                 record(
                     session_now,
                     "preflight",
@@ -1144,9 +1159,22 @@ def run_attended_paper_day(
             )
 
             def on_monitor_evidence(evidence: MonitorEvidence) -> None:
-                nonlocal last_source_error_subcode
+                nonlocal last_source_error_subcode, quote_readiness_reached, trade_readiness_reached
                 if evidence.reason_code == "source_error" and evidence.reason_subcode:
                     last_source_error_subcode = evidence.reason_subcode
+                    source_drop_subcode_counts[evidence.reason_subcode] += 1
+                if (
+                    evidence.kind == "apply"
+                    and evidence.apply_status == "applied"
+                    and evidence.event_type == MarketEventType.BEST_BID_ASK.value
+                ):
+                    quote_readiness_reached = True
+                if (
+                    evidence.kind == "apply"
+                    and evidence.apply_status == "applied"
+                    and evidence.event_type == MarketEventType.TRADE.value
+                ):
+                    trade_readiness_reached = True
                 _record_monitor_evidence(record, counters, evidence)
 
             def on_applied(update: AppliedMarketUpdate) -> None:
@@ -1211,8 +1239,28 @@ def run_attended_paper_day(
                     stop_reason = SOURCE_EXHAUSTED_AFTER_RECONNECTS
                     outcome = RuntimeOutcome.FAIL
                     counters.reason(stop_reason)
+                    if quote_readiness_reached and trade_readiness_reached:
+                        terminal_exhaustion_phase = "post_market_data_readiness"
+                    elif not quote_readiness_reached and not trade_readiness_reached:
+                        terminal_exhaustion_phase = "pre_market_data_readiness"
+                    else:
+                        terminal_exhaustion_phase = "unknown"
                     snapshot: dict[str, object | None] = {
                         "reason_subcode": last_source_error_subcode,
+                        "source_drop_subcode_counts": dict(sorted(source_drop_subcode_counts.items())),
+                        "quote_readiness_reached": quote_readiness_reached,
+                        "trade_readiness_reached": trade_readiness_reached,
+                        "latest_session_state": latest_session_state,
+                        "latest_market_data_health": latest_market_data_health,
+                        "latest_heartbeat_at": (
+                            latest_heartbeat_at.isoformat() if latest_heartbeat_at else None
+                        ),
+                        "terminal_exhaustion_phase": terminal_exhaustion_phase,
+                        "quote_frames": counters.values.get("quote_frames", 0),
+                        "normalized_quotes": counters.values.get("normalized_quotes", 0),
+                        "trade_frames": counters.values.get("trade_frames", 0),
+                        "normalized_trades": counters.values.get("normalized_trades", 0),
+                        "parse_success": counters.values.get("parse_success", 0),
                         "connection_attempts": exc.summary.connection_attempts,
                         "consecutive_failures": exc.summary.consecutive_failures,
                     }
