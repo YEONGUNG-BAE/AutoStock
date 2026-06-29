@@ -178,6 +178,12 @@ activation_authorized=true
 After the day, review `summary.json` first, then the earliest evidence record
 whose stage/reason explains the first failure.
 
+Known post-run classification note: the 2026-06-29
+`internal_runtime_error`/`MonitorExhaustedError` gap is documented in
+`docs/PAPER_DAY_INTERNAL_RUNTIME_ERROR_CLASSIFICATION.md`. It remains formal
+FAIL, is not a PASS conversion, and does not authorize full paper or a live rerun
+by itself.
+
 Quote-contamination troubleshooting: if KIS approval fails with
 `source_approval_failed` while the env vars are present, check for copied quote
 characters around `APP_KEY` / `APP_SECRET`. Use length and `strip_same` — never

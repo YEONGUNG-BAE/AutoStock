@@ -1,0 +1,103 @@
+# Paper-Day Internal Runtime Error Classification Gap
+
+## Scope
+
+This is an offline post-run classification note for sanitized Paper-Day evidence.
+It is not live rerun authorization, not a PASS conversion, not parser-failure
+evidence, and not safety-failure evidence.
+
+Use this note only when reviewing already-persisted summary, evidence, envelope,
+and report artifacts. It does not authorize live KIS, activation, full paper,
+automatic restart, a daemon, live orders, raw frame inspection, raw payload
+inspection, or secret-bearing diagnostics.
+
+## 2026-06-29 Sanitized Case Summary
+
+- HEAD: `4d2b76cc2cab1d6dec2275abbdb02e9c22dabf9b`
+- run_id: `6ddbfa7a6ba64e4fbbb5a887b3c2b068`
+- session_date: `2026-06-29`
+- symbol: `005930`
+- source_kind: `kis_live`
+- formal verdict remains FAIL
+- outcome: `FAIL`
+- stop_reason: `internal_runtime_error`
+
+The run produced about 3h live market-data success before failing closed. The
+latest healthy heartbeat before failure was recorded at
+`2026-06-29T12:07:40.205333+09:00` with `session_state=OPEN` and
+`market_data_health=HEALTHY`.
+
+In the final 2 minutes, sanitized evidence showed source/control-frame churn:
+
+- `13` `source_error` drops
+- all source drops carried `reason_subcode=malformed_control_after_ack`
+- `14` `reconnect_stream_reset` events
+- `16` health-held execution results
+
+The tail lifecycle was:
+
+1. final `drop` at `2026-06-29T12:08:55.346178+09:00`
+2. `exhausted` at `2026-06-29T12:08:55.346493+09:00`
+3. `failed_closed` at `2026-06-29T12:08:55.348674+09:00` with
+   `reason_code=internal_runtime_error`
+4. `finalized` at `2026-06-29T12:08:55.353442+09:00`
+
+## Safety Invariant Summary
+
+This case is safety-clean only because the persisted sanitized artifacts preserve
+these invariants:
+
+- `paper_only=true`
+- `activation_authorized=false`
+- `real_order_adapter_constructed=false`
+- `automatic_restart=false`
+- `nonterminal_journal=0`
+- `cleanup_outcome=CLEAN`
+- `summary_publication_outcome=WRITTEN`
+
+If any of these invariants differ in a future run, do not apply this
+safety-clean interpretation.
+
+## Market-Data And Parser Summary
+
+This case is not parser failure evidence. The market-data counters were
+parser-clean:
+
+- `quote_frames == normalized_quotes`
+- `trade_frames == normalized_trades`
+- `quote_frames + trade_frames == parse_success`
+
+Do not treat `malformed_control_after_ack` source churn as a quote/trade parser
+failure when quote and trade frames normalize 1:1.
+
+## Classification Gap
+
+The likely mechanical path is:
+
+1. repeated sanitized KIS source drops with
+   `reason_subcode=malformed_control_after_ack`
+2. repeated reconnects with no market data in the final attempts
+3. `MarketMonitor` emits `exhausted`
+4. `MarketMonitor` raises `MonitorExhaustedError`
+5. `attended_paper_day` only normalizes `_CriticalStop` exceptions from the
+   monitor call
+6. `MonitorExhaustedError` bubbles to the generic runtime handler
+7. the run records `failed_closed` with `reason_code=internal_runtime_error`
+
+That means the current classification is a monitor-exhaustion classification gap:
+the source/control-frame reconnect exhaustion is real, but the persisted terminal
+reason is generic. A future improvement may introduce a more specific
+`reason_code`, for example `source_exhausted_after_reconnects`, but this note does
+not implement that change.
+
+The formal verdict remains FAIL unless a future policy and code change explicitly
+changes classification. Do not retroactively convert this run to PASS.
+
+## Next Action
+
+- No immediate live rerun required solely to confirm this diagnosis.
+- Add fake/sanitized regression coverage if classification behavior changes later.
+- Do not proceed to full paper solely from this FAIL.
+- Keep treating the existing run as formal FAIL, safety-clean, parser-clean, and
+  envelope-clean based only on the sanitized artifacts and same-run envelope
+  identity.

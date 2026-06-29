@@ -69,6 +69,10 @@ no raw frame / payload / field-value / URL / token / app key / approval key /
 
 ## Known backlog
 
+- 2026-06-29 `internal_runtime_error` is documented as a safety-clean,
+  parser-clean monitor-exhaustion classification gap in
+  `docs/PAPER_DAY_INTERNAL_RUNTIME_ERROR_CLASSIFICATION.md`; it remains formal
+  **FAIL** and does not authorize full paper or a live rerun by itself.
 - pilot-3 **reconnect / source-error operational noise** is **P3 operational
   backlog** with fake/sanitized test coverage. It is not a correctness defect.
 - **No live rerun** is warranted solely to chase that P3 backlog.
