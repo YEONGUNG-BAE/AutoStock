@@ -25,6 +25,8 @@ def test_doc_preserves_formal_fail_not_pass_conversion(doc_text: str) -> None:
     assert "formal verdict remains FAIL" in doc_text
     assert "not a PASS conversion" in doc_text
     assert "Do not retroactively convert this run to PASS" in normalized
+    assert "historical run remains" in doc_text
+    assert "`internal_runtime_error`" in doc_text
 
 
 def test_doc_distinguishes_parser_and_safety_failures(doc_text: str) -> None:
@@ -38,12 +40,23 @@ def test_doc_names_failure_path_and_events(doc_text: str) -> None:
     for token in (
         "MonitorExhaustedError",
         "internal_runtime_error",
+        "source_exhausted_after_reconnects",
         "malformed_control_after_ack",
         "exhausted",
         "failed_closed",
         "finalized",
     ):
         assert token in doc_text
+
+
+def test_doc_describes_normalized_regression_coverage(doc_text: str) -> None:
+    normalized = " ".join(doc_text.split())
+    assert "fake/sanitized regression coverage" in doc_text
+    assert "outcome=FAIL" in doc_text
+    assert "terminal reason is normalized to `source_exhausted_after_reconnects`" in normalized
+    assert "Generic unexpected monitor exceptions are still classified as" in doc_text
+    assert "Reconnect behavior" in doc_text
+    assert "live order behavior are unchanged" in doc_text
 
 
 def test_doc_includes_safety_invariants(doc_text: str) -> None:

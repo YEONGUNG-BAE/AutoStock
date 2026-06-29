@@ -73,7 +73,12 @@ from market_data.models import (
     NormalizedBestBidAsk,
     NormalizedTradeTick,
 )
-from market_data.monitor import AppliedMarketUpdate, MarketMonitor, MonitorEvidence
+from market_data.monitor import (
+    AppliedMarketUpdate,
+    MarketMonitor,
+    MonitorEvidence,
+    MonitorExhaustedError,
+)
 from market_data.protocols import MarketEventSource
 from market_data.replay_source import ReplayMarketEventSource
 from market_data.rolling_window import RollingRetentionPolicy, RollingTradeHistoryStore
@@ -590,6 +595,9 @@ class _CriticalStop(Exception):
         self.reason_code = reason_code
 
 
+SOURCE_EXHAUSTED_AFTER_RECONNECTS = "source_exhausted_after_reconnects"
+
+
 class DiagnosticLifecycle:
     def __init__(
         self,
@@ -960,6 +968,7 @@ def run_attended_paper_day(
     outcome = RuntimeOutcome.PASS
     now_fn = clock or (lambda: datetime.now(tz=KST))
     last_heartbeat: datetime | None = None
+    last_source_error_subcode: str | None = None
     execution_results: list[FastLoopExecutionResult] = []
     lock = PilotRuntimeLock(config.db_dir / ".paper_day.lock")
     lifecycle: DiagnosticLifecycle | None = None
@@ -1135,6 +1144,9 @@ def run_attended_paper_day(
             )
 
             def on_monitor_evidence(evidence: MonitorEvidence) -> None:
+                nonlocal last_source_error_subcode
+                if evidence.reason_code == "source_error" and evidence.reason_subcode:
+                    last_source_error_subcode = evidence.reason_subcode
                 _record_monitor_evidence(record, counters, evidence)
 
             def on_applied(update: AppliedMarketUpdate) -> None:
@@ -1195,6 +1207,23 @@ def run_attended_paper_day(
                 if critical is not None:
                     stop_reason = _normalize_critical_reason(critical.reason_code)
                     outcome = RuntimeOutcome.NO_GO
+                elif isinstance(exc, MonitorExhaustedError):
+                    stop_reason = SOURCE_EXHAUSTED_AFTER_RECONNECTS
+                    outcome = RuntimeOutcome.FAIL
+                    counters.reason(stop_reason)
+                    snapshot: dict[str, object | None] = {
+                        "reason_subcode": last_source_error_subcode,
+                        "connection_attempts": exc.summary.connection_attempts,
+                        "consecutive_failures": exc.summary.consecutive_failures,
+                    }
+                    with contextlib.suppress(Exception):
+                        record(
+                            now_fn(),
+                            "runtime",
+                            "failed_closed",
+                            reason=stop_reason,
+                            snapshot=snapshot,
+                        )
                 else:
                     raise
             ran_market_loop = True

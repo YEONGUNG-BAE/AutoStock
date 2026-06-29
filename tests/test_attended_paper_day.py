@@ -38,6 +38,12 @@ from composition.attended_paper_day import (
 )
 from domain.enums import Currency
 from market_data.kis_official_ws_parser import TR_QUOTE, TR_TRADE
+from market_data.monitor import (
+    MonitorEvidence,
+    MonitorExhaustedError,
+    MonitorState,
+    MonitorSummary,
+)
 from market_data.models import NormalizedBestBidAsk, NormalizedTradeTick, ProviderSequence
 from market_data.replay_source import ReplayMarketEventSource
 
@@ -560,6 +566,131 @@ def test_kis_live_full_pilot_post_close_is_blocked_before_source_open(tmp_path: 
     assert timing[-1]["snapshot"]["required_session_state"] == "OPEN"
     failures = [row for row in rows if row["event"] == "failed_closed"]
     assert failures and failures[-1]["reason_code"] == "invalid_session_window"
+
+
+class _ExhaustedMonitor:
+    def __init__(self, **kwargs: Any) -> None:
+        self._on_evidence = kwargs["on_evidence"]
+        self._session_id = kwargs["session_id"]
+
+    async def run(self) -> MonitorSummary:
+        at = _at()
+        self._on_evidence(
+            MonitorEvidence(
+                timestamp=at,
+                monitor_session_id=self._session_id,
+                state=MonitorState.CONNECTING,
+                connection_attempt=5,
+                consecutive_failures=5,
+                kind="drop",
+                reason_code="source_error",
+                reason_subcode="malformed_control_after_ack",
+            )
+        )
+        self._on_evidence(
+            MonitorEvidence(
+                timestamp=at,
+                monitor_session_id=self._session_id,
+                state=MonitorState.EXHAUSTED,
+                connection_attempt=5,
+                consecutive_failures=5,
+                kind="exhausted",
+            )
+        )
+        raise MonitorExhaustedError(
+            MonitorSummary(
+                monitor_session_id=self._session_id,
+                connection_attempts=5,
+                consecutive_failures=5,
+                applied=0,
+                duplicate=0,
+                out_of_order=0,
+                stream_mismatch=0,
+                future_event_error=0,
+                final_state=MonitorState.EXHAUSTED,
+            )
+        )
+
+
+class _UnexpectedMonitor:
+    def __init__(self, **kwargs: Any) -> None:
+        del kwargs
+
+    async def run(self) -> MonitorSummary:
+        raise RuntimeError("SENSITIVE_MARKER_SHOULD_NOT_APPEAR")
+
+
+def test_monitor_exhaustion_is_classified_as_source_exhausted_after_reconnects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(apd, "MarketMonitor", _ExhaustedMonitor)
+    cfg = _config(tmp_path)
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([]),
+        run_id="monitor-exhausted",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "source_exhausted_after_reconnects"
+    assert summary["paper_only"] is True
+    assert summary["activation_authorized"] is False
+    assert summary["real_order_adapter_constructed"] is False
+    assert summary["automatic_restart"] is False
+    reason_counts = summary["counters"]["reason_counts"]  # type: ignore[index]
+    assert reason_counts["source_exhausted_after_reconnects"] == 1
+    assert "internal_runtime_error" not in reason_counts
+
+    summary_text = cfg.summary_out.read_text(encoding="utf-8")
+    evidence_text = cfg.evidence_out.read_text(encoding="utf-8")
+    for forbidden in (
+        "SENSITIVE_MARKER_SHOULD_NOT_APPEAR",
+        "Traceback",
+        "raw frame",
+        "raw payload",
+        "account=",
+        "token=",
+        "app_key=",
+        "approval_key=",
+    ):
+        assert forbidden not in summary_text
+        assert forbidden not in evidence_text
+
+    rows = [json.loads(line) for line in evidence_text.splitlines() if line.strip()]
+    failed = [row for row in rows if row["event"] == "failed_closed"]
+    assert failed
+    terminal = failed[-1]
+    assert terminal["stage"] == "runtime"
+    assert terminal["reason_code"] == "source_exhausted_after_reconnects"
+    assert terminal["snapshot"]["reason_subcode"] == "malformed_control_after_ack"
+
+
+def test_unexpected_monitor_exception_remains_internal_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(apd, "MarketMonitor", _UnexpectedMonitor)
+    cfg = _config(tmp_path)
+
+    summary = run_attended_paper_day(
+        config=cfg,
+        source_factory=lambda *, lifecycle: ReplayMarketEventSource([]),
+        run_id="monitor-unexpected",
+        clock=_at,
+    )
+
+    assert summary["outcome"] == "FAIL"
+    assert summary["stop_reason"] == "internal_runtime_error"
+    summary_text = cfg.summary_out.read_text(encoding="utf-8")
+    evidence_text = cfg.evidence_out.read_text(encoding="utf-8")
+    assert "SENSITIVE_MARKER_SHOULD_NOT_APPEAR" not in summary_text
+    assert "SENSITIVE_MARKER_SHOULD_NOT_APPEAR" not in evidence_text
+    assert "Traceback" not in summary_text
+    assert "Traceback" not in evidence_text
+    rows = [json.loads(line) for line in evidence_text.splitlines() if line.strip()]
+    failed = [row for row in rows if row["event"] == "failed_closed"]
+    assert failed and failed[-1]["reason_code"] == "internal_runtime_error"
 
 
 def test_dangling_final_symlink_is_rejected(tmp_path: Path) -> None:

@@ -70,9 +70,9 @@ parser-clean:
 Do not treat `malformed_control_after_ack` source churn as a quote/trade parser
 failure when quote and trade frames normalize 1:1.
 
-## Classification Gap
+## Historical Classification Gap
 
-The likely mechanical path is:
+The 2026-06-29 run followed this mechanical path:
 
 1. repeated sanitized KIS source drops with
    `reason_subcode=malformed_control_after_ack`
@@ -84,11 +84,26 @@ The likely mechanical path is:
 6. `MonitorExhaustedError` bubbles to the generic runtime handler
 7. the run records `failed_closed` with `reason_code=internal_runtime_error`
 
-That means the current classification is a monitor-exhaustion classification gap:
-the source/control-frame reconnect exhaustion is real, but the persisted terminal
-reason is generic. A future improvement may introduce a more specific
-`reason_code`, for example `source_exhausted_after_reconnects`, but this note does
-not implement that change.
+That historical classification is a monitor-exhaustion classification gap: the
+source/control-frame reconnect exhaustion is real, but the persisted terminal
+reason for that already-completed run is generic. The historical run remains
+`internal_runtime_error`; do not rewrite its artifacts and do not reinterpret it
+as PASS.
+
+## Current Normalized Classification
+
+New fake/sanitized regression coverage now guards the attended Paper-Day monitor
+execution boundary. When `MarketMonitor` raises `MonitorExhaustedError`, the run
+still fails closed with `outcome=FAIL`, but the terminal reason is normalized to
+`source_exhausted_after_reconnects` instead of generic `internal_runtime_error`.
+If a sanitized source subcode was observed before exhaustion, the terminal
+`failed_closed` evidence snapshot preserves it as `reason_subcode`, for example
+`malformed_control_after_ack`.
+
+Generic unexpected monitor exceptions are still classified as
+`internal_runtime_error`. Reconnect behavior, reconnect attempt counts,
+quote/trade parser behavior, market-data source behavior, activation behavior,
+automatic restart behavior, and live order behavior are unchanged.
 
 The formal verdict remains FAIL unless a future policy and code change explicitly
 changes classification. Do not retroactively convert this run to PASS.
@@ -96,7 +111,8 @@ changes classification. Do not retroactively convert this run to PASS.
 ## Next Action
 
 - No immediate live rerun required solely to confirm this diagnosis.
-- Add fake/sanitized regression coverage if classification behavior changes later.
+- Keep fake/sanitized regression coverage in place if classification behavior
+  changes later.
 - Do not proceed to full paper solely from this FAIL.
 - Keep treating the existing run as formal FAIL, safety-clean, parser-clean, and
   envelope-clean based only on the sanitized artifacts and same-run envelope
