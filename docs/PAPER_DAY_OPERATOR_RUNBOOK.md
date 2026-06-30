@@ -193,6 +193,14 @@ Current post-run status note: the 2026-06-30
 and does not authorize full paper, tiny-live, live orders,
 activation, a daemon, or automatic restart.
 
+Current post-run status note: the 2026-06-30
+`paper-day-source-diagnostics-validation-rest-of-session-01` run is a rest-of-session stability validation PASS
+(`run_id=479aea40b15c41cf92dc5067ab704da8`). It confirms that
+`malformed_control_after_ack=626`, `source_iterator_unknown_after_ack=1`, and
+`reconnect_stream_reset=1251` source noise remained nonterminal; no terminal source exhaustion
+occurred. It is not a full-day PASS from market open and does not authorize full paper, tiny-live, live orders,
+activation, a daemon, or automatic restart.
+
 Quote-contamination troubleshooting: if KIS approval fails with
 `source_approval_failed` while the env vars are present, check for copied quote
 characters around `APP_KEY` / `APP_SECRET`. Use length and `strip_same` — never

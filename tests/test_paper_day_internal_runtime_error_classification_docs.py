@@ -125,6 +125,28 @@ def test_doc_records_separate_2026_06_30_short_validation_pass(doc_text: str) ->
     assert "did not change reconnect behavior, parser behavior, source behavior, order behavior" in normalized
 
 
+def test_doc_records_2026_06_30_rest_of_session_validation_pass(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-rest-of-session-01",
+        "479aea40b15c41cf92dc5067ab704da8",
+        "verdict PASS",
+        "stop_reason completed",
+        "OPEN",
+        "HEALTHY",
+        "malformed_control_after_ack=626",
+        "source_iterator_unknown_after_ack=1",
+        "reconnect_stream_reset=1251",
+        "no terminal source exhaustion",
+        "rest-of-session",
+        "historical failures",
+        "remain formal FAIL",
+    ):
+        assert token in doc_text
+    normalized = " ".join(doc_text.split())
+    assert "did not change reconnect behavior, parser behavior, source behavior, order behavior" in normalized
+
+
 def test_doc_does_not_include_raw_or_secret_examples(doc_text: str) -> None:
     lowered = doc_text.lower()
     forbidden_example_patterns = (

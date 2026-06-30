@@ -66,3 +66,21 @@ def test_runbook_references_2026_06_30_short_validation_without_authorization(do
         "live orders",
     ):
         assert token in doc_text
+
+
+def test_runbook_references_2026_06_30_rest_of_session_without_authorization(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-rest-of-session-01",
+        "479aea40b15c41cf92dc5067ab704da8",
+        "rest-of-session stability validation PASS",
+        "malformed_control_after_ack=626",
+        "source_iterator_unknown_after_ack=1",
+        "reconnect_stream_reset=1251",
+        "no terminal source exhaustion",
+        "not a full-day PASS from market open",
+        "does not authorize full paper",
+        "tiny-live",
+        "live orders",
+    ):
+        assert token in doc_text

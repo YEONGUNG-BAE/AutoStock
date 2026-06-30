@@ -16,7 +16,7 @@
 | Wrong-run envelope guard | **implemented** (`envelope_run_mismatch`) |
 | Next-session readiness checker | **implemented** (`ops/check_next_paper_day_readiness.py`) |
 | Reviewer intake checklist | **implemented** (`docs/PAPER_DAY_REVIEWER_INTAKE_CHECKLIST.md`) |
-| 2026-06-30 source diagnostics validation | **PASS** (short 1-hour validation only; not full-day PASS) |
+| 2026-06-30 source diagnostics validation | **PASS** (short 1-hour and rest-of-session validations; not full-day PASS) |
 
 Parser verification (the H0STASP0 62-field live quote fix) is **already complete**
 on disk and is not re-litigated by any future run. pilot-3 reached a clean
@@ -67,6 +67,44 @@ did not produce source exhaustion.
 
 Scope limitation: this records a short 1-hour validation PASS only, not full-day
 PASS. It does not authorize full paper, does not authorize tiny-live, and does not authorize live orders.
+It also does not authorize activation, a daemon, or automatic restart, and it
+does not convert any 2026-06-29 failed run to PASS.
+
+## 2026-06-30 rest-of-session stability validation
+
+The rest-of-session Paper-Day source diagnostics stability validation completed
+as a formal `verdict PASS` and `outcome PASS`.
+
+- SESSION_DATE: `2026-06-30`
+- RUN_LABEL: `paper-day-source-diagnostics-validation-rest-of-session-01`
+- run_id: `479aea40b15c41cf92dc5067ab704da8`
+- symbol: `005930`
+- source_kind: `kis_live`
+- verdict PASS
+- outcome: `PASS`
+- stop_reason completed
+- first_failure: `null`
+- paper_only: `true`
+- activation_authorized: `false`
+- real_order_adapter_constructed: `false`
+- automatic_restart: `false`
+- nonterminal_journal: `0`
+- summary_publication_outcome: `WRITTEN`
+- cleanup_outcome: `CLEAN`
+- latest heartbeat: `OPEN` / `HEALTHY` at `2026-06-30T15:21:38.875942+09:00`
+- quote normalization: `quote_frames == normalized_quotes`
+- source noise: `malformed_control_after_ack=626`
+- source noise: `source_iterator_unknown_after_ack=1`
+- reconnect_stream_reset=1251
+- no terminal source exhaustion
+
+Interpretation: this rest-of-session PASS is stronger than the earlier 1-hour
+PASS, but it is not full-day PASS from market open. Source/control-frame noise
+persisted and was significant, but it remained nonterminal during this run; no
+terminal `source_exhausted_after_reconnects` occurred.
+
+Scope limitation: this records a rest-of-session PASS only, not full-day PASS
+from market open. It does not authorize full paper, does not authorize tiny-live, and does not authorize live orders.
 It also does not authorize activation, a daemon, or automatic restart, and it
 does not convert any 2026-06-29 failed run to PASS.
 

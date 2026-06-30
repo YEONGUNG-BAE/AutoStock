@@ -95,6 +95,28 @@ def test_short_2026_06_30_source_diagnostics_pass_is_documented(doc_text: str) -
         assert token in doc_text
 
 
+def test_rest_of_session_2026_06_30_stability_pass_is_documented(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-rest-of-session-01",
+        "479aea40b15c41cf92dc5067ab704da8",
+        "verdict PASS",
+        "stop_reason completed",
+        "OPEN",
+        "HEALTHY",
+        "malformed_control_after_ack=626",
+        "source_iterator_unknown_after_ack=1",
+        "reconnect_stream_reset=1251",
+        "no terminal source exhaustion",
+        "rest-of-session",
+        "not full-day PASS",
+        "does not authorize full paper",
+        "does not authorize tiny-live",
+        "does not authorize live orders",
+    ):
+        assert token in doc_text
+
+
 def test_links_to_dry_run_rehearsal(doc_text: str) -> None:
     assert "docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md" in doc_text
 

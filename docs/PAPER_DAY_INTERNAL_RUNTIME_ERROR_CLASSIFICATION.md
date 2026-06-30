@@ -133,7 +133,7 @@ behavior, outcome, or validator verdict.
 The formal verdict remains FAIL unless a future policy and code change explicitly
 changes classification. Do not retroactively convert this run to PASS.
 
-## 2026-06-30 Short Diagnostics Validation
+## 2026-06-30 Diagnostics Validations
 
 After the source exhaustion diagnostics were added, the separate
 2026-06-30 1-hour validation run completed as a formal PASS:
@@ -148,11 +148,26 @@ After the source exhaustion diagnostics were added, the separate
 - source noise persisted: `malformed_control_after_ack=27`
 - no terminal source exhaustion occurred
 
-This PASS is separate from the 2026-06-29 historical failures. Those failures
-remain formal FAIL and must not be converted to PASS. The diagnostics code did
-not change reconnect behavior, parser behavior, source behavior, order behavior,
-activation behavior, daemon behavior, or automatic restart behavior; it only made
-post-run classification and terminal diagnostics more explicit.
+The later 2026-06-30 rest-of-session validation also completed as a formal PASS:
+
+- RUN_LABEL: `paper-day-source-diagnostics-validation-rest-of-session-01`
+- run_id: `479aea40b15c41cf92dc5067ab704da8`
+- source_kind: `kis_live`
+- verdict PASS
+- outcome: `PASS`
+- stop_reason completed
+- latest heartbeat: `OPEN` / `HEALTHY`
+- source noise persisted: `malformed_control_after_ack=626`
+- source noise persisted: `source_iterator_unknown_after_ack=1`
+- reconnect_stream_reset=1251
+- no terminal source exhaustion occurred
+
+Both 2026-06-30 PASS runs are separate from the 2026-06-29 historical failures.
+Those failures remain formal FAIL and must not be converted to PASS. The
+diagnostics code did not change reconnect behavior, parser behavior, source
+behavior, order behavior, activation behavior, daemon behavior, or automatic
+restart behavior; it only made post-run classification and terminal diagnostics
+more explicit.
 
 ## Next Action
 
