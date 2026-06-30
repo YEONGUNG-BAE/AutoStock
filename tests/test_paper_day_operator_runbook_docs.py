@@ -51,3 +51,18 @@ def test_runbook_documents_wrong_run_envelope_identity_check(doc_text: str) -> N
     for field in ("run_id", "session_date", "symbol"):
         assert field in doc_text
     assert "can never be PASS" in doc_text or "cannot be PASS" in doc_text
+
+
+def test_runbook_references_2026_06_30_short_validation_without_authorization(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-01h-01",
+        "0c6229f939944050a87061fe9735a832",
+        "a0bbe4600e44a12295316b6b5feae9c83ef08bb6",
+        "short 1-hour source diagnostics validation PASS",
+        "not a full-day PASS",
+        "does not authorize full paper",
+        "tiny-live",
+        "live orders",
+    ):
+        assert token in doc_text

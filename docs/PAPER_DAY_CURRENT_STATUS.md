@@ -16,6 +16,7 @@
 | Wrong-run envelope guard | **implemented** (`envelope_run_mismatch`) |
 | Next-session readiness checker | **implemented** (`ops/check_next_paper_day_readiness.py`) |
 | Reviewer intake checklist | **implemented** (`docs/PAPER_DAY_REVIEWER_INTAKE_CHECKLIST.md`) |
+| 2026-06-30 source diagnostics validation | **PASS** (short 1-hour validation only; not full-day PASS) |
 
 Parser verification (the H0STASP0 62-field live quote fix) is **already complete**
 on disk and is not re-litigated by any future run. pilot-3 reached a clean
@@ -34,6 +35,40 @@ at the tooling level (`--stdout-envelope-out`, locally verified).
 A future live run only exercises the now-hardened envelope capture and the
 runbook/validator flow against a fresh, Operator-selected regular-session run. It
 proves the tooling, not the parser.
+
+## 2026-06-30 short source diagnostics validation
+
+The short Paper-Day source diagnostics validation completed as a formal
+`verdict PASS` and `outcome PASS`.
+
+- SESSION_DATE: `2026-06-30`
+- HEAD: `a0bbe4600e44a12295316b6b5feae9c83ef08bb6`
+- RUN_LABEL: `paper-day-source-diagnostics-validation-01h-01`
+- run_id: `0c6229f939944050a87061fe9735a832`
+- duration: 3600 seconds (short 1-hour validation)
+- source_kind: `kis_live`
+- stop_reason: `completed`
+- paper_only: `true`
+- activation_authorized: `false`
+- real_order_adapter_constructed: `false`
+- automatic_restart: `false`
+- nonterminal_journal: `0`
+- summary_publication_outcome: `WRITTEN`
+- cleanup_outcome: `CLEAN`
+- latest heartbeat: `OPEN` / `HEALTHY`
+- quote normalization: `quote_frames == normalized_quotes`
+- source noise existed: `malformed_control_after_ack=27`
+- terminal source exhaustion: none
+
+Interpretation: this validates the source exhaustion diagnostics added at
+`a0bbe4600e44a12295316b6b5feae9c83ef08bb6` in a successful live market-data
+run. The remaining `malformed_control_after_ack` source noise was nonterminal and
+did not produce source exhaustion.
+
+Scope limitation: this records a short 1-hour validation PASS only, not full-day
+PASS. It does not authorize full paper, does not authorize tiny-live, and does not authorize live orders.
+It also does not authorize activation, a daemon, or automatic restart, and it
+does not convert any 2026-06-29 failed run to PASS.
 
 ## What must not be done
 

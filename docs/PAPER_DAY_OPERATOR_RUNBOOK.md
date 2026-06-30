@@ -185,6 +185,14 @@ exhaustion is normalized distinctly, but that historical run remains formal FAIL
 is not a PASS conversion, and does not authorize full paper or a live rerun by
 itself.
 
+Current post-run status note: the 2026-06-30
+`paper-day-source-diagnostics-validation-01h-01` run is a short 1-hour source diagnostics validation PASS
+(`run_id=0c6229f939944050a87061fe9735a832`,
+`HEAD=a0bbe4600e44a12295316b6b5feae9c83ef08bb6`). It confirms that
+`malformed_control_after_ack` source noise was nonterminal in that run. It is not a full-day PASS
+and does not authorize full paper, tiny-live, live orders,
+activation, a daemon, or automatic restart.
+
 Quote-contamination troubleshooting: if KIS approval fails with
 `source_approval_failed` while the env vars are present, check for copied quote
 characters around `APP_KEY` / `APP_SECRET`. Use length and `strip_same` — never

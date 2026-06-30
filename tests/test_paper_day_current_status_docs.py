@@ -77,6 +77,24 @@ def test_known_backlog_present(doc_text: str) -> None:
     assert "tech_debt" in lowered or "tech debt" in lowered
 
 
+def test_short_2026_06_30_source_diagnostics_pass_is_documented(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-01h-01",
+        "0c6229f939944050a87061fe9735a832",
+        "a0bbe4600e44a12295316b6b5feae9c83ef08bb6",
+        "verdict PASS",
+        "stop_reason: `completed`",
+        "malformed_control_after_ack",
+        "short",
+        "not full-day PASS",
+        "does not authorize full paper",
+        "does not authorize tiny-live",
+        "does not authorize live orders",
+    ):
+        assert token in doc_text
+
+
 def test_links_to_dry_run_rehearsal(doc_text: str) -> None:
     assert "docs/PAPER_DAY_OPERATOR_DRY_RUN_REHEARSAL.md" in doc_text
 

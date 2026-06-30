@@ -108,6 +108,23 @@ def test_doc_keeps_no_immediate_rerun_and_no_full_paper_guidance(doc_text: str) 
     assert "Do not proceed to full paper solely from this FAIL" in doc_text
 
 
+def test_doc_records_separate_2026_06_30_short_validation_pass(doc_text: str) -> None:
+    for token in (
+        "2026-06-30",
+        "paper-day-source-diagnostics-validation-01h-01",
+        "0c6229f939944050a87061fe9735a832",
+        "a0bbe4600e44a12295316b6b5feae9c83ef08bb6",
+        "verdict PASS",
+        "stop_reason: `completed`",
+        "malformed_control_after_ack",
+        "historical failures",
+        "remain formal FAIL",
+    ):
+        assert token in doc_text
+    normalized = " ".join(doc_text.split())
+    assert "did not change reconnect behavior, parser behavior, source behavior, order behavior" in normalized
+
+
 def test_doc_does_not_include_raw_or_secret_examples(doc_text: str) -> None:
     lowered = doc_text.lower()
     forbidden_example_patterns = (
