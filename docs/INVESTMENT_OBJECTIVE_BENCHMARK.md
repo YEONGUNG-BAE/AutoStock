@@ -179,6 +179,10 @@ metrics only.
 The objective must be evaluated in this order; each step gates the next. This is
 a future plan, not a current workflow:
 
+0. **Follow the benchmark data and backtest plan** in
+   `docs/BENCHMARK_DATA_AND_BACKTEST_PLAN.md` before implementing any historical
+   harness. That plan freezes the KRW-unhedged benchmark basis, FX conversion,
+   observation frequency / annualization, alignment, and bias controls.
 1. **Integrate and report benchmark-relative metrics** (Section 7) with supplied
    benchmark series on the existing paper ledger / NAV history.
 2. **Build a historical backtest harness** that can replay the strategy across
