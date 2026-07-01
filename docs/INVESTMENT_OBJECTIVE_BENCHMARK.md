@@ -101,8 +101,16 @@ this as "no evaluation exists"):
   externally supplied total-return benchmark series: bot/benchmark return,
   excess return, relative drawdown, tracking error, information ratio,
   up/down capture, beta, and alignment counts/warnings. This is calculation
-  support only; benchmark data fetching, postmortem integration, and historical
-  backtest evidence are still not implemented.
+  support only.
+- **Human-readable benchmark-relative report rendering now exists** in
+  `src/paper_review/report.py` for already-computed
+  `BenchmarkRelativeMetrics`. This renderer is offline presentation only; it
+  does not fetch benchmark data, read runtime evidence, prove long-term
+  outperformance, or integrate benchmark-relative results into postmortems.
+- **Paper-Day market-data evidence is not portfolio NAV** and is invalid for
+  investment-performance measurement. First real benchmark-relative investment
+  numbers require a valid strategy NAV series plus a KRW-unhedged S&P 500
+  total-return benchmark series.
 - The **allocator is structurally biased toward persistent cash and gold and low
   equity beta** (`src/allocator/rules.py`: cash 10–30, gold 18–22 / 15–25 hard
   bands). That is a defensive posture, not a benchmark-tracking-with-active-
@@ -147,7 +155,8 @@ To evaluate the objective, the following **benchmark-relative** metrics are
 required. Phase 1 adds deterministic `paper_review` calculation support for the
 core return/risk metrics when an external benchmark series is supplied; this
 section still does not implement data fetching, backtesting, runtime behavior,
-or allocator changes.
+or allocator changes. Phase 1.5 adds human-readable rendering of those computed
+metrics only.
 
 - bot net return (after commissions, taxes, slippage, FX)
 - S&P 500 total return over the same window (KRW-unhedged primary)
@@ -170,8 +179,8 @@ or allocator changes.
 The objective must be evaluated in this order; each step gates the next. This is
 a future plan, not a current workflow:
 
-1. **Integrate benchmark-relative metrics** (Section 7) with supplied benchmark
-   series on the existing paper ledger / NAV history.
+1. **Integrate and report benchmark-relative metrics** (Section 7) with supplied
+   benchmark series on the existing paper ledger / NAV history.
 2. **Build a historical backtest harness** that can replay the strategy across
    multiple market regimes out-of-sample.
 3. **Evaluate the current strategy (v1)** against the S&P 500 TR using those

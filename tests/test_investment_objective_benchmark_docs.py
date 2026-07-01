@@ -6,9 +6,9 @@ implies. These guards lock its load-bearing *concepts* so a future edit cannot
 silently drop them: the primary objective, the strict separation of operational
 safety from investment defensiveness, the primary/diagnostic benchmark set, the
 current design mismatch (absolute metrics exist, benchmark-relative calculation
-exists but benchmark sourcing/backtest evidence remain missing; `AllocationRegime`
-orphaned), the required future metrics / evaluation order / Allocator v2
-direction, and the failure/success criteria. They also verify the
+and rendering exist but benchmark sourcing/backtest evidence remain missing;
+`AllocationRegime` orphaned), the required future metrics / evaluation order /
+Allocator v2 direction, and the failure/success criteria. They also verify the
 README note+link, the exact Future Direction section in the relevant Cursor
 rules, and the TECH_DEBT forward pointer.
 
@@ -122,9 +122,14 @@ def test_current_design_mismatch_absolute_and_relative_calculation_status(doc_te
     assert "benchmark-relative" in lowered
     assert "src/paper_review/metrics.py" in doc_text
     assert "src/paper_review/models.py" in doc_text
+    assert "src/paper_review/report.py" in doc_text
     assert "calculation models/functions now exist" in lowered
-    assert "benchmark data fetching" in lowered
+    assert "human-readable benchmark-relative report rendering now exists" in lowered
+    assert "benchmark data" in lowered and "fetch" in lowered
     assert "historical" in lowered and "backtest evidence" in lowered
+    assert "paper-day market-data evidence is not portfolio nav" in lowered
+    assert "valid strategy nav series" in lowered
+    assert "krw-unhedged s&p 500" in lowered
     # AllocationRegime exists but is orphaned (not a brand-new concept).
     assert "AllocationRegime" in doc_text
     assert "orphaned" in lowered

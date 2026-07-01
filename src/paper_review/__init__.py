@@ -3,6 +3,8 @@
 from paper_review.models import (
     AllocatorToleranceReview,
     AssetBandReview,
+    BenchmarkRelativeMetrics,
+    BenchmarkReturnPoint,
     ExecutionReviewMetrics,
     MddThresholdReview,
     PaperPerformanceMetrics,
@@ -15,12 +17,18 @@ from paper_review.models import (
     ReviewPeriod,
     SampleSufficiency,
 )
-from paper_review.report import build_paper_review_report, render_paper_review_markdown
+from paper_review.report import (
+    build_paper_review_report,
+    render_benchmark_relative_metrics_markdown,
+    render_paper_review_markdown,
+)
 from paper_review.store import PaperReviewReportStore
 
 __all__ = [
     "AllocatorToleranceReview",
     "AssetBandReview",
+    "BenchmarkRelativeMetrics",
+    "BenchmarkReturnPoint",
     "ExecutionReviewMetrics",
     "MddThresholdReview",
     "PaperPerformanceMetrics",
@@ -34,5 +42,6 @@ __all__ = [
     "ReviewPeriod",
     "SampleSufficiency",
     "build_paper_review_report",
+    "render_benchmark_relative_metrics_markdown",
     "render_paper_review_markdown",
 ]

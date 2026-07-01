@@ -6,7 +6,12 @@ from paper_review.metrics import (
     compute_paper_performance_metrics,
     count_emergency_triggers,
 )
-from paper_review.models import PaperReviewInput, PaperReviewReport, ParameterRecommendation
+from paper_review.models import (
+    BenchmarkRelativeMetrics,
+    PaperReviewInput,
+    PaperReviewReport,
+    ParameterRecommendation,
+)
 from paper_review.parameter_review import (
     review_allocator_tolerance,
     review_asset_bands,
@@ -103,6 +108,76 @@ def _merge_recommendations(
         merged.extend(group)
     merged.sort(key=lambda item: item.recommendation_id)
     return tuple(merged)
+
+
+def render_benchmark_relative_metrics_markdown(
+    metrics: BenchmarkRelativeMetrics,
+    *,
+    title: str = "Benchmark-relative performance",
+    benchmark_name: str = "S&P 500 total return (KRW-unhedged)",
+) -> str:
+    """BenchmarkRelativeMetrics를 deterministic human-readable markdown으로 렌더링한다."""
+    lines: list[str] = [
+        f"# {title}",
+        "",
+        f"- Benchmark: {benchmark_name}",
+        "",
+        "## Observation counts",
+        "",
+        f"- Aligned observations: {metrics.aligned_observation_count}",
+        f"- Return observations: {metrics.return_observation_count}",
+        f"- Benchmark observations supplied: {metrics.benchmark_observation_count}",
+        "",
+        "## Core return metrics",
+        "",
+        f"- Bot total return (%): {_format_optional_decimal(metrics.bot_total_return_percent)}",
+        f"- Benchmark total return (%): {_format_optional_decimal(metrics.benchmark_total_return_percent)}",
+        f"- Excess return (%): {_format_optional_decimal(metrics.excess_return_percent)}",
+        "",
+        "## Relative risk metrics",
+        "",
+        f"- Relative drawdown (%): {_format_optional_decimal(metrics.relative_drawdown_percent)}",
+        f"- Tracking error (%): {_format_optional_decimal(metrics.tracking_error_daily_percent)}",
+        f"- Information ratio annualized: {_format_optional_decimal(metrics.information_ratio_annualized)}",
+        f"- Beta to benchmark: {_format_optional_decimal(metrics.beta_to_benchmark)}",
+        "",
+        "## Capture metrics",
+        "",
+        f"- Up-capture (%): {_format_optional_decimal(metrics.up_capture_percent)}",
+        f"- Down-capture (%): {_format_optional_decimal(metrics.down_capture_percent)}",
+        "",
+        "## Warnings",
+        "",
+    ]
+
+    if metrics.warnings:
+        for warning in metrics.warnings:
+            lines.append(f"- {warning}")
+    else:
+        lines.append("- None")
+
+    lines.extend(
+        [
+            "",
+            "## Interpretation notes",
+            "",
+            "- Positive excess return means the bot outperformed the benchmark over the aligned window.",
+            "- Negative relative drawdown means the bot underperformed from a prior relative peak.",
+            "- Down-capture above 100 means the bot lost more than the benchmark in benchmark-down periods.",
+            "- Metrics are only as meaningful as the supplied NAV and benchmark series.",
+            "- This report is not a historical backtest by itself.",
+            "- Paper-Day market-data evidence is not portfolio NAV and is not valid input for this report.",
+            "- Real investment-performance numbers require a valid strategy NAV series plus a KRW-unhedged S&P 500 total-return benchmark series.",
+        ]
+    )
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_optional_decimal(value: object | None) -> str:
+    if value is None:
+        return "None"
+    return str(value)
 
 
 def render_paper_review_markdown(report: PaperReviewReport) -> str:
