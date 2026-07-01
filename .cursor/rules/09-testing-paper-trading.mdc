@@ -137,3 +137,17 @@ Add golden fixtures for:
 - paper NAV snapshot after fill
 - paper MDD calculation across ISA + regular account roles
 - KIS API key/account replacement recorded as Debug event
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+Paper trading validates operation and forward behavior; it is **not** proof that
+the strategy beats the S&P 500 total return over a decade. A future direction is:
+freeze the strategy before a paper run; treat paper as forward validation of a
+strategy already supported by a historical, multi-regime, out-of-sample backtest;
+version and re-backtest any paper-driven tuning; and require benchmark-relative
+replay/backtest evidence before claiming an S&P edge. Do not build the backtest
+harness or benchmark-relative tests now; the test priorities and determinism
+rules above remain authoritative.

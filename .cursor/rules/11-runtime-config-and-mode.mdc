@@ -95,3 +95,15 @@ cash_buffer_account_env = "KIS_CMA_ACCOUNT"
 Do not hardcode KIS app keys, app secrets, account numbers, or access tokens.
 
 KIS mock/virtual adapters are not part of the MVP default path. Do not reintroduce them without an explicit later phase.
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+Config may later carry benchmark-objective settings (for example benchmark
+selection or benchmark-relative reporting). If added, they must stay **strictly
+separate** from the live-trading gates: a benchmark objective must never lower or
+substitute for `mode = "live"`, `allow_live_trading = true`, environment
+confirmation, credentials, or the startup safety check. Do not add any such
+config now; the live-mode gates and fail-closed rules above remain authoritative.

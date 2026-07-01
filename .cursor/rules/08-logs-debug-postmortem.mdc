@@ -93,3 +93,17 @@ Evaluate:
 5. reasoning/action consistency
 6. Python rule violation or rejection
 7. whether the original thesis remained valid
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+Postmortems already list "benchmark-relative result" as an evaluation criterion,
+but no benchmark-relative metric is computed yet. A future direction is to report
+weekly/monthly performance **relative to S&P 500 total return** (excess return,
+tracking error, information ratio, up/down capture) rather than absolute NAV
+change alone. Any strategy-parameter change should then carry a hypothesis, a
+version bump, and a backtest rerun, and paper track records should be
+invalidated/segmented across such changes. Do not implement these metrics now;
+the current DailySummary / Debug / Postmortem rules above remain authoritative.

@@ -1,5 +1,13 @@
 # Technical Debt / P2·P3 Backlog
 
+## Strategic Direction Cross-Reference
+
+For the project's long-term investment objective — beating S&P 500 total return
+over ~10 years, and the benchmark-relative allocator / metrics / backtest
+direction that objective implies — see `docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+That document is planning / future direction only; it does not change the
+operational backlog below or any runtime safety posture.
+
 ## Reference — RTM-7c.4x Recovery-Uncertainty Closure
 
 - RTM-7c.4x file-lane recovery-uncertainty closure is an offline API-only hardening pass for

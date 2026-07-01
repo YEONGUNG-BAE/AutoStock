@@ -191,3 +191,18 @@ Python counts gold trades; the LLM must not calculate trade counts.
 
 Analysis instances receive Allocator targets with ±5%p allowance unless config changes it.
 Gold is controlled by Allocator/gold policy rather than free stock-analysis drift.
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+The long-term objective is to beat S&P 500 total return over ~10 years, not to
+hold a permanently defensive balanced mix. A future Allocator v2 (not built here)
+would treat an S&P 500 / US-equity core as the default exposure and make cash and
+gold **evidence-gated deviations** from that core rather than structural defaults.
+The existing `AllocationRegime` enum (currently orphaned — not a field on
+`AllocatorDecision`) would be connected in that v2. Do **not** implement this now,
+do **not** change the current cash 10–30 / gold 18–22 bands, and do **not** add
+performance or benchmark fields to `allocator_decision.v1`. This is future
+direction only; the current Allocator rules above remain authoritative.

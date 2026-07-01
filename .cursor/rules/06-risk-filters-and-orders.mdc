@@ -161,3 +161,18 @@ Do not add a hard confidence threshold unless the user explicitly reintroduces i
 The planning document keeps 70% invested as the production target. During early paper trading, the bot's natural risk appetite may be observed with a lower floor, configured as `paper_observation_invested_min_percent` (default 50).
 
 This relaxation is paper-only and must not silently apply to live trading.
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+The long-term objective (beat S&P 500 total return over ~10 years) may later
+justify relaxing **investment defensiveness** — for example a higher default
+equity exposure or faster re-entry. It never justifies relaxing **operational
+safety**. All hard filters, live-mode gates, order-availability checks, and the
+MDD killswitch remain operational safety and are **not** to be weakened to chase
+benchmark performance. A future direction is to add benchmark-relative-aware
+controls (relative drawdown, tracking error, up-market participation) alongside —
+not in place of — the absolute MDD stages. Do not implement any of this now; the
+filters and MDD ladder above remain authoritative.

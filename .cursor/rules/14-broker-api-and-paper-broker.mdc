@@ -158,3 +158,15 @@ Never commit:
 - FRED/DART/news API keys
 
 Committed config may contain only environment variable names. Use `.env`, macOS Keychain, or a password manager outside the repo.
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
+
+The internal PaperBroker ledger and NAV snapshots are the intended **basis for
+future benchmark-relative evaluation** (bot KRW net return vs S&P 500 total
+return). Tiny-live remains a capped, manual API-verification stage; it is **not**
+evidence of alpha and does not prove S&P outperformance. Do not add benchmark or
+performance fields to the ledger now, and do not change the paper/live staging;
+the PaperBroker and KIS staging rules above remain authoritative.
