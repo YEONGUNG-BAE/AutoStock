@@ -8,7 +8,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from decision.canonical_json import canonicalize_payload, payload_sha256
-from domain._datetime import require_timezone_aware_datetime
+from domain._datetime import parse_timezone_aware_datetime, require_timezone_aware_datetime
 from domain._decimal import to_decimal, to_optional_decimal
 from domain._strings import normalize_required_string
 from domain.order import Fill, OrderIntent
@@ -265,6 +265,114 @@ class PaperPerformanceMetrics(BaseModel):
     def validate_drawdown(self) -> Self:
         if self.max_drawdown_percent > Decimal("0"):
             raise ValueError("max_drawdown_percent must be <= 0.")
+        return self
+
+
+class BenchmarkReturnPoint(BaseModel):
+    """외부에서 공급된 benchmark total-return index 관측치."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    total_return_index_value: Decimal
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def validate_as_of(cls, value: Any) -> datetime:
+        return parse_timezone_aware_datetime(value, field_name="as_of")
+
+    @field_validator("total_return_index_value", mode="before")
+    @classmethod
+    def validate_total_return_index_value(cls, value: Any) -> Decimal:
+        return to_decimal(value, field_name="total_return_index_value")
+
+    @model_validator(mode="after")
+    def validate_positive_index_value(self) -> Self:
+        if self.total_return_index_value <= Decimal("0"):
+            raise ValueError("total_return_index_value must be greater than 0.")
+        return self
+
+
+class BenchmarkRelativeMetrics(BaseModel):
+    """NAV와 benchmark total-return series를 맞춘 benchmark-relative 성과 지표."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    bot_total_return_percent: Decimal
+    benchmark_total_return_percent: Decimal
+    excess_return_percent: Decimal
+    relative_drawdown_percent: Decimal | None
+    tracking_error_daily_percent: Decimal | None
+    information_ratio_annualized: Decimal | None
+    up_capture_percent: Decimal | None
+    down_capture_percent: Decimal | None
+    beta_to_benchmark: Decimal | None
+    aligned_observation_count: int
+    return_observation_count: int
+    benchmark_observation_count: int
+    warnings: tuple[str, ...]
+
+    @field_validator(
+        "bot_total_return_percent",
+        "benchmark_total_return_percent",
+        "excess_return_percent",
+        mode="before",
+    )
+    @classmethod
+    def validate_required_decimals(cls, value: Any) -> Decimal:
+        return to_decimal(value, field_name="benchmark_relative_decimal")
+
+    @field_validator(
+        "relative_drawdown_percent",
+        "tracking_error_daily_percent",
+        "information_ratio_annualized",
+        "up_capture_percent",
+        "down_capture_percent",
+        "beta_to_benchmark",
+        mode="before",
+    )
+    @classmethod
+    def validate_optional_decimals(cls, value: Any) -> Decimal | None:
+        return to_optional_decimal(value, field_name="optional_benchmark_relative_decimal")
+
+    @field_validator(
+        "aligned_observation_count",
+        "return_observation_count",
+        "benchmark_observation_count",
+        mode="after",
+    )
+    @classmethod
+    def validate_non_negative_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be >= 0.")
+        return value
+
+    @field_validator("warnings", mode="before")
+    @classmethod
+    def validate_warnings(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("warnings must be a sequence of strings.")
+        return tuple(str(item) for item in value)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> Self:
+        expected_return_count = (
+            self.aligned_observation_count - 1
+            if self.aligned_observation_count >= 2
+            else 0
+        )
+        if self.return_observation_count != expected_return_count:
+            raise ValueError(
+                "return_observation_count must equal aligned_observation_count - 1 "
+                "when at least two aligned observations exist."
+            )
+        if (
+            self.relative_drawdown_percent is not None
+            and self.relative_drawdown_percent > Decimal("0")
+        ):
+            raise ValueError("relative_drawdown_percent must be <= 0.")
         return self
 
 

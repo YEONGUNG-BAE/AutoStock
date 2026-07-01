@@ -95,10 +95,14 @@ this as "no evaluation exists"):
 
 - **Absolute NAV metrics already exist** in `src/paper_review/metrics.py` (total
   return, annualized return, max drawdown, worst/best daily, daily volatility,
-  average cash/invested, NAV snapshot count). What is **missing is any
-  benchmark-relative metric** — there is no excess return, tracking error,
-  information ratio, up/down capture, beta, or relative drawdown versus the
-  S&P 500 anywhere in the code.
+  average cash/invested, NAV snapshot count).
+- **Benchmark-relative calculation models/functions now exist** in
+  `src/paper_review/models.py` and `src/paper_review/metrics.py` for an
+  externally supplied total-return benchmark series: bot/benchmark return,
+  excess return, relative drawdown, tracking error, information ratio,
+  up/down capture, beta, and alignment counts/warnings. This is calculation
+  support only; benchmark data fetching, postmortem integration, and historical
+  backtest evidence are still not implemented.
 - The **allocator is structurally biased toward persistent cash and gold and low
   equity beta** (`src/allocator/rules.py`: cash 10–30, gold 18–22 / 15–25 hard
   bands). That is a defensive posture, not a benchmark-tracking-with-active-
@@ -112,8 +116,10 @@ this as "no evaluation exists"):
   the strategy beats the S&P 500 over a decade.
 
 The mismatch, therefore: the system can measure *absolute* paper performance and
-operate safely, but it **cannot yet answer the only question that matters for
-this objective — did it beat the S&P 500 total return, net of costs?**
+can calculate benchmark-relative paper metrics when supplied an aligned
+benchmark series, but it **cannot yet answer the end-to-end question that matters
+for this objective — did it beat the S&P 500 total return, net of costs over a
+credible historical and forward evaluation?**
 
 ## 6. Correct target direction
 
@@ -135,11 +141,13 @@ The intended (future) design direction:
   their place** through benchmark-relative evidence rather than being structural
   defaults.
 
-## 7. Required future metrics
+## 7. Benchmark-relative metrics and remaining future metrics
 
-To evaluate the objective, the following **benchmark-relative** metrics must be
-added in a future phase. **None of these exist today, and this section does not
-implement them.**
+To evaluate the objective, the following **benchmark-relative** metrics are
+required. Phase 1 adds deterministic `paper_review` calculation support for the
+core return/risk metrics when an external benchmark series is supplied; this
+section still does not implement data fetching, backtesting, runtime behavior,
+or allocator changes.
 
 - bot net return (after commissions, taxes, slippage, FX)
 - S&P 500 total return over the same window (KRW-unhedged primary)
@@ -162,8 +170,8 @@ implement them.**
 The objective must be evaluated in this order; each step gates the next. This is
 a future plan, not a current workflow:
 
-1. **Implement benchmark-relative metrics** (Section 7) on the existing paper
-   ledger / NAV history.
+1. **Integrate benchmark-relative metrics** (Section 7) with supplied benchmark
+   series on the existing paper ledger / NAV history.
 2. **Build a historical backtest harness** that can replay the strategy across
    multiple market regimes out-of-sample.
 3. **Evaluate the current strategy (v1)** against the S&P 500 TR using those

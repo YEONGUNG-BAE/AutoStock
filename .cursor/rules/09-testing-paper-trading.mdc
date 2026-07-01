@@ -149,5 +149,6 @@ freeze the strategy before a paper run; treat paper as forward validation of a
 strategy already supported by a historical, multi-regime, out-of-sample backtest;
 version and re-backtest any paper-driven tuning; and require benchmark-relative
 replay/backtest evidence before claiming an S&P edge. Do not build the backtest
-harness or benchmark-relative tests now; the test priorities and determinism
-rules above remain authoritative.
+harness now; focused `paper_review` benchmark-relative calculation tests may
+exist, but replay/backtest evidence remains future work. The test priorities and
+determinism rules above remain authoritative.

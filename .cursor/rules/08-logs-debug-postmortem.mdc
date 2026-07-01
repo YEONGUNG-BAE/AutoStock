@@ -99,11 +99,14 @@ Evaluate:
 Planning note, not an active requirement. See
 `docs/INVESTMENT_OBJECTIVE_BENCHMARK.md`.
 
-Postmortems already list "benchmark-relative result" as an evaluation criterion,
-but no benchmark-relative metric is computed yet. A future direction is to report
-weekly/monthly performance **relative to S&P 500 total return** (excess return,
-tracking error, information ratio, up/down capture) rather than absolute NAV
-change alone. Any strategy-parameter change should then carry a hypothesis, a
-version bump, and a backtest rerun, and paper track records should be
-invalidated/segmented across such changes. Do not implement these metrics now;
-the current DailySummary / Debug / Postmortem rules above remain authoritative.
+Postmortems already list "benchmark-relative result" as an evaluation criterion.
+`paper_review` now has deterministic benchmark-relative calculation
+models/functions for externally supplied benchmark series, but postmortem
+reporting integration and benchmark data sourcing are still future work. A
+future direction is to report weekly/monthly performance **relative to S&P 500
+total return** (excess return, tracking error, information ratio, up/down
+capture) rather than absolute NAV change alone. Any strategy-parameter change
+should then carry a hypothesis, a version bump, and a backtest rerun, and paper
+track records should be invalidated/segmented across such changes. Do not build
+the backtest harness or runtime/postmortem integration now; the current
+DailySummary / Debug / Postmortem rules above remain authoritative.

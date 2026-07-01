@@ -5,9 +5,10 @@ objective (beat S&P 500 total return over ~10 years) and the design direction it
 implies. These guards lock its load-bearing *concepts* so a future edit cannot
 silently drop them: the primary objective, the strict separation of operational
 safety from investment defensiveness, the primary/diagnostic benchmark set, the
-current design mismatch (absolute metrics exist, benchmark-relative missing;
-`AllocationRegime` orphaned), the required future metrics / evaluation order /
-Allocator v2 direction, and the failure/success criteria. They also verify the
+current design mismatch (absolute metrics exist, benchmark-relative calculation
+exists but benchmark sourcing/backtest evidence remain missing; `AllocationRegime`
+orphaned), the required future metrics / evaluation order / Allocator v2
+direction, and the failure/success criteria. They also verify the
 README note+link, the exact Future Direction section in the relevant Cursor
 rules, and the TECH_DEBT forward pointer.
 
@@ -113,14 +114,17 @@ def test_secondary_diagnostic_benchmarks_present(doc_text: str) -> None:
     assert "neutral baseline" in lowered
 
 
-def test_current_design_mismatch_absolute_exists_relative_missing(doc_text: str) -> None:
+def test_current_design_mismatch_absolute_and_relative_calculation_status(doc_text: str) -> None:
     lowered = doc_text.lower()
-    # Do NOT overstate as "no evaluation exists": absolute exists, relative missing.
+    # Do NOT overstate as "no evaluation exists": absolute and relative calculations exist.
     assert "absolute" in lowered
     assert "already exist" in lowered
     assert "benchmark-relative" in lowered
-    assert "missing" in lowered
     assert "src/paper_review/metrics.py" in doc_text
+    assert "src/paper_review/models.py" in doc_text
+    assert "calculation models/functions now exist" in lowered
+    assert "benchmark data fetching" in lowered
+    assert "historical" in lowered and "backtest evidence" in lowered
     # AllocationRegime exists but is orphaned (not a brand-new concept).
     assert "AllocationRegime" in doc_text
     assert "orphaned" in lowered
