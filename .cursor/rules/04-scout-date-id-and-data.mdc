@@ -99,3 +99,13 @@ Separate broker APIs from analysis-data APIs.
 MVP priority: KIS read-only where needed, FRED, DART/OpenDART, yfinance. News APIs should be added only after Date-ID and JSON validation are stable.
 
 Do not rely on KIS as the only analysis source. KIS is the broker API, not the full research data pipeline.
+
+## Future Direction — NOT ACTIVE IMPLEMENTATION REQUIREMENT
+
+Planning note, not an active requirement. See
+`docs/BACKTEST_DESIGN_FREEZE.md`.
+
+For a later backtest conversion task, preserve historical availability by
+mapping CSV `as_of` to `DateIdSourceRecord.source_timestamp`; do not restamp with
+load, ingest, or current time. Current v1 schema/runtime and Scout behavior must
+not change until a later task explicitly asks for implementation.

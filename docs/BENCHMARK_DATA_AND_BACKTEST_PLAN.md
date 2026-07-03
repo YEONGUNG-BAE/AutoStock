@@ -7,6 +7,10 @@
 > data-source, conversion, alignment, annualization, and bias-control decisions
 > that a future explicit implementation phase must follow.
 
+Forward pointer: `docs/BACKTEST_DESIGN_FREEZE.md` freezes the later Phase 2b
+evaluation design for evidence tiers, as-of invariants, timing, costs, baselines,
+and LLM replay. It is also planning / future-direction only.
+
 ## 1. Purpose and Non-Goals
 
 The historical backtest must be designed around data correctness before any
