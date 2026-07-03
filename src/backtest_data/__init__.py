@@ -23,11 +23,19 @@ from backtest_data.models import (
     BacktestBenchmarkLoadResult,
     BacktestInstrumentBar,
 )
+from backtest_data.source_records import (
+    BACKTEST_INSTRUMENT_PRICE_SCHEMA,
+    InMemoryDateIdSourceReader,
+    instrument_bars_to_source_records,
+)
 
 __all__ = [
     "AsOfFilteredSourceView",
     "BacktestBenchmarkLoadResult",
     "BacktestInstrumentBar",
+    "BACKTEST_INSTRUMENT_PRICE_SCHEMA",
+    "InMemoryDateIdSourceReader",
+    "instrument_bars_to_source_records",
     "load_benchmark_krw_unhedged",
     "load_instrument_bars",
 ]
