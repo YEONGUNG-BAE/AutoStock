@@ -678,3 +678,24 @@ Rules:
 - no allocator execution is performed
 - no loop over dates is implemented
 - no execution, NAV, or benchmark-relative metrics are produced
+
+### Phase 2c-2a Count-Based MA Observation Spacing Guard
+
+Phase 2c-2 rolling MA is count-based. A count-based MA only has the intended
+monthly meaning when input observations are uniformly monthly, so Phase 2c-2a
+adds a fail-fast spacing precondition guard.
+
+Rules:
+
+- validate the latest `lookback_count` visible observations for one
+  `decision_time`
+- monthly period key comes from payload `date` as `YYYY-MM`
+- duplicate monthly periods fail
+- skipped monthly periods fail
+- insufficient visible history fails
+- no forward-fill and no interpolation
+- no time-window MA is implemented yet
+- no loop over dates is implemented
+- no execution, NAV, or benchmark-relative metrics are produced
+- a future time-window MA may be added later as a separate explicit phase if
+  needed

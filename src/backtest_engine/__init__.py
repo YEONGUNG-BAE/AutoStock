@@ -1,13 +1,18 @@
 """Pure offline backtest engine building blocks.
 
 The package contains a deterministic LLM-free rules-only allocator, a
-single-step backtest contract, an as-of-safe snapshot builder, and as-of-safe
-rolling feature helpers. It does not wire ScoutInputBuilder, implement a
-walk-forward loop, produce NAV, or compute benchmark-relative performance.
+single-step backtest contract, an as-of-safe snapshot builder, as-of-safe
+rolling feature helpers, and count-based observation spacing guards. It does
+not wire ScoutInputBuilder, implement a walk-forward loop, produce NAV, or
+compute benchmark-relative performance.
 """
 
 from __future__ import annotations
 
+from backtest_engine.observation_spacing import (
+    ObservationSpacingReport,
+    validate_uniform_observation_spacing_for_count_based_ma,
+)
 from backtest_engine.rolling_features import (
     RollingLongMaAssetConfig,
     build_snapshot_configs_with_rolling_long_ma,
@@ -32,9 +37,11 @@ __all__ = [
     "BacktestFeatureSnapshot",
     "BacktestTargetWeight",
     "BacktestTargetWeights",
+    "ObservationSpacingReport",
     "RollingLongMaAssetConfig",
     "SnapshotAssetConfig",
     "allocate_rules_only_v1",
     "build_feature_snapshot_from_source_records",
     "build_snapshot_configs_with_rolling_long_ma",
+    "validate_uniform_observation_spacing_for_count_based_ma",
 ]
