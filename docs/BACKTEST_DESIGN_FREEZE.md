@@ -656,3 +656,25 @@ Rules:
 - no loop over dates is implemented
 - no execution, NAV, or benchmark-relative metrics are produced
 - output is suitable for `rules_allocator.v1`
+
+### Phase 2c-2 Rolling Feature Contract
+
+The Phase 2c-2 rolling feature builder computes `long_ma` from source records
+for one `decision_time` and returns `SnapshotAssetConfig` objects suitable for
+the Phase 2c-1 snapshot builder.
+
+Rules:
+
+- use the Phase 2a `AsOfFilteredSourceView`
+- use only records with `source_timestamp <= decision_time`
+- read only `FactType.PRICE`
+- compute a simple observation-count moving average from the latest visible
+  `lookback_count` observations
+- no full-sample fitting, normalization, scaling, clustering, percentiles, or
+  factor fitting
+- no forward-fill and no interpolation
+- insufficient visible history raises `ValueError`
+- no single-step decision artifact is produced
+- no allocator execution is performed
+- no loop over dates is implemented
+- no execution, NAV, or benchmark-relative metrics are produced
