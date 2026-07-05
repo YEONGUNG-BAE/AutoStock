@@ -636,3 +636,23 @@ Default synthetic fixture parameters for tests only:
 This baseline is not investment advice and is not an allocation recommendation.
 No backtest results have been seen for this frozen rule. Any change requires a
 version bump, written hypothesis, and rerun record.
+
+### Phase 2c-1 Snapshot Builder Contract
+
+The Phase 2c-1 snapshot builder consumes already-converted source records or a
+read-only source reader, wraps them with the Phase 2a `AsOfFilteredSourceView`,
+and builds exactly one `BacktestFeatureSnapshot` for one `decision_time`.
+
+Rules:
+
+- only records with `source_timestamp <= decision_time` are visible
+- the builder reads only `FactType.PRICE`
+- tests convert the whole synthetic input slice once before as-of slicing
+- missing visible data raises `ValueError` instead of forward-filling
+- malformed payloads, wrong schema names, and symbol/market mismatches fail
+  fast
+- `long_ma` comes from asset config and is not computed here
+- rolling feature calculation belongs to a later phase
+- no loop over dates is implemented
+- no execution, NAV, or benchmark-relative metrics are produced
+- output is suitable for `rules_allocator.v1`
