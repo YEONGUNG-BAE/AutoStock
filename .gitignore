@@ -38,4 +38,5 @@ memory/
 /runtime/
 
 # Local tool state (Claude Code session locks, scheduled-task state, etc.)
-/.claude/
+/.claude/get_data.py
+*_monthly.csv
