@@ -609,3 +609,30 @@ task explicitly asks for implementation. Alternative: treat this document as
 permission to begin engine, masking, schema, runtime, or data-fetch work.
 Reason: the alternative would violate the phase boundary and blur design with
 implementation.
+
+### Frozen Rules-Only Baseline v1
+
+Version id: `rules_allocator.v1`.
+
+Algorithm:
+
+- for each generic non-cash asset row, if `current_price >= long_ma`, use
+  `risk_on_weight`
+- otherwise use `risk_off_weight`
+- clamp that preliminary weight to `[min_weight, max_weight]`
+- assign the residual `1 - sum(non_cash_bounded_weights)` to cash
+- reject the input if the residual cash weight is below `cash_min_weight`
+
+Default synthetic fixture parameters for tests only:
+
+- `asset_A`: `risk_on_weight = 0.70`, `risk_off_weight = 0.35`,
+  `min_weight = 0`, `max_weight = 0.80`
+- `asset_B`: `risk_on_weight = 0.15`, `risk_off_weight = 0.05`,
+  `min_weight = 0`, `max_weight = 0.25`
+- `asset_C`: `risk_on_weight = 0.10`, `risk_off_weight = 0.10`,
+  `min_weight = 0`, `max_weight = 0.20`
+- cash: `cash_min_weight = 0.05`
+
+This baseline is not investment advice and is not an allocation recommendation.
+No backtest results have been seen for this frozen rule. Any change requires a
+version bump, written hypothesis, and rerun record.
