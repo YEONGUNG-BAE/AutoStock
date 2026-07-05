@@ -2,9 +2,10 @@
 
 The package contains a deterministic LLM-free rules-only allocator, a
 single-step backtest contract, an as-of-safe snapshot builder, as-of-safe
-rolling feature helpers, and count-based observation spacing guards. It does
-not wire ScoutInputBuilder, implement a walk-forward loop, produce NAV, or
-compute benchmark-relative performance.
+rolling feature helpers, count-based observation spacing guards, and a
+single-step rules decision composer. It does not wire ScoutInputBuilder,
+implement a walk-forward loop, produce NAV, or compute benchmark-relative
+performance.
 """
 
 from __future__ import annotations
@@ -22,6 +23,10 @@ from backtest_engine.snapshot_builder import (
     SnapshotAssetConfig,
     build_feature_snapshot_from_source_records,
 )
+from backtest_engine.single_step import (
+    BacktestSingleStepDecision,
+    build_single_step_rules_decision,
+)
 from backtest_engine.step_contract import (
     DECIMAL_WEIGHT_TOLERANCE,
     BacktestAssetFeature,
@@ -35,6 +40,7 @@ __all__ = [
     "RULES_ALLOCATOR_V1",
     "BacktestAssetFeature",
     "BacktestFeatureSnapshot",
+    "BacktestSingleStepDecision",
     "BacktestTargetWeight",
     "BacktestTargetWeights",
     "ObservationSpacingReport",
@@ -42,6 +48,7 @@ __all__ = [
     "SnapshotAssetConfig",
     "allocate_rules_only_v1",
     "build_feature_snapshot_from_source_records",
+    "build_single_step_rules_decision",
     "build_snapshot_configs_with_rolling_long_ma",
     "validate_uniform_observation_spacing_for_count_based_ma",
 ]

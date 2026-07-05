@@ -699,3 +699,20 @@ Rules:
 - no execution, NAV, or benchmark-relative metrics are produced
 - a future time-window MA may be added later as a separate explicit phase if
   needed
+
+### Phase 2c-3 Single-Step Rules Decision Contract
+
+Phase 2c-3 composes the already-frozen single-step pieces for exactly one
+`decision_time` and records one later `intended_execution_time`.
+
+Rules:
+
+- validate count-based monthly observation spacing before rolling MA
+- build rolling `SnapshotAssetConfig` values for the same `decision_time`
+- build one as-of-safe `BacktestFeatureSnapshot`
+- allocate with `rules_allocator.v1`
+- return one immutable `BacktestSingleStepDecision`
+- require `decision_time < intended_execution_time`
+- no loop over multiple decision dates is implemented
+- no execution price, fills, costs, slippage, FX spread, tax, holdings state,
+  cash ledger, NAV, or benchmark-relative metrics are produced
