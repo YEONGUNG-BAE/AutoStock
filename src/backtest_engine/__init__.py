@@ -10,6 +10,12 @@ performance.
 
 from __future__ import annotations
 
+from backtest_engine.execution_prices import (
+    EXECUTION_PRICE_POLICY_V1,
+    BacktestExecutionPrice,
+    BacktestExecutionPriceSlice,
+    select_execution_prices_for_single_step_decision,
+)
 from backtest_engine.observation_spacing import (
     ObservationSpacingReport,
     validate_uniform_observation_spacing_for_count_based_ma,
@@ -38,8 +44,11 @@ from backtest_engine.step_contract import (
 
 __all__ = [
     "DECIMAL_WEIGHT_TOLERANCE",
+    "EXECUTION_PRICE_POLICY_V1",
     "RULES_ALLOCATOR_V1",
     "BacktestAssetFeature",
+    "BacktestExecutionPrice",
+    "BacktestExecutionPriceSlice",
     "BacktestFeatureSnapshot",
     "BacktestSingleStepDecision",
     "BacktestTargetWeight",
@@ -52,5 +61,6 @@ __all__ = [
     "build_single_step_rules_decision",
     "build_snapshot_configs_with_rolling_long_ma",
     "make_rules_only_single_step_decision",
+    "select_execution_prices_for_single_step_decision",
     "validate_uniform_observation_spacing_for_count_based_ma",
 ]

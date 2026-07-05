@@ -720,3 +720,32 @@ Rules:
 - no loop over multiple decision dates is implemented
 - no execution price, fills, costs, slippage, FX spread, tax, holdings state,
   cash ledger, NAV, or benchmark-relative metrics are produced
+
+### Phase 2c-4 Execution Price Selection Contract
+
+Phase 2c-4 selects executable prices for one already-built
+`BacktestSingleStepDecision`. For each non-cash asset it selects the first
+valid price record whose `source_timestamp` is at or after
+`intended_execution_time`.
+
+Rules:
+
+- input is one `BacktestSingleStepDecision` plus read-only source records
+- output is one immutable `BacktestExecutionPriceSlice`
+- the public API is `select_execution_prices_for_single_step_decision`
+- the policy string is
+  `first_visible_price_at_or_after_intended_execution_time.v1`
+- select the first valid price at or after `intended_execution_time`
+- relies on Phase 2c-3 enforcing `decision_time < intended_execution_time`, so
+  same-decision-time prices can never be used as execution prices
+- selects prices for non-cash assets only; cash has no execution price
+- preserves asset order from `decision.snapshot_asset_configs`
+- ties at the same earliest `source_timestamp` break deterministically by max
+  `(date_id.value, source_name)`
+- a missing future executable price raises `ValueError`
+- does not use `AsOfFilteredSourceView`; this selector looks forward from the
+  intended execution timestamp
+- does not execute trades, produce fills, compute quantities, compute costs,
+  maintain holdings or a cash ledger, produce NAV, or compute
+  benchmark-relative metrics
+- does not fetch or use real data
