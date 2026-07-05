@@ -711,7 +711,11 @@ Rules:
 - build rolling `SnapshotAssetConfig` values for the same `decision_time`
 - build one as-of-safe `BacktestFeatureSnapshot`
 - allocate with `rules_allocator.v1`
-- return one immutable `BacktestSingleStepDecision`
+- official builder API is `make_rules_only_single_step_decision`
+- return one immutable `BacktestSingleStepDecision` with top-level
+  `allocator_version`
+- require top-level `allocator_version` to match nested target weights and be
+  `rules_allocator.v1`
 - require `decision_time < intended_execution_time`
 - no loop over multiple decision dates is implemented
 - no execution price, fills, costs, slippage, FX spread, tax, holdings state,

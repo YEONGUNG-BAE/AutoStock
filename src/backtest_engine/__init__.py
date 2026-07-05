@@ -26,6 +26,7 @@ from backtest_engine.snapshot_builder import (
 from backtest_engine.single_step import (
     BacktestSingleStepDecision,
     build_single_step_rules_decision,
+    make_rules_only_single_step_decision,
 )
 from backtest_engine.step_contract import (
     DECIMAL_WEIGHT_TOLERANCE,
@@ -50,5 +51,6 @@ __all__ = [
     "build_feature_snapshot_from_source_records",
     "build_single_step_rules_decision",
     "build_snapshot_configs_with_rolling_long_ma",
+    "make_rules_only_single_step_decision",
     "validate_uniform_observation_spacing_for_count_based_ma",
 ]

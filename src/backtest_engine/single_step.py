@@ -28,7 +28,11 @@ from backtest_engine.snapshot_builder import (
     SnapshotAssetConfig,
     build_feature_snapshot_from_source_records,
 )
-from backtest_engine.step_contract import BacktestFeatureSnapshot, BacktestTargetWeights
+from backtest_engine.step_contract import (
+    RULES_ALLOCATOR_V1,
+    BacktestFeatureSnapshot,
+    BacktestTargetWeights,
+)
 from domain.source import DateIdSourceRecord
 
 
@@ -39,6 +43,7 @@ class BacktestSingleStepDecision(BaseModel):
 
     decision_time: datetime
     intended_execution_time: datetime
+    allocator_version: str
     observation_spacing_reports: tuple[ObservationSpacingReport, ...]
     snapshot_asset_configs: tuple[SnapshotAssetConfig, ...]
     feature_snapshot: BacktestFeatureSnapshot
@@ -48,6 +53,16 @@ class BacktestSingleStepDecision(BaseModel):
     @classmethod
     def validate_timestamps(cls, value: Any, info) -> datetime:
         return _parse_timezone_aware_datetime(value, field_name=info.field_name)
+
+    @field_validator("allocator_version", mode="before")
+    @classmethod
+    def validate_allocator_version(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("allocator_version must be a string.")
+        normalized = value.strip()
+        if normalized != RULES_ALLOCATOR_V1:
+            raise ValueError(f"allocator_version must be {RULES_ALLOCATOR_V1}.")
+        return normalized
 
     @model_validator(mode="after")
     def validate_decision_artifact(self) -> Self:
@@ -62,6 +77,8 @@ class BacktestSingleStepDecision(BaseModel):
             raise ValueError("feature_snapshot.decision_time must equal decision_time.")
         if self.target_weights.decision_time != self.decision_time:
             raise ValueError("target_weights.decision_time must equal decision_time.")
+        if self.allocator_version != self.target_weights.allocator_version:
+            raise ValueError("allocator_version must equal target_weights.allocator_version.")
 
         config_asset_ids = tuple(config.asset_id for config in self.snapshot_asset_configs)
         report_asset_ids = tuple(report.asset_id for report in self.observation_spacing_reports)
@@ -77,18 +94,18 @@ class BacktestSingleStepDecision(BaseModel):
         return self
 
 
-def build_single_step_rules_decision(
+def make_rules_only_single_step_decision(
     source: InMemoryDateIdSourceReader | Iterable[DateIdSourceRecord],
     *,
     decision_time: datetime,
     intended_execution_time: datetime,
-    asset_configs: Iterable[RollingLongMaAssetConfig],
+    rolling_asset_configs: Iterable[RollingLongMaAssetConfig],
     cash_asset_id: str,
     cash_min_weight: Decimal,
 ) -> BacktestSingleStepDecision:
     """Build one deterministic rules-only decision artifact for one timestamp."""
 
-    configs = tuple(asset_configs)
+    configs = tuple(rolling_asset_configs)
     step_source: InMemoryDateIdSourceReader | tuple[DateIdSourceRecord, ...]
     if isinstance(source, InMemoryDateIdSourceReader):
         step_source = source
@@ -117,10 +134,32 @@ def build_single_step_rules_decision(
     return BacktestSingleStepDecision(
         decision_time=decision_time,
         intended_execution_time=intended_execution_time,
+        allocator_version=target_weights.allocator_version,
         observation_spacing_reports=observation_spacing_reports,
         snapshot_asset_configs=snapshot_asset_configs,
         feature_snapshot=feature_snapshot,
         target_weights=target_weights,
+    )
+
+
+def build_single_step_rules_decision(
+    source: InMemoryDateIdSourceReader | Iterable[DateIdSourceRecord],
+    *,
+    decision_time: datetime,
+    intended_execution_time: datetime,
+    asset_configs: Iterable[RollingLongMaAssetConfig],
+    cash_asset_id: str,
+    cash_min_weight: Decimal,
+) -> BacktestSingleStepDecision:
+    """Compatibility wrapper for the Phase 2c-3 public builder."""
+
+    return make_rules_only_single_step_decision(
+        source,
+        decision_time=decision_time,
+        intended_execution_time=intended_execution_time,
+        rolling_asset_configs=asset_configs,
+        cash_asset_id=cash_asset_id,
+        cash_min_weight=cash_min_weight,
     )
 
 

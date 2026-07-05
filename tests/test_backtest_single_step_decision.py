@@ -17,9 +17,11 @@ from backtest_data import (  # noqa: E402
     InMemoryDateIdSourceReader,
 )
 from backtest_engine import (  # noqa: E402
+    RULES_ALLOCATOR_V1,
     BacktestSingleStepDecision,
     RollingLongMaAssetConfig,
     build_single_step_rules_decision,
+    make_rules_only_single_step_decision,
 )
 from domain import DateId, DateIdSourceRecord, FactType  # noqa: E402
 
@@ -115,11 +117,11 @@ def _decision(
     decision_time: datetime = DECISION_TIME,
     intended_execution_time: datetime = INTENDED_EXECUTION_TIME,
 ) -> BacktestSingleStepDecision:
-    return build_single_step_rules_decision(
+    return make_rules_only_single_step_decision(
         source,
         decision_time=decision_time,
         intended_execution_time=intended_execution_time,
-        asset_configs=asset_configs,
+        rolling_asset_configs=asset_configs,
         cash_asset_id="cash",
         cash_min_weight=Decimal("0.05"),
     )
@@ -131,6 +133,8 @@ def test_builds_single_step_decision_artifact_from_records() -> None:
     assert isinstance(decision, BacktestSingleStepDecision)
     assert decision.decision_time == DECISION_TIME
     assert decision.intended_execution_time == INTENDED_EXECUTION_TIME
+    assert decision.allocator_version == RULES_ALLOCATOR_V1
+    assert decision.allocator_version == decision.target_weights.allocator_version
     assert decision.observation_spacing_reports[0].period_keys == (
         "2020-01",
         "2020-02",
@@ -142,6 +146,25 @@ def test_builds_single_step_decision_artifact_from_records() -> None:
         "asset_A": Decimal("0.70"),
         "cash": Decimal("0.30"),
     }
+
+
+def test_official_function_is_exported_from_backtest_engine() -> None:
+    assert callable(make_rules_only_single_step_decision)
+
+
+def test_compatibility_wrapper_still_builds_same_decision() -> None:
+    records = _monthly_records()
+    official = _decision(records)
+    compatibility = build_single_step_rules_decision(
+        records,
+        decision_time=DECISION_TIME,
+        intended_execution_time=INTENDED_EXECUTION_TIME,
+        asset_configs=(_config(),),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+    )
+
+    assert compatibility == official
 
 
 def test_accepts_read_only_in_memory_source_reader() -> None:
@@ -210,6 +233,7 @@ def test_decision_artifact_is_frozen_and_forbids_extra_fields() -> None:
         BacktestSingleStepDecision(
             decision_time=decision.decision_time,
             intended_execution_time=decision.intended_execution_time,
+            allocator_version=decision.allocator_version,
             observation_spacing_reports=decision.observation_spacing_reports,
             snapshot_asset_configs=decision.snapshot_asset_configs,
             feature_snapshot=decision.feature_snapshot,
@@ -228,6 +252,7 @@ def test_artifact_rejects_mismatched_nested_decision_time() -> None:
         BacktestSingleStepDecision(
             decision_time=decision.decision_time,
             intended_execution_time=decision.intended_execution_time,
+            allocator_version=decision.allocator_version,
             observation_spacing_reports=decision.observation_spacing_reports,
             snapshot_asset_configs=decision.snapshot_asset_configs,
             feature_snapshot=shifted_snapshot,
@@ -245,10 +270,44 @@ def test_artifact_rejects_target_weights_that_do_not_match_snapshot_assets() -> 
         BacktestSingleStepDecision(
             decision_time=decision.decision_time,
             intended_execution_time=decision.intended_execution_time,
+            allocator_version=decision.allocator_version,
             observation_spacing_reports=decision.observation_spacing_reports,
             snapshot_asset_configs=decision.snapshot_asset_configs,
             feature_snapshot=decision.feature_snapshot,
             target_weights=reversed_weights,
+        )
+
+
+def test_artifact_rejects_allocator_version_mismatch_with_target_weights() -> None:
+    decision = _decision(_monthly_records())
+    mismatched_target = decision.target_weights.model_copy(
+        update={"allocator_version": "other_allocator.v1"}
+    )
+
+    with pytest.raises(ValidationError, match="allocator_version must equal target_weights"):
+        BacktestSingleStepDecision(
+            decision_time=decision.decision_time,
+            intended_execution_time=decision.intended_execution_time,
+            allocator_version=decision.allocator_version,
+            observation_spacing_reports=decision.observation_spacing_reports,
+            snapshot_asset_configs=decision.snapshot_asset_configs,
+            feature_snapshot=decision.feature_snapshot,
+            target_weights=mismatched_target,
+        )
+
+
+def test_artifact_rejects_allocator_version_other_than_rules_allocator_v1() -> None:
+    decision = _decision(_monthly_records())
+
+    with pytest.raises(ValidationError, match="allocator_version must be rules_allocator.v1"):
+        BacktestSingleStepDecision(
+            decision_time=decision.decision_time,
+            intended_execution_time=decision.intended_execution_time,
+            allocator_version="other_allocator.v1",
+            observation_spacing_reports=decision.observation_spacing_reports,
+            snapshot_asset_configs=decision.snapshot_asset_configs,
+            feature_snapshot=decision.feature_snapshot,
+            target_weights=decision.target_weights,
         )
 
 
