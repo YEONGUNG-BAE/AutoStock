@@ -933,3 +933,25 @@ Rules:
 - does not fetch or download data
 - does not commit real data
 - real-data backtest execution is deferred to a later explicit phase
+
+### Phase 2d-1 Local Monthly Dataset Assembly Contract
+
+Phase 2d-1 reads operator-local monthly CSV files from the sibling
+``autostock-data`` directory and assembles in-memory backtest inputs.
+
+Rules:
+
+- local monthly CSVs are read only from sibling ``autostock-data``
+- default data root is ``repo_root.parent / "autostock-data"``
+- assembles ``DateIdSourceRecord`` source records
+- assembles KRW-unhedged S&P benchmark points from SP500TR * USDKRW
+- computes common periods across all instruments and benchmark alignment
+- no forward-fill, back-fill, or interpolation for benchmark alignment
+- KOSPI primary is a KR proxy, not implementable ETF evidence
+- does not run backtest
+- does not compute NAV
+- does not compute benchmark-relative metrics
+- does not render reports
+- does not fetch or download data
+- does not commit real data
+- real-data backtest execution is deferred to a later explicit phase
