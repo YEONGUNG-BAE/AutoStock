@@ -23,6 +23,7 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     LocalMonthlyEvaluationDryRunResult,
     run_local_monthly_evaluation_dry_run,
 )
+from backtest_engine.rebalance import _canonical_total_cost_krw  # noqa: E402
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -131,13 +132,17 @@ def _write_default_kospi_primary_csvs(
             sp_close = close_by_symbol["SP500TR"][index]
         else:
             sp_close = Decimal("100") + Decimal(index)
+        if close_by_symbol is not None and "USDKRW" in close_by_symbol:
+            fx_close = close_by_symbol["USDKRW"][index]
+        else:
+            fx_close = Decimal("1300") + Decimal(index)
         sp_rows.append(
             f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
             f"SP500TR,US,{sp_close},synthetic"
         )
         fx_rows.append(
             f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
-            f"USDKRW,FX,{1300 + index},synthetic"
+            f"USDKRW,FX,{fx_close},synthetic"
         )
     _write_csv(data_root / benchmark.sp500tr_relative_path, tuple(sp_rows))
     _write_csv(data_root / benchmark.usdkrw_relative_path, tuple(fx_rows))
@@ -321,6 +326,51 @@ def test_mixed_regime_us_kr_risk_on_gold_risk_off_dry_run_succeeds(
     )
     assert result.walk_forward_result.steps
     assert result.run_config.local_monthly_run_config_policy.endswith(".v2")
+
+
+def test_long_decimal_synthetic_csv_dry_run_preserves_aggregate_cost_invariants(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    periods = ("2020-01", "2020-02", "2020-03", "2020-04", "2020-05")
+    long_kospi = tuple(
+        Decimal("98765.432109876543210987654321987654321") + Decimal(index)
+        for index in range(len(periods))
+    )
+    long_gld = tuple(
+        Decimal("2345.678901234567890123456789012345678901") + Decimal(index)
+        for index in range(len(periods))
+    )
+    long_sp = tuple(
+        Decimal("123456.789012345678901234567890123456789") + Decimal(index)
+        for index in range(len(periods))
+    )
+    long_fx = tuple(
+        Decimal("1345.67890123456789012345678901234567890123456789012")
+        + Decimal(index)
+        for index in range(len(periods))
+    )
+    _write_default_kospi_primary_csvs(
+        data_root,
+        periods=periods,
+        close_by_symbol={
+            "KOSPI": long_kospi,
+            "GLD": long_gld,
+            "SP500TR": long_sp,
+            "USDKRW": long_fx,
+        },
+    )
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    for step in result.walk_forward_result.steps:
+        rebalance = step.rebalance_result
+        assert rebalance.total_cost_krw == _canonical_total_cost_krw(
+            rebalance.total_fee_krw,
+            rebalance.total_tax_krw,
+            rebalance.total_fx_spread_krw,
+        )
 
 
 def test_uses_default_kospi_primary_instrument_specs_when_none_supplied(

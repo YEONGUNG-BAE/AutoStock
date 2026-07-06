@@ -1089,3 +1089,23 @@ Rules:
 - this is a feasibility patch only, not an investment conclusion
 - evidence export remains opt-in and repo-external
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-2 Rebalance Aggregate Cost Invariant Patch
+
+Phase 2e-1 removed the KOSPI-primary cash-floor blocker. A follow-up operator
+real-data run then exposed an aggregate cost exact-equality failure:
+
+``total_cost_krw must equal total_fee_krw + total_tax_krw + total_fx_spread_krw``.
+
+Rules:
+
+- ``rules_allocator.v1`` remains unchanged
+- KOSPI-primary run config weights remain unchanged from v2
+- rebalance accounting keeps
+  ``single_rebalance_target_weight_accounting.v1`` and
+  ``simple_proportional_fee_sell_tax_fx_spread.v1``
+- the patch makes Decimal aggregate summation deterministic and internally
+  consistent via high-precision local summation helpers
+- no rounding, quantization, or tolerance-based money comparison is introduced
+- evidence export remains opt-in and repo-external
+- no S&P-relative project conclusion exists yet

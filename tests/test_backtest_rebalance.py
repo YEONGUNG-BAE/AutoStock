@@ -34,6 +34,10 @@ from backtest_engine import (  # noqa: E402
     SnapshotAssetConfig,
     apply_single_rebalance_accounting,
 )
+from backtest_engine.rebalance import (  # noqa: E402
+    _canonical_total_cost_krw,
+    _sum_decimal,
+)
 
 DECISION_TIME = datetime(2020, 4, 30, 0, 0, tzinfo=UTC)
 INTENDED_EXECUTION_TIME = datetime(2020, 5, 31, 0, 0, tzinfo=UTC)
@@ -458,10 +462,24 @@ def test_cash_target_respected_through_residual_cash_after_trades_and_costs() ->
 def test_total_cost_fields_equal_sum_of_trade_costs() -> None:
     result = _rebalance()
 
-    assert result.total_fee_krw == sum(trade.fee_krw for trade in result.trades)
-    assert result.total_tax_krw == sum(trade.tax_krw for trade in result.trades)
-    assert result.total_fx_spread_krw == sum(trade.fx_spread_krw for trade in result.trades)
-    assert result.total_cost_krw == sum(trade.total_cost_krw for trade in result.trades)
+    assert result.total_fee_krw == _sum_decimal(trade.fee_krw for trade in result.trades)
+    assert result.total_tax_krw == _sum_decimal(trade.tax_krw for trade in result.trades)
+    assert result.total_fx_spread_krw == _sum_decimal(
+        trade.fx_spread_krw for trade in result.trades
+    )
+    assert result.total_cost_krw == _sum_decimal(
+        trade.total_cost_krw for trade in result.trades
+    )
+    assert result.total_cost_krw == _canonical_total_cost_krw(
+        result.total_fee_krw,
+        result.total_tax_krw,
+        result.total_fx_spread_krw,
+    )
+    assert result.total_cost_krw == _canonical_total_cost_krw(
+        result.total_fee_krw,
+        result.total_tax_krw,
+        result.total_fx_spread_krw,
+    )
 
 
 def test_post_trade_value_equals_pre_trade_value_minus_total_costs() -> None:
@@ -753,6 +771,211 @@ def test_gold_market_uses_fx_spread_and_usdkrw_rate() -> None:
 
     assert result.trades[0].usdkrw_rate == USDKRW
     assert result.trades[0].fx_spread_krw > Decimal("0")
+
+
+def _observation_report(
+    *,
+    asset_id: str,
+    symbol: str,
+    market: str,
+) -> ObservationSpacingReport:
+    return ObservationSpacingReport(
+        asset_id=asset_id,
+        symbol=symbol,
+        market=market,
+        frequency="monthly",
+        lookback_count=3,
+        period_keys=("2020-02", "2020-03", "2020-04"),
+    )
+
+
+def _multi_market_decision() -> BacktestSingleStepDecision:
+    configs = (
+        SnapshotAssetConfig(
+            asset_id="asset_kr",
+            symbol="SYN_KR",
+            market="KR",
+            long_ma=Decimal("50000"),
+            risk_on_weight=Decimal("0.30"),
+            risk_off_weight=Decimal("0.20"),
+            min_weight=Decimal("0"),
+            max_weight=Decimal("0.50"),
+        ),
+        SnapshotAssetConfig(
+            asset_id="asset_us",
+            symbol="SYN_US",
+            market="US",
+            long_ma=Decimal("95"),
+            risk_on_weight=Decimal("0.25"),
+            risk_off_weight=Decimal("0.15"),
+            min_weight=Decimal("0"),
+            max_weight=Decimal("0.50"),
+        ),
+        SnapshotAssetConfig(
+            asset_id="asset_gold",
+            symbol="SYN_GOLD",
+            market="GOLD",
+            long_ma=Decimal("1800"),
+            risk_on_weight=Decimal("0.25"),
+            risk_off_weight=Decimal("0.15"),
+            min_weight=Decimal("0"),
+            max_weight=Decimal("0.50"),
+        ),
+    )
+    features = tuple(
+        BacktestAssetFeature(
+            asset_id=config.asset_id,
+            as_of=DECISION_TIME,
+            current_price=Decimal("100"),
+            long_ma=config.long_ma,
+            risk_on_weight=config.risk_on_weight,
+            risk_off_weight=config.risk_off_weight,
+            min_weight=config.min_weight,
+            max_weight=config.max_weight,
+        )
+        for config in configs
+    )
+    return BacktestSingleStepDecision(
+        decision_time=DECISION_TIME,
+        intended_execution_time=INTENDED_EXECUTION_TIME,
+        allocator_version=RULES_ALLOCATOR_V1,
+        observation_spacing_reports=tuple(
+            _observation_report(
+                asset_id=config.asset_id,
+                symbol=config.symbol,
+                market=config.market,
+            )
+            for config in configs
+        ),
+        snapshot_asset_configs=configs,
+        feature_snapshot=BacktestFeatureSnapshot(
+            decision_time=DECISION_TIME,
+            assets=features,
+            cash_asset_id="cash",
+            cash_min_weight=Decimal("0.05"),
+        ),
+        target_weights=_multi_market_target_weights(),
+    )
+
+
+def _multi_market_execution_slice() -> BacktestExecutionPriceSlice:
+    return _execution_slice(
+        _execution_price(
+            asset_id="asset_kr",
+            symbol="SYN_KR",
+            market="KR",
+            execution_price=Decimal("98765.432109876543210987654321987654321"),
+        ),
+        _execution_price(
+            asset_id="asset_us",
+            symbol="SYN_US",
+            market="US",
+            execution_price=Decimal("100"),
+        ),
+        _execution_price(
+            asset_id="asset_gold",
+            symbol="SYN_GOLD",
+            market="GOLD",
+            execution_price=Decimal("2000"),
+        ),
+    )
+
+
+def _multi_market_target_weights() -> BacktestTargetWeights:
+    return BacktestTargetWeights(
+        decision_time=DECISION_TIME,
+        allocator_version=RULES_ALLOCATOR_V1,
+        weights=(
+            BacktestTargetWeight(asset_id="asset_kr", weight=Decimal("0.20")),
+            BacktestTargetWeight(asset_id="asset_us", weight=Decimal("0.30")),
+            BacktestTargetWeight(asset_id="asset_gold", weight=Decimal("0.20")),
+            BacktestTargetWeight(asset_id="cash", weight=Decimal("0.30")),
+        ),
+    )
+
+
+def _multi_market_portfolio() -> BacktestPortfolioState:
+    return _portfolio(
+        cash_krw=Decimal("10000000"),
+        holdings=(
+            BacktestHolding(asset_id="asset_kr", quantity=Decimal("200")),
+            BacktestHolding(asset_id="asset_us", quantity=Decimal("2")),
+            BacktestHolding(asset_id="asset_gold", quantity=Decimal("10")),
+        ),
+    )
+
+
+LONG_USDKRW = Decimal(
+    "1345.678901234567890123456789012345678901234567890123456789012345678901234567890"
+)
+
+
+def test_long_decimal_prices_preserve_aggregate_cost_invariants() -> None:
+    decision = _multi_market_decision()
+    execution_prices = _multi_market_execution_slice()
+    portfolio = _multi_market_portfolio()
+    cost_model = _cost_model(
+        fee_bps=Decimal("10"),
+        kr_sell_tax_bps=Decimal("23"),
+        fx_spread_bps=Decimal("15"),
+    )
+
+    result = apply_single_rebalance_accounting(
+        decision=decision,
+        execution_prices=execution_prices,
+        portfolio_state=portfolio,
+        cost_model=cost_model,
+        usdkrw_rate=LONG_USDKRW,
+    )
+
+    assert len(result.trades) == 3
+    for trade in result.trades:
+        assert trade.total_cost_krw == _canonical_total_cost_krw(
+            trade.fee_krw,
+            trade.tax_krw,
+            trade.fx_spread_krw,
+        )
+    assert result.total_cost_krw == _canonical_total_cost_krw(
+        result.total_fee_krw,
+        result.total_tax_krw,
+        result.total_fx_spread_krw,
+    )
+    assert result.total_cost_krw == _sum_decimal(
+        trade.total_cost_krw for trade in result.trades
+    )
+
+
+def test_multi_market_mixed_side_trades_preserve_aggregate_cost_invariants() -> None:
+    decision = _multi_market_decision()
+    execution_prices = _multi_market_execution_slice()
+    portfolio = _multi_market_portfolio()
+    cost_model = _cost_model(
+        fee_bps=Decimal("10"),
+        kr_sell_tax_bps=Decimal("23"),
+        fx_spread_bps=Decimal("15"),
+    )
+
+    result = apply_single_rebalance_accounting(
+        decision=decision,
+        execution_prices=execution_prices,
+        portfolio_state=portfolio,
+        cost_model=cost_model,
+        usdkrw_rate=LONG_USDKRW,
+    )
+
+    trade_by_market = {trade.market: trade for trade in result.trades}
+    assert trade_by_market["KR"].side == "SELL"
+    assert trade_by_market["US"].side == "BUY"
+    assert trade_by_market["GOLD"].side == "SELL"
+    assert trade_by_market["KR"].tax_krw > Decimal("0")
+    assert trade_by_market["US"].fx_spread_krw > Decimal("0")
+    assert trade_by_market["GOLD"].fx_spread_krw > Decimal("0")
+    assert all(trade.fee_krw > Decimal("0") for trade in result.trades)
+    assert result.total_cost_krw == _canonical_total_cost_krw(
+        result.total_fee_krw,
+        result.total_tax_krw,
+        result.total_fx_spread_krw,
+    )
 
 
 def test_focused_regression_suite_passes() -> None:

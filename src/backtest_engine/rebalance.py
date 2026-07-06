@@ -10,8 +10,9 @@ benchmark-relative metrics, fetch data, or use real data.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -170,7 +171,11 @@ class BacktestTrade(BaseModel):
 
     @model_validator(mode="after")
     def validate_trade(self) -> Self:
-        if self.total_cost_krw != self.fee_krw + self.tax_krw + self.fx_spread_krw:
+        if self.total_cost_krw != _canonical_total_cost_krw(
+            self.fee_krw,
+            self.tax_krw,
+            self.fx_spread_krw,
+        ):
             raise ValueError(
                 "total_cost_krw must equal fee_krw + tax_krw + fx_spread_krw."
             )
@@ -235,10 +240,15 @@ class BacktestRebalanceResult(BaseModel):
         if len(holding_ids) != len(set(holding_ids)):
             raise ValueError("post_trade_holdings must have unique asset ids.")
 
-        trade_fee = sum((trade.fee_krw for trade in self.trades), ZERO)
-        trade_tax = sum((trade.tax_krw for trade in self.trades), ZERO)
-        trade_fx = sum((trade.fx_spread_krw for trade in self.trades), ZERO)
-        trade_total = sum((trade.total_cost_krw for trade in self.trades), ZERO)
+        trade_fee = _sum_decimal(trade.fee_krw for trade in self.trades)
+        trade_tax = _sum_decimal(trade.tax_krw for trade in self.trades)
+        trade_fx = _sum_decimal(trade.fx_spread_krw for trade in self.trades)
+        trade_total = _sum_decimal(trade.total_cost_krw for trade in self.trades)
+        canonical_total = _canonical_total_cost_krw(
+            trade_fee,
+            trade_tax,
+            trade_fx,
+        )
 
         if self.total_fee_krw != trade_fee:
             raise ValueError("total_fee_krw must equal the sum of trade fee_krw values.")
@@ -248,16 +258,14 @@ class BacktestRebalanceResult(BaseModel):
             raise ValueError(
                 "total_fx_spread_krw must equal the sum of trade fx_spread_krw values."
             )
-        if self.total_cost_krw != trade_total:
-            raise ValueError(
-                "total_cost_krw must equal the sum of trade total_cost_krw values."
-            )
-        if self.total_cost_krw != (
-            self.total_fee_krw + self.total_tax_krw + self.total_fx_spread_krw
-        ):
+        if self.total_cost_krw != canonical_total:
             raise ValueError(
                 "total_cost_krw must equal total_fee_krw + total_tax_krw + "
                 "total_fx_spread_krw."
+            )
+        if self.total_cost_krw != trade_total:
+            raise ValueError(
+                "total_cost_krw must equal the sum of trade total_cost_krw values."
             )
         return self
 
@@ -351,7 +359,7 @@ def apply_single_rebalance_accounting(
         fx_spread_krw = ZERO
         if price_record.market in FX_MARKETS:
             fx_spread_krw = gross_notional_krw * cost_model.fx_spread_bps / BPS_DIVISOR
-        total_cost_krw = fee_krw + tax_krw + fx_spread_krw
+        total_cost_krw = _canonical_total_cost_krw(fee_krw, tax_krw, fx_spread_krw)
 
         trade_usdkrw_rate = (
             parsed_usdkrw_rate if price_record.market in FX_MARKETS else None
@@ -399,10 +407,14 @@ def apply_single_rebalance_accounting(
             usdkrw_rate=parsed_usdkrw_rate,
         )
 
-    total_fee_krw = sum((trade.fee_krw for trade in trades), ZERO)
-    total_tax_krw = sum((trade.tax_krw for trade in trades), ZERO)
-    total_fx_spread_krw = sum((trade.fx_spread_krw for trade in trades), ZERO)
-    total_cost_krw = sum((trade.total_cost_krw for trade in trades), ZERO)
+    total_fee_krw = _sum_decimal(trade.fee_krw for trade in trades)
+    total_tax_krw = _sum_decimal(trade.tax_krw for trade in trades)
+    total_fx_spread_krw = _sum_decimal(trade.fx_spread_krw for trade in trades)
+    total_cost_krw = _canonical_total_cost_krw(
+        total_fee_krw,
+        total_tax_krw,
+        total_fx_spread_krw,
+    )
 
     return BacktestRebalanceResult(
         decision_time=decision.decision_time,
@@ -480,6 +492,25 @@ def _quantity_from_notional_krw(
     if market in FX_MARKETS:
         return gross_notional_krw / (execution_price * usdkrw_rate)
     raise ValueError(f"unsupported market for quantity conversion: {market!r}.")
+
+
+def _sum_decimal(values: Iterable[Decimal]) -> Decimal:
+    with localcontext() as context:
+        context.prec = max(context.prec, 50)
+        total = ZERO
+        for value in values:
+            total += value
+        return total
+
+
+def _canonical_total_cost_krw(
+    total_fee_krw: Decimal,
+    total_tax_krw: Decimal,
+    total_fx_spread_krw: Decimal,
+) -> Decimal:
+    with localcontext() as context:
+        context.prec = max(context.prec, 50)
+        return total_fee_krw + total_tax_krw + total_fx_spread_krw
 
 
 def _to_decimal_no_float(value: Any, *, field_name: str) -> Decimal:
