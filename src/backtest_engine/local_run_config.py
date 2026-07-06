@@ -26,6 +26,7 @@ from domain.source import DateIdSourceRecord
 
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 = "kospi_primary_monthly_rules_config.v1"
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2 = "kospi_primary_monthly_rules_config.v2"
+LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3 = "kospi_primary_monthly_rules_config.v3"
 
 _FIRST_DAY_OF_MONTH_WARNING_SUBSTRING = "first day of month"
 
@@ -54,6 +55,7 @@ class LocalMonthlyRunConfig(BaseModel):
     local_monthly_run_config_policy: Literal[
         "kospi_primary_monthly_rules_config.v1",
         "kospi_primary_monthly_rules_config.v2",
+        "kospi_primary_monthly_rules_config.v3",
     ]
     dataset: LocalMonthlyDatasetAssemblyResult
     period_specs: tuple[BacktestPeriodSpec, ...]
@@ -154,20 +156,26 @@ def build_kospi_primary_monthly_run_config(
             "dataset.common_periods must contain at least rolling_lookback_count + 1 periods."
         )
 
-    latest_timestamps = _latest_source_timestamps_by_period(dataset.source_records)
+    latest_instrument_timestamps = _latest_instrument_source_timestamp_by_period(
+        dataset.source_records
+    )
+    earliest_instrument_timestamps = _earliest_instrument_source_timestamp_by_period(
+        dataset.source_records
+    )
     fx_rates = {point.period_key: point.usdkrw_rate for point in dataset.fx_points}
 
     period_specs = _build_period_specs(
         common_periods=common_periods,
-        latest_timestamps=latest_timestamps,
+        latest_instrument_timestamps=latest_instrument_timestamps,
+        earliest_instrument_timestamps=earliest_instrument_timestamps,
         fx_rates=fx_rates,
         warmup_count=rolling_lookback_count,
     )
 
     first_period = common_periods[0]
-    if first_period not in latest_timestamps:
+    if first_period not in latest_instrument_timestamps:
         raise ValueError(f"missing source timestamp for warm-up period: {first_period}")
-    initial_as_of = latest_timestamps[first_period]
+    initial_as_of = latest_instrument_timestamps[first_period]
     require_timezone_aware_datetime(initial_as_of, field_name="initial_portfolio_as_of")
     if initial_as_of <= datetime.min.replace(tzinfo=initial_as_of.tzinfo):
         raise ValueError("initial portfolio as_of must be a positive timezone-aware timestamp.")
@@ -196,7 +204,7 @@ def build_kospi_primary_monthly_run_config(
     warnings = _collect_warnings(dataset.warnings)
 
     return LocalMonthlyRunConfig(
-        local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
+        local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3,
         dataset=dataset,
         period_specs=period_specs,
         rolling_asset_configs=rolling_asset_configs,
@@ -252,7 +260,8 @@ def _build_kospi_primary_rolling_configs(
 def _build_period_specs(
     *,
     common_periods: tuple[str, ...],
-    latest_timestamps: dict[str, datetime],
+    latest_instrument_timestamps: dict[str, datetime],
+    earliest_instrument_timestamps: dict[str, datetime],
     fx_rates: dict[str, Decimal],
     warmup_count: int,
 ) -> tuple[BacktestPeriodSpec, ...]:
@@ -261,15 +270,15 @@ def _build_period_specs(
         decision_period = common_periods[current_index - 1]
         execution_period = common_periods[current_index]
 
-        if decision_period not in latest_timestamps:
+        if decision_period not in latest_instrument_timestamps:
             raise ValueError(f"missing source timestamp for period: {decision_period}")
-        if execution_period not in latest_timestamps:
+        if execution_period not in earliest_instrument_timestamps:
             raise ValueError(f"missing source timestamp for period: {execution_period}")
         if execution_period not in fx_rates:
             raise ValueError(f"missing USDKRW rate for period: {execution_period}")
 
-        decision_time = latest_timestamps[decision_period]
-        intended_execution_time = latest_timestamps[execution_period]
+        decision_time = latest_instrument_timestamps[decision_period]
+        intended_execution_time = earliest_instrument_timestamps[execution_period]
         usdkrw_rate = fx_rates[execution_period]
 
         require_timezone_aware_datetime(decision_time, field_name="decision_time")
@@ -279,6 +288,10 @@ def _build_period_specs(
         if intended_execution_time <= datetime.min.replace(tzinfo=intended_execution_time.tzinfo):
             raise ValueError(
                 "intended_execution_time must be a positive timezone-aware timestamp."
+            )
+        if decision_time >= intended_execution_time:
+            raise ValueError(
+                "decision_time must be before intended_execution_time for period spec."
             )
         if usdkrw_rate <= ZERO:
             raise ValueError("usdkrw_rate must be greater than 0.")
@@ -293,7 +306,7 @@ def _build_period_specs(
     return tuple(specs)
 
 
-def _latest_source_timestamps_by_period(
+def _latest_instrument_source_timestamp_by_period(
     source_records: tuple[DateIdSourceRecord, ...],
 ) -> dict[str, datetime]:
     latest: dict[str, datetime] = {}
@@ -303,6 +316,18 @@ def _latest_source_timestamps_by_period(
         if current is None or record.source_timestamp > current:
             latest[period_key] = record.source_timestamp
     return latest
+
+
+def _earliest_instrument_source_timestamp_by_period(
+    source_records: tuple[DateIdSourceRecord, ...],
+) -> dict[str, datetime]:
+    earliest: dict[str, datetime] = {}
+    for record in source_records:
+        period_key = _period_key_from_record(record)
+        current = earliest.get(period_key)
+        if current is None or record.source_timestamp < current:
+            earliest[period_key] = record.source_timestamp
+    return earliest
 
 
 def _period_key_from_record(record: DateIdSourceRecord) -> str:

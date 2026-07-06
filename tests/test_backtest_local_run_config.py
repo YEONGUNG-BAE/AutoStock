@@ -16,6 +16,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from backtest_engine.local_dataset import (  # noqa: E402
+    LocalMonthlyDatasetAssemblyResult,
     assemble_local_monthly_dataset,
     default_local_monthly_benchmark_spec,
     default_local_monthly_instrument_specs_for_kospi_primary,
@@ -23,11 +24,16 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_run_config import (  # noqa: E402
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
+    LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
 from backtest_engine.rebalance import COST_MODEL_V1  # noqa: E402
 from backtest_engine.rules_allocator import allocate_rules_only_v1  # noqa: E402
+from backtest_engine.single_step import make_rules_only_single_step_decision  # noqa: E402
+from backtest_engine.execution_prices import (  # noqa: E402
+    select_execution_prices_for_single_step_decision,
+)
 from backtest_engine.step_contract import BacktestAssetFeature, BacktestFeatureSnapshot  # noqa: E402
 
 MODULE_PATH = (
@@ -150,12 +156,193 @@ def _assemble_kospi_primary_dataset(
     return dataset
 
 
+def _assemble_kospi_primary_dataset_with_staggered_timestamps(
+    tmp_path: Path,
+    *,
+    periods: tuple[str, ...] = ("2020-01", "2020-02", "2020-03", "2020-04", "2020-05"),
+) -> tuple[LocalMonthlyDatasetAssemblyResult, dict[str, tuple[str, str, str]]]:
+    """Build dataset where KOSPI/GLD/SP500TR as_of timestamps differ within each period."""
+    repo_root, data_root = _layout(tmp_path)
+    specs = default_local_monthly_instrument_specs_for_kospi_primary()
+    benchmark = default_local_monthly_benchmark_spec()
+
+    staggered_as_of_by_symbol = {
+        "KOSPI": ("01T00:00:00+00:00", "01T06:00:00+00:00", "01T12:00:00+00:00"),
+        "GLD": ("01T06:00:00+00:00", "01T12:00:00+00:00", "01T18:00:00+00:00"),
+        "SP500TR": ("01T12:00:00+00:00", "01T18:00:00+00:00", "02T00:00:00+00:00"),
+    }
+
+    for spec in specs:
+        rows: list[str] = []
+        for index, period in enumerate(periods):
+            year, month = period.split("-")
+            day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
+            close = Decimal("100") + Decimal(index)
+            as_of_month = int(month) + 1
+            as_of_year = int(year)
+            if as_of_month > 12:
+                as_of_month = 1
+                as_of_year += 1
+            as_of_suffix = staggered_as_of_by_symbol[spec.symbol][index % 3]
+            rows.append(
+                f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{as_of_suffix},"
+                f"{spec.symbol},{spec.market},{close},synthetic"
+            )
+        _write_csv(data_root / spec.relative_path, tuple(rows))
+
+    sp_rows: list[str] = []
+    fx_rows: list[str] = []
+    for index, period in enumerate(periods):
+        year, month = period.split("-")
+        day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
+        as_of_month = int(month) + 1
+        as_of_year = int(year)
+        if as_of_month > 12:
+            as_of_month = 1
+            as_of_year += 1
+        sp_as_of = staggered_as_of_by_symbol["SP500TR"][index % 3]
+        fx_as_of = "01T23:58:00+00:00"
+        sp_rows.append(
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{sp_as_of},"
+            f"SP500TR,US,{100 + index},synthetic"
+        )
+        fx_rows.append(
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{fx_as_of},"
+            f"USDKRW,FX,{1300 + index},synthetic"
+        )
+    _write_csv(data_root / benchmark.sp500tr_relative_path, tuple(sp_rows))
+    _write_csv(data_root / benchmark.usdkrw_relative_path, tuple(fx_rows))
+
+    dataset = assemble_local_monthly_dataset(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=specs,
+        benchmark_spec=benchmark,
+    )
+    return dataset, staggered_as_of_by_symbol
+
+
+def test_staggered_current_period_timestamps_use_kospi_as_intended_execution_time(
+    tmp_path: Path,
+) -> None:
+    dataset, _ = _assemble_kospi_primary_dataset_with_staggered_timestamps(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset, rolling_lookback_count=3)
+
+    execution_period = dataset.common_periods[3]
+    kospi_timestamp = min(
+        record.source_timestamp
+        for record in dataset.source_records
+        if record.payload["symbol"] == "KOSPI"
+        and record.payload["date"].startswith(
+            execution_period[:4] + "-" + execution_period[5:]
+        )
+    )
+    first_spec = result.period_specs[0]
+    assert first_spec.intended_execution_time == kospi_timestamp
+
+
+def test_staggered_period_spec_allows_execution_price_selection_for_all_assets(
+    tmp_path: Path,
+) -> None:
+    dataset, _ = _assemble_kospi_primary_dataset_with_staggered_timestamps(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset, rolling_lookback_count=3)
+    first_spec = result.period_specs[0]
+
+    decision = make_rules_only_single_step_decision(
+        dataset.source_records,
+        decision_time=first_spec.decision_time,
+        intended_execution_time=first_spec.intended_execution_time,
+        rolling_asset_configs=result.rolling_asset_configs,
+        cash_asset_id=result.cash_asset_id,
+        cash_min_weight=result.cash_min_weight,
+    )
+    execution_prices = select_execution_prices_for_single_step_decision(
+        dataset.source_records,
+        decision=decision,
+    )
+    selected_symbols = {price.symbol for price in execution_prices.prices}
+    assert selected_symbols == {"KOSPI", "GLD", "SP500TR"}
+
+
+def test_rejects_when_previous_period_latest_is_not_before_current_period_earliest(
+    tmp_path: Path,
+) -> None:
+    dataset, _ = _assemble_kospi_primary_dataset_with_staggered_timestamps(tmp_path)
+
+    inverted_records = []
+    for record in dataset.source_records:
+        if record.payload["symbol"] == "KOSPI" and record.payload["date"].startswith("2020-03"):
+            inverted_records.append(
+                record.model_copy(
+                    update={
+                        "source_timestamp": datetime(2020, 5, 2, 0, 0, tzinfo=UTC),
+                    }
+                )
+            )
+        else:
+            inverted_records.append(record)
+
+    inverted_dataset = dataset.model_copy(
+        update={"source_records": tuple(inverted_records)}
+    )
+    with pytest.raises(
+        ValueError,
+        match="decision_time must be before intended_execution_time",
+    ):
+        build_kospi_primary_monthly_run_config(
+            dataset=inverted_dataset,
+            rolling_lookback_count=3,
+        )
+
+
+def test_does_not_use_benchmark_timestamp_for_intended_execution_alignment(
+    tmp_path: Path,
+) -> None:
+    dataset, _ = _assemble_kospi_primary_dataset_with_staggered_timestamps(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset, rolling_lookback_count=3)
+
+    execution_period = dataset.common_periods[3]
+    benchmark_as_of = dataset.benchmark_points[3].as_of
+    instrument_earliest = min(
+        record.source_timestamp
+        for record in dataset.source_records
+        if record.payload["date"].startswith(
+            execution_period[:4] + "-" + execution_period[5:]
+        )
+    )
+    assert benchmark_as_of != instrument_earliest
+    assert result.period_specs[0].intended_execution_time == instrument_earliest
+    assert result.period_specs[0].intended_execution_time != benchmark_as_of
+
+
+def test_does_not_use_fx_timestamp_for_intended_execution_alignment(
+    tmp_path: Path,
+) -> None:
+    dataset, _ = _assemble_kospi_primary_dataset_with_staggered_timestamps(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset, rolling_lookback_count=3)
+
+    execution_period = dataset.common_periods[3]
+    fx_as_of = next(
+        point.as_of for point in dataset.fx_points if point.period_key == execution_period
+    )
+    instrument_earliest = min(
+        record.source_timestamp
+        for record in dataset.source_records
+        if record.payload["date"].startswith(
+            execution_period[:4] + "-" + execution_period[5:]
+        )
+    )
+    assert fx_as_of != instrument_earliest
+    assert result.period_specs[0].intended_execution_time == instrument_earliest
+    assert result.period_specs[0].intended_execution_time != fx_as_of
+
+
 def test_builds_local_monthly_run_config_from_synthetic_assembled_dataset(
     tmp_path: Path,
 ) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
-    assert result.local_monthly_run_config_policy == LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2
+    assert result.local_monthly_run_config_policy == LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3
     assert result.dataset is dataset
 
 
@@ -305,7 +492,7 @@ def test_first_common_period_is_warm_up_baseline(tmp_path: Path) -> None:
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
     first_execution_period = dataset.common_periods[result.rolling_lookback_count]
     first_spec = result.period_specs[0]
-    expected_execution = max(
+    expected_execution = min(
         record.source_timestamp
         for record in dataset.source_records
         if record.payload["date"].startswith(
@@ -345,7 +532,7 @@ def test_first_period_spec_for_lookback_three_uses_third_decision_and_fourth_exe
             decision_period[:4] + "-" + decision_period[5:]
         )
     )
-    expected_execution = max(
+    expected_execution = min(
         record.source_timestamp
         for record in dataset.source_records
         if record.payload["date"].startswith(
@@ -404,7 +591,7 @@ def test_each_decision_time_is_previous_period_latest_source_timestamp(
         assert period_spec.decision_time == expected
 
 
-def test_each_intended_execution_time_is_current_period_latest_source_timestamp(
+def test_each_intended_execution_time_is_current_period_earliest_instrument_timestamp(
     tmp_path: Path,
 ) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
@@ -413,7 +600,7 @@ def test_each_intended_execution_time_is_current_period_latest_source_timestamp(
     lookback = result.rolling_lookback_count
     for index, period_spec in enumerate(result.period_specs):
         execution_period = dataset.common_periods[lookback + index]
-        expected = max(
+        expected = min(
             record.source_timestamp
             for record in dataset.source_records
             if record.payload["date"].startswith(
@@ -483,7 +670,7 @@ def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None
 
     with pytest.raises(ValidationError):
         LocalMonthlyRunConfig(
-            local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
+            local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3,
             dataset=dataset,
             period_specs=result.period_specs,
             rolling_asset_configs=result.rolling_asset_configs,
@@ -627,8 +814,21 @@ def test_policy_constant_v1_remains_for_historical_reference() -> None:
     assert LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 == "kospi_primary_monthly_rules_config.v1"
 
 
-def test_policy_constant_v2_matches_builder_result() -> None:
+def test_policy_constant_v2_remains_for_historical_reference() -> None:
     assert LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2 == "kospi_primary_monthly_rules_config.v2"
+
+
+def test_policy_constant_v3_matches_builder_result() -> None:
+    assert LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3 == "kospi_primary_monthly_rules_config.v3"
+
+
+def test_policy_constant_v3_is_exported_from_backtest_engine_package() -> None:
+    import backtest_engine
+
+    assert "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3" in backtest_engine.__all__
+    assert backtest_engine.LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3 == (
+        "kospi_primary_monthly_rules_config.v3"
+    )
 
 
 def test_max_possible_non_cash_total_is_095(tmp_path: Path) -> None:

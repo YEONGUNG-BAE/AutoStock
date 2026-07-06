@@ -45,6 +45,7 @@ from backtest_engine.local_dataset import (
 from backtest_engine.local_run_config import (
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
+    LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
@@ -127,6 +128,7 @@ __all__ = [
     "LOCAL_MONTHLY_DATASET_POLICY_V1",
     "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1",
     "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2",
+    "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3",
     "LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1",
     "BacktestBenchmarkRelativeResult",
     "BacktestEvaluationPipelineResult",

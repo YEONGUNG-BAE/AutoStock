@@ -297,10 +297,88 @@ def test_default_kospi_primary_dry_run_succeeds_with_one_row_per_period_csvs(
     )
 
 
+def _write_staggered_kospi_primary_csvs(
+    data_root: Path,
+    *,
+    periods: tuple[str, ...] = (
+        "2020-01",
+        "2020-02",
+        "2020-03",
+        "2020-04",
+        "2020-05",
+        "2020-06",
+        "2020-07",
+    ),
+) -> None:
+    specs = default_local_monthly_instrument_specs_for_kospi_primary()
+    benchmark = default_local_monthly_benchmark_spec()
+    staggered_as_of_by_symbol = {
+        "KOSPI": ("01T00:00:00+00:00", "01T06:00:00+00:00", "01T12:00:00+00:00"),
+        "GLD": ("01T06:00:00+00:00", "01T12:00:00+00:00", "01T18:00:00+00:00"),
+        "SP500TR": ("01T12:00:00+00:00", "01T18:00:00+00:00", "02T00:00:00+00:00"),
+    }
+
+    for spec in specs:
+        rows: list[str] = []
+        for index, period in enumerate(periods):
+            year, month = period.split("-")
+            day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
+            close = Decimal("100") + Decimal(index)
+            as_of_month = int(month) + 1
+            as_of_year = int(year)
+            if as_of_month > 12:
+                as_of_month = 1
+                as_of_year += 1
+            as_of_suffix = staggered_as_of_by_symbol[spec.symbol][index % 3]
+            rows.append(
+                f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{as_of_suffix},"
+                f"{spec.symbol},{spec.market},{close},synthetic"
+            )
+        _write_csv(data_root / spec.relative_path, tuple(rows))
+
+    sp_rows: list[str] = []
+    fx_rows: list[str] = []
+    for index, period in enumerate(periods):
+        year, month = period.split("-")
+        day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
+        as_of_month = int(month) + 1
+        as_of_year = int(year)
+        if as_of_month > 12:
+            as_of_month = 1
+            as_of_year += 1
+        sp_as_of = staggered_as_of_by_symbol["SP500TR"][index % 3]
+        fx_as_of = "01T23:58:00+00:00"
+        sp_rows.append(
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{sp_as_of},"
+            f"SP500TR,US,{100 + index},synthetic"
+        )
+        fx_rows.append(
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-{fx_as_of},"
+            f"USDKRW,FX,{1300 + index},synthetic"
+        )
+    _write_csv(data_root / benchmark.sp500tr_relative_path, tuple(sp_rows))
+    _write_csv(data_root / benchmark.usdkrw_relative_path, tuple(fx_rows))
+
+
+def test_staggered_timestamp_synthetic_dry_run_completes_without_execution_price_blocker(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    _write_staggered_kospi_primary_csvs(data_root)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    assert result.walk_forward_result.steps
+    assert result.run_config.local_monthly_run_config_policy == (
+        "kospi_primary_monthly_rules_config.v3"
+    )
+
+
 def test_mixed_regime_us_kr_risk_on_gold_risk_off_dry_run_succeeds(
     tmp_path: Path,
 ) -> None:
-    """US/KR risk-on with GLD risk-off must not violate the cash floor under v2 weights."""
+    """US/KR risk-on with GLD risk-off must not violate the cash floor under v3 weights."""
     repo_root, data_root = _layout(tmp_path)
     periods = ("2020-01", "2020-02", "2020-03", "2020-04", "2020-05")
     rising = tuple(Decimal("100") + Decimal(index * 10) for index in range(len(periods)))
@@ -325,7 +403,7 @@ def test_mixed_regime_us_kr_risk_on_gold_risk_off_dry_run_succeeds(
         data_root=data_root,
     )
     assert result.walk_forward_result.steps
-    assert result.run_config.local_monthly_run_config_policy.endswith(".v2")
+    assert result.run_config.local_monthly_run_config_policy.endswith(".v3")
 
 
 def test_long_decimal_synthetic_csv_dry_run_preserves_aggregate_cost_invariants(

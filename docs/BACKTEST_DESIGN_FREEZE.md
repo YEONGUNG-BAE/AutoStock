@@ -1109,3 +1109,24 @@ Rules:
 - no rounding, quantization, or tolerance-based money comparison is introduced
 - evidence export remains opt-in and repo-external
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-3 Local Execution Timestamp Alignment Patch
+
+Phase 2e-2 removed the aggregate cost blocker. A follow-up operator real-data
+run then exposed a current-period execution timestamp alignment issue:
+
+``no future executable price at or after intended execution time``.
+
+Rules:
+
+- ``execution_prices.py`` remains unchanged and still selects the first price
+  at or after ``intended_execution_time``
+- local monthly run config policy is updated to v3
+- ``decision_time`` remains the previous-period latest instrument source
+  timestamp
+- ``intended_execution_time`` becomes the current-period earliest instrument
+  source timestamp
+- benchmark and FX timestamps do not determine execution alignment
+- KOSPI-primary v2 feasible weights remain unchanged
+- evidence export remains opt-in and repo-external
+- no S&P-relative project conclusion exists yet
