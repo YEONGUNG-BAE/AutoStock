@@ -913,3 +913,23 @@ Rules:
 - does not write report files or create artifacts
 - does not add project-level investment conclusions
 - real-data backtest execution is deferred to a later explicit phase
+
+### Phase 2d-0 Local Data Preflight Contract
+
+Phase 2d-0 validates the operator-local sibling data directory layout and
+monthly CSV metadata before any real-data backtest execution.
+
+Rules:
+
+- local real-data directory must be outside the git repo
+- default data root is sibling ``repo_root.parent / "autostock-data"``
+- checks CSV existence, schema, monthly period coverage, symbol/market
+  uniqueness, and ``as_of`` timestamp sanity
+- returns metadata and warnings only
+- does not execute backtest
+- does not compute NAV
+- does not compute benchmark-relative metrics
+- does not render reports
+- does not fetch or download data
+- does not commit real data
+- real-data backtest execution is deferred to a later explicit phase
