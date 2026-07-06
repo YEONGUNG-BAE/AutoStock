@@ -2,10 +2,10 @@
 
 The package contains a deterministic LLM-free rules-only allocator, a
 single-step backtest contract, an as-of-safe snapshot builder, as-of-safe
-rolling feature helpers, count-based observation spacing guards, and a
-single-step rules decision composer. It does not wire ScoutInputBuilder,
-implement a walk-forward loop, produce NAV, or compute benchmark-relative
-performance.
+rolling feature helpers, count-based observation spacing guards, a single-step
+rules decision composer, explicit-schedule walk-forward NAV, and a
+benchmark-relative metrics adapter. It does not load real data, fetch data,
+run live or paper trading, or produce project-level investment conclusions.
 """
 
 from __future__ import annotations
@@ -14,6 +14,11 @@ from backtest_engine.benchmark_adapter import (
     BENCHMARK_ADAPTER_POLICY_V1,
     BacktestBenchmarkRelativeResult,
     compute_walk_forward_benchmark_relative_metrics,
+)
+from backtest_engine.report_bundle import (
+    BACKTEST_REPORT_BUNDLE_POLICY_V1,
+    BacktestEvaluationReportBundle,
+    render_backtest_evaluation_report_bundle,
 )
 from backtest_engine.execution_prices import (
     EXECUTION_PRICE_POLICY_V1,
@@ -78,7 +83,9 @@ __all__ = [
     "REBALANCE_ACCOUNTING_POLICY_V1",
     "RULES_ALLOCATOR_V1",
     "WALK_FORWARD_POLICY_V1",
+    "BACKTEST_REPORT_BUNDLE_POLICY_V1",
     "BacktestBenchmarkRelativeResult",
+    "BacktestEvaluationReportBundle",
     "BacktestAssetFeature",
     "BacktestCostModel",
     "BacktestExecutionPrice",
@@ -99,6 +106,7 @@ __all__ = [
     "RollingLongMaAssetConfig",
     "SnapshotAssetConfig",
     "compute_walk_forward_benchmark_relative_metrics",
+    "render_backtest_evaluation_report_bundle",
     "allocate_rules_only_v1",
     "apply_single_rebalance_accounting",
     "build_feature_snapshot_from_source_records",

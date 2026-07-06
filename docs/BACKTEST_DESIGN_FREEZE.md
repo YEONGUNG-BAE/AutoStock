@@ -861,3 +861,27 @@ Rules:
 - does not render markdown reports
 - does not produce investment conclusions or S&P beat/lose claims
 - does not fetch or use real data
+
+### Phase 2c-9 Benchmark-Relative Report Bundle Contract
+
+Phase 2c-9 wraps an already-computed ``BacktestBenchmarkRelativeResult`` and
+calls the existing Phase 1.5 markdown renderer.
+
+Rules:
+
+- input is one ``BacktestBenchmarkRelativeResult`` supplied by the caller
+- output is one immutable ``BacktestEvaluationReportBundle``
+- the public API is ``render_backtest_evaluation_report_bundle``
+- the report bundle policy string is
+  ``benchmark_relative_metrics_markdown_bundle.v1``
+- passes ``benchmark_relative_result.metrics`` to existing
+  ``render_benchmark_relative_metrics_markdown`` exactly once
+- does not compute benchmark-relative metrics
+- does not run walk-forward
+- does not load or fetch benchmark data
+- does not load or fetch strategy data
+- does not write report files or create artifacts
+- does not add project-level investment conclusions beyond the existing
+  renderer output
+- real-data execution and persisted report artifacts are deferred to a later
+  explicit phase
