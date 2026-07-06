@@ -39,9 +39,13 @@ from backtest_engine.walk_forward import (
     BacktestWalkForwardResult,
     run_explicit_schedule_rules_walk_forward_nav,
 )
+from paper_review.models import BenchmarkReturnPoint
 
 LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1 = (
     "sibling_local_monthly_kospi_primary_evaluation_dry_run.v1"
+)
+LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 = (
+    "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
 )
 
 _RESEARCH_ONLY_WARNING = (
@@ -50,6 +54,10 @@ _RESEARCH_ONLY_WARNING = (
 )
 _KOSPI_PROXY_WARNING = (
     "KOSPI primary is a KR proxy, not implementable ETF evidence"
+)
+_BENCHMARK_CALENDAR_ALIGNMENT_WARNING = (
+    "local benchmark points are calendar-aligned to strategy NAV timestamps "
+    "before metric adaptation"
 )
 
 
@@ -111,6 +119,81 @@ class LocalMonthlyEvaluationDryRunResult(BaseModel):
         return self
 
 
+def align_local_monthly_benchmark_points_to_nav_calendar(
+    *,
+    run_config: LocalMonthlyRunConfig,
+    walk_forward_result: BacktestWalkForwardResult,
+    benchmark_points: Iterable[BenchmarkReturnPoint],
+) -> tuple[BenchmarkReturnPoint, ...]:
+    """Align local monthly benchmark points onto strategy NAV calendar dates."""
+    materialized_benchmark_points = tuple(benchmark_points)
+    nav_points = walk_forward_result.nav_points
+    common_periods = run_config.dataset.common_periods
+    rolling_lookback_count = run_config.rolling_lookback_count
+
+    if len(nav_points) != len(run_config.period_specs):
+        raise ValueError(
+            "walk_forward_result.nav_points length must equal "
+            "run_config.period_specs length."
+        )
+    if len(nav_points) < 2:
+        raise ValueError("at least 2 walk-forward NAV points are required.")
+    if not materialized_benchmark_points:
+        raise ValueError("benchmark_points must not be empty.")
+
+    fx_points = run_config.dataset.fx_points
+    if len(materialized_benchmark_points) != len(fx_points):
+        raise ValueError(
+            "benchmark_points length must equal dataset.fx_points length."
+        )
+
+    seen_periods: set[str] = set()
+    period_to_benchmark: dict[str, BenchmarkReturnPoint] = {}
+    for fx_point, benchmark_point in zip(fx_points, materialized_benchmark_points, strict=True):
+        if fx_point.period_key in seen_periods:
+            raise ValueError(f"duplicate benchmark period key: {fx_point.period_key}")
+        seen_periods.add(fx_point.period_key)
+        period_to_benchmark[fx_point.period_key] = benchmark_point
+
+    if len(period_to_benchmark) != len(fx_points):
+        raise ValueError("duplicate benchmark period keys detected.")
+
+    aligned_points: list[BenchmarkReturnPoint] = []
+    for index, nav_point in enumerate(nav_points):
+        execution_period = common_periods[rolling_lookback_count + index]
+        benchmark_point = period_to_benchmark.get(execution_period)
+        if benchmark_point is None:
+            raise ValueError(
+                f"missing benchmark point for execution period: {execution_period}"
+            )
+        aligned_points.append(
+            BenchmarkReturnPoint(
+                as_of=nav_point.as_of,
+                total_return_index_value=benchmark_point.total_return_index_value,
+            )
+        )
+
+    if len(aligned_points) != len(nav_points):
+        raise ValueError(
+            "aligned benchmark point count must equal walk-forward NAV point count."
+        )
+
+    aligned_dates = tuple(point.as_of.date() for point in aligned_points)
+    nav_dates = tuple(point.as_of.date() for point in nav_points)
+    if aligned_dates != nav_dates:
+        raise ValueError(
+            "aligned benchmark as_of.date() sequence must equal NAV as_of.date() sequence."
+        )
+
+    for previous, current in zip(aligned_dates, aligned_dates[1:], strict=False):
+        if previous >= current:
+            raise ValueError(
+                "aligned benchmark calendar dates must be strictly increasing."
+            )
+
+    return tuple(aligned_points)
+
+
 def run_local_monthly_evaluation_dry_run(
     *,
     repo_root: Path,
@@ -167,9 +250,15 @@ def run_local_monthly_evaluation_dry_run(
         cash_min_weight=run_config.cash_min_weight,
     )
 
-    benchmark_relative_result = compute_walk_forward_benchmark_relative_metrics(
+    aligned_benchmark_points = align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
         walk_forward_result=walk_forward_result,
         benchmark_points=dataset.benchmark_points,
+    )
+
+    benchmark_relative_result = compute_walk_forward_benchmark_relative_metrics(
+        walk_forward_result=walk_forward_result,
+        benchmark_points=aligned_benchmark_points,
     )
 
     report_bundle = render_backtest_evaluation_report_bundle(
@@ -203,4 +292,5 @@ def _collect_warnings(
     combined.extend(run_config_warnings)
     combined.append(_RESEARCH_ONLY_WARNING)
     combined.append(_KOSPI_PROXY_WARNING)
+    combined.append(_BENCHMARK_CALENDAR_ALIGNMENT_WARNING)
     return tuple(combined)

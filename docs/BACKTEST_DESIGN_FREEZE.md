@@ -1130,3 +1130,21 @@ Rules:
 - KOSPI-primary v2 feasible weights remain unchanged
 - evidence export remains opt-in and repo-external
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-4 Local Benchmark Calendar Alignment Patch
+
+Phase 2e-3 removed the execution-price blocker. A follow-up operator real-data
+run then exposed a benchmark common calendar date alignment issue:
+
+``at least 2 common calendar dates are required for benchmark-relative metrics``.
+
+Rules:
+
+- generic ``benchmark_adapter.py`` remains unchanged
+- local dry-run aligns monthly benchmark points to strategy NAV timestamps
+  before metric adaptation
+- alignment preserves benchmark return/value fields and changes only ``as_of``
+- execution period mapping is derived from ``run_config.dataset.common_periods``
+  and ``rolling_lookback_count``
+- evidence export remains opt-in and repo-external
+- no S&P-relative project conclusion exists yet

@@ -14,16 +14,25 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from backtest_engine.local_dataset import (  # noqa: E402
+    LocalMonthlyDatasetAssemblyResult,
     assemble_local_monthly_dataset,
     default_local_monthly_benchmark_spec,
     default_local_monthly_instrument_specs_for_kospi_primary,
 )
 from backtest_engine.local_evaluation import (  # noqa: E402
+    LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1,
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
     LocalMonthlyEvaluationDryRunResult,
+    align_local_monthly_benchmark_points_to_nav_calendar,
     run_local_monthly_evaluation_dry_run,
 )
+from backtest_engine.local_run_config import (  # noqa: E402
+    LocalMonthlyRunConfig,
+    build_kospi_primary_monthly_run_config,
+)
 from backtest_engine.rebalance import _canonical_total_cost_krw  # noqa: E402
+from backtest_engine.walk_forward import BacktestWalkForwardResult  # noqa: E402
+from paper_review.models import BenchmarkReturnPoint  # noqa: E402
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -248,6 +257,33 @@ def test_calls_compute_walk_forward_benchmark_relative_metrics(
     mocked.assert_called_once()
 
 
+def test_run_local_monthly_evaluation_dry_run_calls_alignment_helper_before_adapter(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_evaluation.align_local_monthly_benchmark_points_to_nav_calendar",
+        wraps=align_local_monthly_benchmark_points_to_nav_calendar,
+    ) as align_mock:
+        with patch(
+            "backtest_engine.local_evaluation.compute_walk_forward_benchmark_relative_metrics",
+            wraps=__import__(
+                "backtest_engine.benchmark_adapter",
+                fromlist=["compute_walk_forward_benchmark_relative_metrics"],
+            ).compute_walk_forward_benchmark_relative_metrics,
+        ) as adapter_mock:
+            run_local_monthly_evaluation_dry_run(
+                repo_root=repo_root,
+                data_root=data_root,
+            )
+    align_mock.assert_called_once()
+    adapter_mock.assert_called_once()
+    expected_aligned = align_local_monthly_benchmark_points_to_nav_calendar(
+        **align_mock.call_args.kwargs
+    )
+    assert adapter_mock.call_args.kwargs["benchmark_points"] == expected_aligned
+
+
 def test_calls_render_backtest_evaluation_report_bundle(tmp_path: Path) -> None:
     repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
@@ -373,6 +409,306 @@ def test_staggered_timestamp_synthetic_dry_run_completes_without_execution_price
     assert result.run_config.local_monthly_run_config_policy == (
         "kospi_primary_monthly_rules_config.v3"
     )
+
+
+def test_local_benchmark_calendar_alignment_policy_constant_exists() -> None:
+    assert LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 == (
+        "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
+    )
+
+
+def test_align_local_monthly_benchmark_points_helper_exists() -> None:
+    assert callable(align_local_monthly_benchmark_points_to_nav_calendar)
+
+
+def _dry_run_alignment_inputs(
+    tmp_path: Path,
+) -> tuple[
+    LocalMonthlyRunConfig,
+    BacktestWalkForwardResult,
+    tuple[BenchmarkReturnPoint, ...],
+]:
+    result = _run_dry_run(tmp_path)
+    return (
+        result.run_config,
+        result.walk_forward_result,
+        result.dataset.benchmark_points,
+    )
+
+
+def test_align_returns_one_aligned_benchmark_point_per_nav_point(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    aligned = align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    assert len(aligned) == len(walk_forward_result.nav_points)
+
+
+def test_align_sets_benchmark_as_of_to_corresponding_nav_as_of(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    aligned = align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    for nav_point, aligned_point in zip(
+        walk_forward_result.nav_points,
+        aligned,
+        strict=True,
+    ):
+        assert aligned_point.as_of == nav_point.as_of
+
+
+def test_align_preserves_benchmark_values_except_as_of(tmp_path: Path) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    _write_staggered_kospi_primary_csvs(data_root)
+    dataset = assemble_local_monthly_dataset(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=default_local_monthly_instrument_specs_for_kospi_primary(),
+        benchmark_spec=default_local_monthly_benchmark_spec(),
+    )
+    run_config = build_kospi_primary_monthly_run_config(dataset=dataset)
+    walk_forward_result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    ).walk_forward_result
+    benchmark_points = dataset.benchmark_points
+    aligned = align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    common_periods = run_config.dataset.common_periods
+    rolling_lookback_count = run_config.rolling_lookback_count
+    period_to_benchmark = {
+        fx_point.period_key: benchmark_points[index]
+        for index, fx_point in enumerate(run_config.dataset.fx_points)
+    }
+    for index, aligned_point in enumerate(aligned):
+        execution_period = common_periods[rolling_lookback_count + index]
+        source = period_to_benchmark[execution_period]
+        assert aligned_point.total_return_index_value == source.total_return_index_value
+        if aligned_point.as_of == source.as_of:
+            pytest.fail("expected aligned benchmark as_of to differ from source")
+
+
+def test_align_derives_execution_periods_from_common_periods_and_lookback(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    aligned = align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    common_periods = run_config.dataset.common_periods
+    rolling_lookback_count = run_config.rolling_lookback_count
+    period_to_benchmark = {
+        fx_point.period_key: benchmark_points[index]
+        for index, fx_point in enumerate(run_config.dataset.fx_points)
+    }
+    for index, aligned_point in enumerate(aligned):
+        execution_period = common_periods[rolling_lookback_count + index]
+        assert (
+            aligned_point.total_return_index_value
+            == period_to_benchmark[execution_period].total_return_index_value
+        )
+
+
+def test_align_rejects_missing_benchmark_execution_period(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    missing_execution_period = run_config.dataset.common_periods[
+        run_config.rolling_lookback_count
+    ]
+    fx_points = tuple(
+        fx_point
+        for fx_point in run_config.dataset.fx_points
+        if fx_point.period_key != missing_execution_period
+    )
+    trimmed_benchmark = tuple(
+        benchmark_points[index]
+        for index, fx_point in enumerate(run_config.dataset.fx_points)
+        if fx_point.period_key != missing_execution_period
+    )
+    trimmed_dataset = run_config.dataset.model_copy(
+        update={"fx_points": fx_points, "benchmark_points": trimmed_benchmark}
+    )
+    trimmed_run_config = run_config.model_copy(update={"dataset": trimmed_dataset})
+    with pytest.raises(
+        ValueError,
+        match=f"missing benchmark point for execution period: {missing_execution_period}",
+    ):
+        align_local_monthly_benchmark_points_to_nav_calendar(
+            run_config=trimmed_run_config,
+            walk_forward_result=walk_forward_result,
+            benchmark_points=trimmed_benchmark,
+        )
+
+
+def test_align_rejects_duplicate_benchmark_period_keys_if_detectable(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    duplicated_fx_points = (
+        run_config.dataset.fx_points[0],
+        run_config.dataset.fx_points[0],
+        *run_config.dataset.fx_points[2:],
+    )
+    dataset_dump = run_config.dataset.model_dump()
+    dataset_dump["fx_points"] = duplicated_fx_points
+    duplicated_dataset = LocalMonthlyDatasetAssemblyResult.model_construct(
+        **dataset_dump
+    )
+    run_config_dump = run_config.model_dump()
+    run_config_dump["dataset"] = duplicated_dataset
+    duplicated_run_config = LocalMonthlyRunConfig.model_construct(**run_config_dump)
+    with pytest.raises(ValueError, match="duplicate benchmark period key"):
+        align_local_monthly_benchmark_points_to_nav_calendar(
+            run_config=duplicated_run_config,
+            walk_forward_result=walk_forward_result,
+            benchmark_points=benchmark_points,
+        )
+
+
+def test_align_rejects_mismatched_benchmark_fx_period_lengths(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    with pytest.raises(ValueError, match="benchmark_points length must equal"):
+        align_local_monthly_benchmark_points_to_nav_calendar(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            benchmark_points=benchmark_points + benchmark_points[:1],
+        )
+
+
+def test_align_rejects_fewer_than_two_nav_points(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    single_nav_walk_forward = walk_forward_result.model_copy(
+        update={
+            "nav_points": walk_forward_result.nav_points[:1],
+            "steps": walk_forward_result.steps[:1],
+        }
+    )
+    single_period_run_config = run_config.model_copy(
+        update={"period_specs": run_config.period_specs[:1]}
+    )
+    with pytest.raises(ValueError, match="at least 2 walk-forward NAV points"):
+        align_local_monthly_benchmark_points_to_nav_calendar(
+            run_config=single_period_run_config,
+            walk_forward_result=single_nav_walk_forward,
+            benchmark_points=benchmark_points,
+        )
+
+
+def test_align_does_not_mutate_original_benchmark_points(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    before = tuple(
+        BenchmarkReturnPoint(
+            as_of=point.as_of,
+            total_return_index_value=point.total_return_index_value,
+        )
+        for point in benchmark_points
+    )
+    align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    assert benchmark_points == before
+
+
+def test_align_does_not_mutate_walk_forward_result(tmp_path: Path) -> None:
+    run_config, walk_forward_result, benchmark_points = _dry_run_alignment_inputs(
+        tmp_path
+    )
+    before_nav_points = walk_forward_result.nav_points
+    align_local_monthly_benchmark_points_to_nav_calendar(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        benchmark_points=benchmark_points,
+    )
+    assert walk_forward_result.nav_points == before_nav_points
+
+
+def test_staggered_timestamp_synthetic_dry_run_completes_through_benchmark_metrics(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    _write_staggered_kospi_primary_csvs(data_root)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    assert result.benchmark_relative_result.metrics
+    assert len(result.benchmark_relative_result.common_dates) >= 2
+
+
+def test_staggered_timestamp_dry_run_has_at_least_two_common_dates_after_alignment(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    _write_staggered_kospi_primary_csvs(data_root)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    assert len(result.benchmark_relative_result.common_dates) >= 2
+
+
+def test_benchmark_relative_common_dates_equal_aligned_strategy_nav_dates(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    _write_staggered_kospi_primary_csvs(data_root)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    nav_dates = tuple(
+        nav_point.as_of.date() for nav_point in result.walk_forward_result.nav_points
+    )
+    assert result.benchmark_relative_result.common_dates == nav_dates
+
+
+def test_warnings_include_benchmark_calendar_alignment_notice(tmp_path: Path) -> None:
+    result = _run_dry_run(tmp_path)
+    assert any(
+        "local benchmark points are calendar-aligned to strategy NAV timestamps"
+        in warning
+        for warning in result.warnings
+    )
+
+
+def test_benchmark_adapter_module_not_modified_in_this_phase() -> None:
+    benchmark_adapter_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "backtest_engine"
+        / "benchmark_adapter.py"
+    )
+    text = benchmark_adapter_path.read_text(encoding="utf-8")
+    assert "LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1" not in text
+    assert "align_local_monthly_benchmark_points_to_nav_calendar" not in text
 
 
 def test_mixed_regime_us_kr_risk_on_gold_risk_off_dry_run_succeeds(
@@ -823,6 +1159,7 @@ def test_module_has_no_forbidden_runtime_or_imports() -> None:
         "assemble_local_monthly_dataset",
         "build_kospi_primary_monthly_run_config",
         "run_explicit_schedule_rules_walk_forward_nav",
+        "align_local_monthly_benchmark_points_to_nav_calendar",
         "compute_walk_forward_benchmark_relative_metrics",
         "render_backtest_evaluation_report_bundle",
     )
