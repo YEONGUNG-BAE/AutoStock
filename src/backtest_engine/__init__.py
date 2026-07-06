@@ -10,6 +10,11 @@ performance.
 
 from __future__ import annotations
 
+from backtest_engine.benchmark_adapter import (
+    BENCHMARK_ADAPTER_POLICY_V1,
+    BacktestBenchmarkRelativeResult,
+    compute_walk_forward_benchmark_relative_metrics,
+)
 from backtest_engine.execution_prices import (
     EXECUTION_PRICE_POLICY_V1,
     BacktestExecutionPrice,
@@ -65,6 +70,7 @@ from backtest_engine.step_contract import (
 )
 
 __all__ = [
+    "BENCHMARK_ADAPTER_POLICY_V1",
     "DECIMAL_WEIGHT_TOLERANCE",
     "COST_MODEL_V1",
     "EXECUTION_PRICE_POLICY_V1",
@@ -72,6 +78,7 @@ __all__ = [
     "REBALANCE_ACCOUNTING_POLICY_V1",
     "RULES_ALLOCATOR_V1",
     "WALK_FORWARD_POLICY_V1",
+    "BacktestBenchmarkRelativeResult",
     "BacktestAssetFeature",
     "BacktestCostModel",
     "BacktestExecutionPrice",
@@ -91,6 +98,7 @@ __all__ = [
     "ObservationSpacingReport",
     "RollingLongMaAssetConfig",
     "SnapshotAssetConfig",
+    "compute_walk_forward_benchmark_relative_metrics",
     "allocate_rules_only_v1",
     "apply_single_rebalance_accounting",
     "build_feature_snapshot_from_source_records",

@@ -833,3 +833,31 @@ Rules:
 - does not compare with S&P
 - does not render reports
 - benchmark-relative scoring is deferred to a later phase
+
+### Phase 2c-8 Benchmark Adapter Contract
+
+Phase 2c-8 adapts AutoStock-only walk-forward ``BacktestNavPoint`` values and
+explicit ``BenchmarkReturnPoint`` inputs to existing Phase 1
+``BenchmarkRelativeMetrics``.
+
+Rules:
+
+- input is one ``BacktestWalkForwardResult`` and explicit benchmark return
+  points supplied by the caller
+- output is one immutable ``BacktestBenchmarkRelativeResult``
+- the public API is ``compute_walk_forward_benchmark_relative_metrics``
+- the benchmark adapter policy string is
+  ``walk_forward_nav_to_benchmark_relative_metrics.v1``
+- uses NAV point ``as_of.date()`` as the strategy calendar date
+- uses NAV point ``portfolio_value_krw`` as the strategy total-return level
+- aligns strategy and benchmark on common calendar dates only
+- no forward-fill, back-fill, or interpolation for missing dates
+- requires at least 2 common calendar dates
+- rejects duplicate strategy or benchmark calendar dates
+- calls existing ``compute_benchmark_relative_metrics``; does not duplicate
+  benchmark-relative math
+- benchmark points are explicit inputs; no benchmark data is loaded or fetched
+- does not run walk-forward execution
+- does not render markdown reports
+- does not produce investment conclusions or S&P beat/lose claims
+- does not fetch or use real data
