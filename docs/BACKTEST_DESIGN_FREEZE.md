@@ -749,3 +749,59 @@ Rules:
   maintain holdings or a cash ledger, produce NAV, or compute
   benchmark-relative metrics
 - does not fetch or use real data
+
+### Phase 2c-5 Single-Rebalance Accounting Contract
+
+Phase 2c-5 applies one already-built ``BacktestSingleStepDecision`` and one
+``BacktestExecutionPriceSlice`` to one ``BacktestPortfolioState`` using an
+explicit ``usdkrw_rate`` and ``BacktestCostModel``.
+
+Rules:
+
+- input is one decision, one execution price slice, one portfolio state, one
+  cost model, and one explicit ``usdkrw_rate``
+- output is one immutable ``BacktestRebalanceResult``
+- the public API is ``apply_single_rebalance_accounting``
+- the accounting policy string is ``single_rebalance_target_weight_accounting.v1``
+- the cost model version string is
+  ``simple_proportional_fee_sell_tax_fx_spread.v1``
+- computes one rebalance only from ``decision.target_weights`` and selected
+  execution prices
+- fee applies to all buy and sell traded KRW notional
+- KR sell tax applies only to KR sells
+- FX spread applies to US/GOLD trades
+- computes post-trade holdings, cash, and one post-trade portfolio value
+- post-trade portfolio value equals pre-trade value minus total costs within
+  exact Decimal arithmetic
+- does not implement a walk-forward loop
+- does not produce a NAV series
+- does not compute benchmark-relative metrics
+- does not fetch or use real data
+
+### Phase 2c-5 Single-Rebalance Accounting Contract
+
+Phase 2c-5 applies one already-built ``BacktestSingleStepDecision`` and one
+``BacktestExecutionPriceSlice`` to one ``BacktestPortfolioState`` using an
+explicit ``usdkrw_rate`` and ``BacktestCostModel``.
+
+Rules:
+
+- input is one decision, one execution price slice, one portfolio state, one
+  cost model, and one explicit ``usdkrw_rate``
+- output is one immutable ``BacktestRebalanceResult``
+- the public API is ``apply_single_rebalance_accounting``
+- the accounting policy string is ``single_rebalance_target_weight_accounting.v1``
+- the cost model version string is
+  ``simple_proportional_fee_sell_tax_fx_spread.v1``
+- computes one rebalance only from ``decision.target_weights`` and selected
+  execution prices
+- fee applies to all buy and sell traded KRW notional
+- KR sell tax applies only to KR sells
+- FX spread applies to US/GOLD trades
+- computes post-trade holdings, cash, and one post-trade portfolio value
+- post-trade portfolio value equals pre-trade value minus total costs within
+  exact Decimal arithmetic
+- does not implement a walk-forward loop
+- does not produce a NAV series
+- does not compute benchmark-relative metrics
+- does not fetch or use real data
