@@ -5,9 +5,11 @@ single-step backtest contract, an as-of-safe snapshot builder, as-of-safe
 rolling feature helpers, count-based observation spacing guards, a single-step
 rules decision composer, explicit-schedule walk-forward NAV, and a
 benchmark-relative metrics adapter, a benchmark-relative markdown report
-bundle renderer, and a synthetic end-to-end evaluation pipeline composer. It
-does not load real data, fetch data, run live or paper trading, or produce
-project-level investment conclusions.
+bundle renderer, a synthetic end-to-end evaluation pipeline composer,
+metadata-only local data preflight, and local monthly dataset/run-config
+assembly. It does not fetch or download data, does not execute real-data
+backtests unless an explicit execution function is called, does not run live or
+paper trading, and does not produce project-level investment conclusions.
 """
 
 from __future__ import annotations
@@ -34,10 +36,16 @@ from backtest_engine.local_dataset import (
     LOCAL_MONTHLY_DATASET_POLICY_V1,
     LocalMonthlyBenchmarkSpec,
     LocalMonthlyDatasetAssemblyResult,
+    LocalMonthlyFxRatePoint,
     LocalMonthlyInstrumentSpec,
     assemble_local_monthly_dataset,
     default_local_monthly_benchmark_spec,
     default_local_monthly_instrument_specs_for_kospi_primary,
+)
+from backtest_engine.local_run_config import (
+    LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
+    LocalMonthlyRunConfig,
+    build_kospi_primary_monthly_run_config,
 )
 from backtest_engine.report_bundle import (
     BACKTEST_REPORT_BUNDLE_POLICY_V1,
@@ -111,6 +119,7 @@ __all__ = [
     "BACKTEST_REPORT_BUNDLE_POLICY_V1",
     "LOCAL_DATA_PREFLIGHT_POLICY_V1",
     "LOCAL_MONTHLY_DATASET_POLICY_V1",
+    "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1",
     "BacktestBenchmarkRelativeResult",
     "BacktestEvaluationPipelineResult",
     "BacktestEvaluationReportBundle",
@@ -119,7 +128,9 @@ __all__ = [
     "LocalDataPreflightResult",
     "LocalMonthlyBenchmarkSpec",
     "LocalMonthlyDatasetAssemblyResult",
+    "LocalMonthlyFxRatePoint",
     "LocalMonthlyInstrumentSpec",
+    "LocalMonthlyRunConfig",
     "BacktestAssetFeature",
     "BacktestCostModel",
     "BacktestExecutionPrice",
@@ -147,6 +158,7 @@ __all__ = [
     "run_explicit_synthetic_backtest_evaluation_pipeline",
     "run_local_data_preflight",
     "assemble_local_monthly_dataset",
+    "build_kospi_primary_monthly_run_config",
     "allocate_rules_only_v1",
     "apply_single_rebalance_accounting",
     "build_feature_snapshot_from_source_records",

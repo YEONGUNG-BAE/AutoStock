@@ -494,6 +494,54 @@ def test_benchmark_points_are_built_from_sp500tr_times_usdkrw(tmp_path: Path) ->
     assert result.benchmark_points[0].total_return_index_value == Decimal("130000")
 
 
+def test_fx_points_are_built_from_usdkrw_csv(tmp_path: Path) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    specs = _write_minimal_dataset(data_root, periods=("2020-01", "2020-02"))
+    _write_csv(
+        data_root / "monthly/sp500tr_monthly.csv",
+        (
+            "2020-01-31,2020-02-01T00:00:00+00:00,SP500TR,US,100,synthetic",
+            "2020-02-29,2020-03-01T00:00:00+00:00,SP500TR,US,101,synthetic",
+        ),
+    )
+    _write_csv(
+        data_root / "monthly/usdkrw_monthly.csv",
+        (
+            "2020-01-31,2020-02-01T00:00:00+00:00,USDKRW,FX,1300,synthetic",
+            "2020-02-29,2020-03-01T00:00:00+00:00,USDKRW,FX,1301,synthetic",
+        ),
+    )
+
+    result = assemble_local_monthly_dataset(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=specs,
+        benchmark_spec=default_local_monthly_benchmark_spec(),
+    )
+
+    assert len(result.fx_points) == 2
+    assert result.fx_points[0].period_key == "2020-01"
+    assert result.fx_points[0].usdkrw_rate == Decimal("1300")
+    assert result.fx_points[1].period_key == "2020-02"
+    assert result.fx_points[1].usdkrw_rate == Decimal("1301")
+
+
+def test_fx_points_are_metadata_only_not_nav() -> None:
+    fields = set(LocalMonthlyDatasetAssemblyResult.model_fields)
+    forbidden = {
+        "nav",
+        "nav_points",
+        "portfolio_value_krw",
+        "total_nav_krw",
+        "benchmark_relative",
+        "metrics",
+        "markdown_report",
+        "investment_advice",
+    }
+    assert "fx_points" in fields
+    assert fields.isdisjoint(forbidden)
+
+
 def test_benchmark_as_of_uses_max_of_sp500tr_and_usdkrw_as_of(tmp_path: Path) -> None:
     repo_root, data_root = _layout(tmp_path)
     specs = _write_minimal_dataset(data_root, periods=("2020-01",))
@@ -970,6 +1018,7 @@ def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None
             benchmark_spec=default_local_monthly_benchmark_spec(),
             source_records=result.source_records,
             benchmark_points=result.benchmark_points,
+            fx_points=result.fx_points,
             common_periods=result.common_periods,
             warnings=(),
             recommendation="forbidden",  # type: ignore[call-arg]

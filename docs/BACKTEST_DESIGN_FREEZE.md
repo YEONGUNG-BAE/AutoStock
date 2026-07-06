@@ -955,3 +955,28 @@ Rules:
 - does not fetch or download data
 - does not commit real data
 - real-data backtest execution is deferred to a later explicit phase
+
+### Phase 2d-2 Local Monthly Run Config Contract
+
+Phase 2d-2 builds a frozen KOSPI-primary monthly run configuration from an
+assembled local monthly dataset.
+
+Rules:
+
+- builds frozen KOSPI-primary monthly run config from assembled local dataset
+- uses explicit common periods only
+- first common period is warm-up baseline
+- creates explicit ``BacktestPeriodSpec`` values
+- uses previous period timestamp for decision and current period timestamp for
+  execution
+- uses current period USDKRW rate
+- creates rolling configs, initial portfolio, cost model, and cash settings
+- KOSPI primary is KR proxy, not implementable ETF evidence
+- does not read CSVs directly
+- does not run backtest
+- does not compute NAV
+- does not compute benchmark-relative metrics
+- does not render reports
+- does not fetch or download data
+- does not commit real data
+- real-data backtest execution is deferred to a later explicit phase

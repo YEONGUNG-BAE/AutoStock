@@ -71,6 +71,39 @@ class LocalMonthlyInstrumentSpec(BaseModel):
         return value
 
 
+class LocalMonthlyFxRatePoint(BaseModel):
+    """Immutable monthly USDKRW rate metadata for one common period."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    period_key: str
+    as_of: datetime
+    usdkrw_rate: Decimal
+
+    @field_validator("period_key")
+    @classmethod
+    def validate_period_key(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("period_key must not be empty.")
+        return value
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def validate_as_of(cls, value: object) -> datetime:
+        return parse_timezone_aware_datetime(str(value), field_name="as_of")
+
+    @field_validator("usdkrw_rate", mode="before")
+    @classmethod
+    def validate_usdkrw_rate(cls, value: object) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError("usdkrw_rate must be a Decimal.") from exc
+        if not parsed.is_finite() or parsed <= Decimal("0"):
+            raise ValueError("usdkrw_rate must be a positive finite Decimal.")
+        return parsed
+
+
 class LocalMonthlyBenchmarkSpec(BaseModel):
     """Immutable benchmark CSV path specification for local monthly assembly."""
 
@@ -104,6 +137,7 @@ class LocalMonthlyDatasetAssemblyResult(BaseModel):
     benchmark_spec: LocalMonthlyBenchmarkSpec
     source_records: tuple[DateIdSourceRecord, ...]
     benchmark_points: tuple[BenchmarkReturnPoint, ...]
+    fx_points: tuple[LocalMonthlyFxRatePoint, ...]
     common_periods: tuple[str, ...]
     warnings: tuple[str, ...]
 
@@ -115,6 +149,8 @@ class LocalMonthlyDatasetAssemblyResult(BaseModel):
             raise ValueError("source_records must not be empty.")
         if not self.benchmark_points:
             raise ValueError("benchmark_points must not be empty.")
+        if not self.fx_points:
+            raise ValueError("fx_points must not be empty.")
         if not self.common_periods:
             raise ValueError("common_periods must not be empty.")
 
@@ -221,7 +257,7 @@ def assemble_local_monthly_dataset(
         data_root=resolved_data_root,
         repo_root=resolved_repo_root,
     )
-    benchmark_points, benchmark_periods, benchmark_warnings = _build_benchmark_points(
+    benchmark_points, fx_points, benchmark_periods, benchmark_warnings = _build_benchmark_points(
         sp500tr_path=sp500tr_path,
         usdkrw_path=usdkrw_path,
     )
@@ -242,6 +278,7 @@ def assemble_local_monthly_dataset(
         benchmark_spec=benchmark_spec,
         source_records=tuple(source_records),
         benchmark_points=benchmark_points,
+        fx_points=fx_points,
         common_periods=common_periods,
         warnings=tuple(warnings),
     )
@@ -455,7 +492,12 @@ def _build_benchmark_points(
     *,
     sp500tr_path: Path,
     usdkrw_path: Path,
-) -> tuple[tuple[BenchmarkReturnPoint, ...], set[str], tuple[str, ...]]:
+) -> tuple[
+    tuple[BenchmarkReturnPoint, ...],
+    tuple[LocalMonthlyFxRatePoint, ...],
+    set[str],
+    tuple[str, ...],
+]:
     sp_rows = _read_benchmark_value_rows(path=sp500tr_path)
     fx_rows = _read_benchmark_value_rows(path=usdkrw_path)
 
@@ -474,6 +516,7 @@ def _build_benchmark_points(
         warnings.append(f"dropped_non_common_periods:{len(dropped_sp) + len(dropped_fx)}")
 
     points: list[BenchmarkReturnPoint] = []
+    fx_rate_points: list[LocalMonthlyFxRatePoint] = []
     for period_key in sorted(common_periods):
         sp_row = sp_rows[period_key]
         fx_row = fx_rows[period_key]
@@ -483,11 +526,18 @@ def _build_benchmark_points(
                 total_return_index_value=sp_row.close_adjusted * fx_row.close_adjusted,
             )
         )
+        fx_rate_points.append(
+            LocalMonthlyFxRatePoint(
+                period_key=period_key,
+                as_of=fx_row.as_of,
+                usdkrw_rate=fx_row.close_adjusted,
+            )
+        )
 
     if not points:
         raise ValueError("benchmark_points must not be empty.")
 
-    return tuple(points), common_periods, tuple(warnings)
+    return tuple(points), tuple(fx_rate_points), common_periods, tuple(warnings)
 
 
 class _BenchmarkCsvRow:
