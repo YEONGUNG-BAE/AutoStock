@@ -1027,3 +1027,26 @@ Rules:
 - KOSPI primary is KR proxy, not implementable ETF evidence
 - result is research evidence only
 - no project-level investment conclusion or S&P-beat claim
+
+### Phase 2d-4 Operator Local Dry-Run CLI Contract
+
+Phase 2d-4 adds an operator command-line entry point for the local monthly
+real-data evaluation dry-run.
+
+Rules:
+
+- CLI runs local dry-run from sibling ``autostock-data``
+- default data root is sibling ``repo_root.parent / "autostock-data"``
+- CLI calls ``run_local_monthly_evaluation_dry_run(...)``; it does not
+  reimplement the dry-run pipeline
+- CLI prints sanitized summary only to stdout
+- full markdown report is not printed by default
+- optional ``--show-markdown-preview`` prints at most the first 20 lines of
+  the in-memory markdown report
+- no report files or artifacts are written
+- no fetch or download
+- no raw CSV rows
+- no config or secrets read or printed
+- rejected output/write/fetch/live/paper CLI args exit nonzero
+- result is research evidence only
+- no project-level investment conclusion or S&P-beat claim
