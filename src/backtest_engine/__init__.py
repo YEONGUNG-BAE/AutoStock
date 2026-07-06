@@ -26,6 +26,11 @@ from backtest_engine.rebalance import (
     BacktestTrade,
     apply_single_rebalance_accounting,
 )
+from backtest_engine.period_step import (
+    PERIOD_STEP_POLICY_V1,
+    BacktestSinglePeriodStepResult,
+    run_single_period_rules_rebalance_step,
+)
 from backtest_engine.observation_spacing import (
     ObservationSpacingReport,
     validate_uniform_observation_spacing_for_count_based_ma,
@@ -56,6 +61,7 @@ __all__ = [
     "DECIMAL_WEIGHT_TOLERANCE",
     "COST_MODEL_V1",
     "EXECUTION_PRICE_POLICY_V1",
+    "PERIOD_STEP_POLICY_V1",
     "REBALANCE_ACCOUNTING_POLICY_V1",
     "RULES_ALLOCATOR_V1",
     "BacktestAssetFeature",
@@ -66,6 +72,7 @@ __all__ = [
     "BacktestHolding",
     "BacktestPortfolioState",
     "BacktestRebalanceResult",
+    "BacktestSinglePeriodStepResult",
     "BacktestSingleStepDecision",
     "BacktestTargetWeight",
     "BacktestTargetWeights",
@@ -79,6 +86,7 @@ __all__ = [
     "build_single_step_rules_decision",
     "build_snapshot_configs_with_rolling_long_ma",
     "make_rules_only_single_step_decision",
+    "run_single_period_rules_rebalance_step",
     "select_execution_prices_for_single_step_decision",
     "validate_uniform_observation_spacing_for_count_based_ma",
 ]

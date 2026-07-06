@@ -777,3 +777,32 @@ Rules:
 - does not produce a NAV series
 - does not compute benchmark-relative metrics
 - does not fetch or use real data
+
+### Phase 2c-6 One-Period Step Contract
+
+Phase 2c-6 composes exactly one period from already-frozen building blocks:
+
+``source records -> single-step rules decision -> execution price selection
+-> single-rebalance accounting -> next portfolio state``.
+
+Rules:
+
+- input is one read-only source, one ``decision_time``, one
+  ``intended_execution_time``, one ``BacktestPortfolioState``, one
+  ``BacktestCostModel``, one explicit ``usdkrw_rate``, and rolling asset
+  configs
+- output is one immutable ``BacktestSinglePeriodStepResult``
+- the public API is ``run_single_period_rules_rebalance_step``
+- the period step policy string is ``single_period_rules_rebalance_step.v1``
+- calls ``make_rules_only_single_step_decision`` for the signal-side decision
+- calls ``select_execution_prices_for_single_step_decision`` for execution prices
+- calls ``apply_single_rebalance_accounting`` for trades and costs
+- builds ``next_portfolio_state`` from rebalance post-trade cash and holdings
+  with ``as_of = intended_execution_time``
+- does not recompute target weights, execution prices, or trades beyond the
+  existing building blocks
+- does not implement a walk-forward loop
+- does not generate a rebalance schedule
+- does not produce a NAV series
+- does not compute benchmark-relative metrics
+- does not fetch or use real data
