@@ -1072,3 +1072,20 @@ Rules:
 - no live/paper/runtime writes
 - no project-level investment conclusion or S&P-beat claim
 - output artifacts must not be committed
+
+### Phase 2e-1 KOSPI-Primary Weight Feasibility Patch
+
+Phase 2e-0 real operator run exposed an infeasible KOSPI-primary weight
+combination when US and KR were risk-on while gold was risk-off.
+
+Rules:
+
+- ``rules_allocator.v1`` remains unchanged and correctly enforces the cash floor
+- KOSPI-primary run config policy is updated to v2
+- fixed weights guarantee
+  ``sum(max(risk_on, risk_off)) + cash_min_weight <= 1``
+- builder validates weight-table feasibility before returning
+  ``LocalMonthlyRunConfig``
+- this is a feasibility patch only, not an investment conclusion
+- evidence export remains opt-in and repo-external
+- no S&P-relative project conclusion exists yet

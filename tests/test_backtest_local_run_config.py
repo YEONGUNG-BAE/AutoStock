@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -20,10 +22,13 @@ from backtest_engine.local_dataset import (  # noqa: E402
 )
 from backtest_engine.local_run_config import (  # noqa: E402
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
+    LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
 from backtest_engine.rebalance import COST_MODEL_V1  # noqa: E402
+from backtest_engine.rules_allocator import allocate_rules_only_v1  # noqa: E402
+from backtest_engine.step_contract import BacktestAssetFeature, BacktestFeatureSnapshot  # noqa: E402
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -150,7 +155,7 @@ def test_builds_local_monthly_run_config_from_synthetic_assembled_dataset(
 ) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
-    assert result.local_monthly_run_config_policy == LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1
+    assert result.local_monthly_run_config_policy == LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2
     assert result.dataset is dataset
 
 
@@ -223,7 +228,7 @@ def test_uses_fixed_deterministic_weights(tmp_path: Path) -> None:
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
     by_asset = {config.asset_id: config for config in result.rolling_asset_configs}
 
-    assert by_asset["asset_us"].risk_on_weight == Decimal("0.60")
+    assert by_asset["asset_us"].risk_on_weight == Decimal("0.55")
     assert by_asset["asset_us"].risk_off_weight == Decimal("0.30")
     assert by_asset["asset_us"].max_weight == Decimal("0.80")
 
@@ -232,7 +237,7 @@ def test_uses_fixed_deterministic_weights(tmp_path: Path) -> None:
     assert by_asset["asset_kr"].max_weight == Decimal("0.40")
 
     assert by_asset["asset_gold"].risk_on_weight == Decimal("0.15")
-    assert by_asset["asset_gold"].risk_off_weight == Decimal("0.25")
+    assert by_asset["asset_gold"].risk_off_weight == Decimal("0.20")
     assert by_asset["asset_gold"].max_weight == Decimal("0.35")
 
 
@@ -478,7 +483,7 @@ def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None
 
     with pytest.raises(ValidationError):
         LocalMonthlyRunConfig(
-            local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
+            local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
             dataset=dataset,
             period_specs=result.period_specs,
             rolling_asset_configs=result.rolling_asset_configs,
@@ -618,8 +623,132 @@ def test_module_has_no_forbidden_runtime_or_imports() -> None:
         assert token not in text, f"forbidden token present: {token}"
 
 
-def test_policy_constant_matches_result_model() -> None:
+def test_policy_constant_v1_remains_for_historical_reference() -> None:
     assert LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 == "kospi_primary_monthly_rules_config.v1"
+
+
+def test_policy_constant_v2_matches_builder_result() -> None:
+    assert LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2 == "kospi_primary_monthly_rules_config.v2"
+
+
+def test_max_possible_non_cash_total_is_095(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset)
+    max_non_cash_total = sum(
+        (
+            max(config.risk_on_weight, config.risk_off_weight)
+            for config in result.rolling_asset_configs
+        ),
+        Decimal("0"),
+    )
+    assert max_non_cash_total == Decimal("0.95")
+    assert max_non_cash_total + result.cash_min_weight == Decimal("1.00")
+
+
+_DECISION_TIME = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)
+_AS_OF = _DECISION_TIME - timedelta(hours=1)
+
+
+def _kospi_primary_regime_asset(
+    asset_id: str,
+    *,
+    risk_on: bool,
+) -> BacktestAssetFeature:
+    params = {
+        "asset_us": {
+            "risk_on_weight": Decimal("0.55"),
+            "risk_off_weight": Decimal("0.30"),
+            "min_weight": Decimal("0"),
+            "max_weight": Decimal("0.80"),
+        },
+        "asset_kr": {
+            "risk_on_weight": Decimal("0.20"),
+            "risk_off_weight": Decimal("0.05"),
+            "min_weight": Decimal("0"),
+            "max_weight": Decimal("0.40"),
+        },
+        "asset_gold": {
+            "risk_on_weight": Decimal("0.15"),
+            "risk_off_weight": Decimal("0.20"),
+            "min_weight": Decimal("0"),
+            "max_weight": Decimal("0.35"),
+        },
+    }
+    current_price, long_ma = (
+        (Decimal("110"), Decimal("100")) if risk_on else (Decimal("90"), Decimal("100"))
+    )
+    return BacktestAssetFeature(
+        asset_id=asset_id,
+        as_of=_AS_OF,
+        current_price=current_price,
+        long_ma=long_ma,
+        **params[asset_id],
+    )
+
+
+def test_all_eight_risk_regimes_satisfy_cash_floor() -> None:
+    cash_min_weight = Decimal("0.05")
+    for us_on, kr_on, gold_on in itertools.product((True, False), repeat=3):
+        snapshot = BacktestFeatureSnapshot(
+            decision_time=_DECISION_TIME,
+            assets=(
+                _kospi_primary_regime_asset("asset_us", risk_on=us_on),
+                _kospi_primary_regime_asset("asset_kr", risk_on=kr_on),
+                _kospi_primary_regime_asset("asset_gold", risk_on=gold_on),
+            ),
+            cash_asset_id="cash",
+            cash_min_weight=cash_min_weight,
+        )
+        target_weights = allocate_rules_only_v1(snapshot)
+        cash_weight = next(
+            weight.weight for weight in target_weights.weights if weight.asset_id == "cash"
+        )
+        assert cash_weight >= cash_min_weight
+
+
+def test_infeasible_weight_table_raises_deterministic_error(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    infeasible_specs = (
+        (
+            "asset_us",
+            "SP500TR",
+            "US",
+            Decimal("0.60"),
+            Decimal("0.30"),
+            Decimal("0"),
+            Decimal("0.80"),
+        ),
+        (
+            "asset_kr",
+            "KOSPI",
+            "KR",
+            Decimal("0.20"),
+            Decimal("0.05"),
+            Decimal("0"),
+            Decimal("0.40"),
+        ),
+        (
+            "asset_gold",
+            "GLD",
+            "US",
+            Decimal("0.15"),
+            Decimal("0.25"),
+            Decimal("0"),
+            Decimal("0.35"),
+        ),
+    )
+    import backtest_engine.local_run_config as local_run_config_module
+
+    with patch.object(
+        local_run_config_module,
+        "_KOSPI_PRIMARY_ROLLING_SPECS",
+        infeasible_specs,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="KOSPI-primary weight table violates cash_min_weight feasibility.",
+        ):
+            build_kospi_primary_monthly_run_config(dataset=dataset)
 
 
 def test_focused_regression_suite_passes() -> None:

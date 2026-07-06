@@ -25,6 +25,7 @@ from domain._datetime import require_timezone_aware_datetime
 from domain.source import DateIdSourceRecord
 
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 = "kospi_primary_monthly_rules_config.v1"
+LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2 = "kospi_primary_monthly_rules_config.v2"
 
 _FIRST_DAY_OF_MONTH_WARNING_SUBSTRING = "first day of month"
 
@@ -36,9 +37,9 @@ _KOSPI_PRIMARY_ROLLING_SPECS: tuple[
     tuple[str, str, str, Decimal, Decimal, Decimal, Decimal],
     ...,
 ] = (
-    ("asset_us", "SP500TR", "US", Decimal("0.60"), Decimal("0.30"), Decimal("0"), Decimal("0.80")),
+    ("asset_us", "SP500TR", "US", Decimal("0.55"), Decimal("0.30"), Decimal("0"), Decimal("0.80")),
     ("asset_kr", "KOSPI", "KR", Decimal("0.20"), Decimal("0.05"), Decimal("0"), Decimal("0.40")),
-    ("asset_gold", "GLD", "US", Decimal("0.15"), Decimal("0.25"), Decimal("0"), Decimal("0.35")),
+    ("asset_gold", "GLD", "US", Decimal("0.15"), Decimal("0.20"), Decimal("0"), Decimal("0.35")),
 )
 
 ZERO = Decimal("0")
@@ -50,7 +51,10 @@ class LocalMonthlyRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    local_monthly_run_config_policy: Literal["kospi_primary_monthly_rules_config.v1"]
+    local_monthly_run_config_policy: Literal[
+        "kospi_primary_monthly_rules_config.v1",
+        "kospi_primary_monthly_rules_config.v2",
+    ]
     dataset: LocalMonthlyDatasetAssemblyResult
     period_specs: tuple[BacktestPeriodSpec, ...]
     rolling_asset_configs: tuple[RollingLongMaAssetConfig, ...]
@@ -177,6 +181,10 @@ def build_kospi_primary_monthly_run_config(
     rolling_asset_configs = _build_kospi_primary_rolling_configs(
         lookback_count=rolling_lookback_count,
     )
+    _validate_kospi_primary_weight_feasibility(
+        rolling_asset_configs=rolling_asset_configs,
+        cash_min_weight=cash_floor,
+    )
 
     cost_model = BacktestCostModel(
         cost_model_version=COST_MODEL_V1,
@@ -188,7 +196,7 @@ def build_kospi_primary_monthly_run_config(
     warnings = _collect_warnings(dataset.warnings)
 
     return LocalMonthlyRunConfig(
-        local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
+        local_monthly_run_config_policy=LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
         dataset=dataset,
         period_specs=period_specs,
         rolling_asset_configs=rolling_asset_configs,
@@ -199,6 +207,19 @@ def build_kospi_primary_monthly_run_config(
         rolling_lookback_count=rolling_lookback_count,
         warnings=warnings,
     )
+
+
+def _validate_kospi_primary_weight_feasibility(
+    *,
+    rolling_asset_configs: tuple[RollingLongMaAssetConfig, ...],
+    cash_min_weight: Decimal,
+) -> None:
+    max_non_cash_total = sum(
+        (max(config.risk_on_weight, config.risk_off_weight) for config in rolling_asset_configs),
+        ZERO,
+    )
+    if max_non_cash_total + cash_min_weight > ONE:
+        raise ValueError("KOSPI-primary weight table violates cash_min_weight feasibility.")
 
 
 def _build_kospi_primary_rolling_configs(

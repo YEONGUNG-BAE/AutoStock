@@ -92,6 +92,7 @@ def _write_default_kospi_primary_csvs(
         "2020-04",
         "2020-05",
     ),
+    close_by_symbol: dict[str, tuple[Decimal, ...]] | None = None,
 ) -> None:
     specs = default_local_monthly_instrument_specs_for_kospi_primary()
     benchmark = default_local_monthly_benchmark_spec()
@@ -101,7 +102,10 @@ def _write_default_kospi_primary_csvs(
         for index, period in enumerate(periods):
             year, month = period.split("-")
             day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
-            close = Decimal("100") + Decimal(index)
+            if close_by_symbol is not None and spec.symbol in close_by_symbol:
+                close = close_by_symbol[spec.symbol][index]
+            else:
+                close = Decimal("100") + Decimal(index)
             as_of_month = int(month) + 1
             as_of_year = int(year)
             if as_of_month > 12:
@@ -123,9 +127,13 @@ def _write_default_kospi_primary_csvs(
         if as_of_month > 12:
             as_of_month = 1
             as_of_year += 1
+        if close_by_symbol is not None and "SP500TR" in close_by_symbol:
+            sp_close = close_by_symbol["SP500TR"][index]
+        else:
+            sp_close = Decimal("100") + Decimal(index)
         sp_rows.append(
             f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
-            f"SP500TR,US,{100 + index},synthetic"
+            f"SP500TR,US,{sp_close},synthetic"
         )
         fx_rows.append(
             f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
@@ -282,6 +290,37 @@ def test_default_kospi_primary_dry_run_succeeds_with_one_row_per_period_csvs(
         "sp500tr_asset_monthly.csv" in spec.relative_path
         for spec in result.dataset.instrument_specs
     )
+
+
+def test_mixed_regime_us_kr_risk_on_gold_risk_off_dry_run_succeeds(
+    tmp_path: Path,
+) -> None:
+    """US/KR risk-on with GLD risk-off must not violate the cash floor under v2 weights."""
+    repo_root, data_root = _layout(tmp_path)
+    periods = ("2020-01", "2020-02", "2020-03", "2020-04", "2020-05")
+    rising = tuple(Decimal("100") + Decimal(index * 10) for index in range(len(periods)))
+    gld_mixed = (
+        Decimal("100"),
+        Decimal("120"),
+        Decimal("90"),
+        Decimal("95"),
+        Decimal("100"),
+    )
+    _write_default_kospi_primary_csvs(
+        data_root,
+        periods=periods,
+        close_by_symbol={
+            "SP500TR": rising,
+            "KOSPI": rising,
+            "GLD": gld_mixed,
+        },
+    )
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    assert result.walk_forward_result.steps
+    assert result.run_config.local_monthly_run_config_policy.endswith(".v2")
 
 
 def test_uses_default_kospi_primary_instrument_specs_when_none_supplied(
