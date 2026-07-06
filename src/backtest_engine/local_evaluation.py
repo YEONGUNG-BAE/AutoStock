@@ -47,6 +47,18 @@ LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1 = (
 LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 = (
     "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
 )
+LOCAL_NAV_SANITY_POLICY_V1 = "local_monthly_walk_forward_nav_sanity.v1"
+
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
+_FX_MARKETS = frozenset({"US", "GOLD"})
+_SUPPORTED_MARKETS = frozenset({"KR", "US", "GOLD"})
+# Evidence-quality guard: no single trade may exceed 2x pre-trade NAV notional.
+_MAX_TRADE_GROSS_NOTIONAL_NAV_MULTIPLE = Decimal("2.00")
+
+_NAV_SANITY_PASSED_WARNING = (
+    "local monthly walk-forward NAV passed deterministic sanity checks"
+)
 
 _RESEARCH_ONLY_WARNING = (
     "real-data dry-run result is research evidence only; "
@@ -194,6 +206,180 @@ def align_local_monthly_benchmark_points_to_nav_calendar(
     return tuple(aligned_points)
 
 
+def validate_local_monthly_walk_forward_nav_sanity(
+    *,
+    run_config: LocalMonthlyRunConfig,
+    walk_forward_result: BacktestWalkForwardResult,
+    max_abs_period_return: Decimal = Decimal("1.00"),
+    max_terminal_return: Decimal = Decimal("20.00"),
+) -> tuple[str, ...]:
+    """Validate walk-forward NAV and position accounting for local evidence quality.
+
+    These checks are evidence-quality guards for local dry-run export. They are
+    not strategy objectives and not investment rules. Hard violations raise
+    ``ValueError`` to block misleading evidence before benchmark metrics or export.
+    """
+    nav_points = walk_forward_result.nav_points
+    period_specs = run_config.period_specs
+    steps = walk_forward_result.steps
+
+    if len(nav_points) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.nav_points length must equal "
+            "run_config.period_specs length for NAV sanity."
+        )
+    if len(steps) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.steps length must equal "
+            "run_config.period_specs length for NAV sanity."
+        )
+
+    for index, nav_point in enumerate(nav_points):
+        if nav_point.portfolio_value_krw <= _ZERO:
+            raise ValueError(
+                f"nav_points[{index}].portfolio_value_krw must be positive."
+            )
+        if nav_point.cash_krw < _ZERO:
+            raise ValueError(f"nav_points[{index}].cash_krw must be >= 0.")
+        if nav_point.cash_krw > nav_point.portfolio_value_krw:
+            raise ValueError(
+                f"nav_points[{index}].cash_krw must be <= portfolio_value_krw."
+            )
+
+    for index, step in enumerate(steps):
+        rebalance = step.rebalance_result
+        period_spec = period_specs[index]
+        usdkrw_rate = period_spec.usdkrw_rate
+
+        if rebalance.post_trade_portfolio_value_krw <= _ZERO:
+            raise ValueError(
+                f"steps[{index}].rebalance_result.post_trade_portfolio_value_krw "
+                "must be positive."
+            )
+        if rebalance.cash_krw_after < _ZERO:
+            raise ValueError(
+                f"steps[{index}].rebalance_result.cash_krw_after must be >= 0."
+            )
+
+        holding_ids = tuple(holding.asset_id for holding in rebalance.post_trade_holdings)
+        if len(holding_ids) != len(set(holding_ids)):
+            raise ValueError(
+                f"steps[{index}].rebalance_result.post_trade_holdings "
+                "must have unique asset ids."
+            )
+
+        holdings_value_krw = _ZERO
+        for price_record in step.execution_prices.prices:
+            if price_record.market not in _SUPPORTED_MARKETS:
+                raise ValueError(
+                    f"steps[{index}] has unsupported market for valuation: "
+                    f"{price_record.market!r}."
+                )
+
+            quantity = _ZERO
+            for holding in rebalance.post_trade_holdings:
+                if holding.asset_id == price_record.asset_id:
+                    quantity = holding.quantity
+                    break
+
+            holding_value = _holding_value_krw_for_sanity(
+                quantity,
+                price_record.execution_price,
+                market=price_record.market,
+                usdkrw_rate=usdkrw_rate,
+            )
+            holdings_value_krw += holding_value
+
+            if price_record.market in _FX_MARKETS:
+                expected = quantity * price_record.execution_price * usdkrw_rate
+                if holding_value != expected:
+                    raise ValueError(
+                        f"steps[{index}] USD/GOLD holding value must use period "
+                        "USDKRW rate."
+                    )
+            elif price_record.market == "KR":
+                expected = quantity * price_record.execution_price
+                if holding_value != expected:
+                    raise ValueError(
+                        f"steps[{index}] KR holding value must not use USDKRW."
+                    )
+
+        recomputed_post_trade = rebalance.cash_krw_after + holdings_value_krw
+        if recomputed_post_trade != rebalance.post_trade_portfolio_value_krw:
+            raise ValueError(
+                f"steps[{index}] post-trade holdings value plus cash must equal "
+                "post_trade_portfolio_value_krw."
+            )
+
+        pre_trade_nav = rebalance.pre_trade_portfolio_value_krw
+        max_trade_notional = pre_trade_nav * _MAX_TRADE_GROSS_NOTIONAL_NAV_MULTIPLE
+        for trade_index, trade in enumerate(rebalance.trades):
+            if not trade.quantity.is_finite() or trade.quantity <= _ZERO:
+                raise ValueError(
+                    f"steps[{index}].trades[{trade_index}].quantity must be "
+                    "finite and positive."
+                )
+            if not trade.gross_notional_krw.is_finite():
+                raise ValueError(
+                    f"steps[{index}].trades[{trade_index}].gross_notional_krw "
+                    "must be finite."
+                )
+            if trade.gross_notional_krw > max_trade_notional:
+                raise ValueError(
+                    f"steps[{index}].trades[{trade_index}].gross_notional_krw "
+                    "exceeds deterministic pre-trade NAV multiple."
+                )
+            if trade.market not in _SUPPORTED_MARKETS:
+                raise ValueError(
+                    f"steps[{index}].trades[{trade_index}] has unsupported market: "
+                    f"{trade.market!r}."
+                )
+
+    for index in range(1, len(nav_points)):
+        previous_nav = nav_points[index - 1].portfolio_value_krw
+        current_nav = nav_points[index].portfolio_value_krw
+        if previous_nav <= _ZERO:
+            raise ValueError(
+                f"nav_points[{index - 1}].portfolio_value_krw must be positive "
+                "for period return sanity."
+            )
+        period_return = (current_nav / previous_nav) - _ONE
+        if not period_return.is_finite():
+            raise ValueError(f"nav_points[{index}] period return must be finite.")
+        if abs(period_return) > max_abs_period_return:
+            raise ValueError(
+                f"nav_points[{index}] period return exceeds max_abs_period_return."
+            )
+
+    initial_nav = steps[0].rebalance_result.pre_trade_portfolio_value_krw
+    if initial_nav <= _ZERO:
+        raise ValueError("initial pre-trade portfolio value must be positive.")
+    terminal_nav = nav_points[-1].portfolio_value_krw
+    terminal_return = (terminal_nav / initial_nav) - _ONE
+    if not terminal_return.is_finite():
+        raise ValueError("terminal strategy return must be finite.")
+    if terminal_return > max_terminal_return:
+        raise ValueError("terminal strategy return exceeds max_terminal_return.")
+
+    return (_NAV_SANITY_PASSED_WARNING,)
+
+
+def _holding_value_krw_for_sanity(
+    quantity: Decimal,
+    execution_price: Decimal,
+    *,
+    market: str,
+    usdkrw_rate: Decimal,
+) -> Decimal:
+    if quantity == _ZERO:
+        return _ZERO
+    if market == "KR":
+        return quantity * execution_price
+    if market in _FX_MARKETS:
+        return quantity * execution_price * usdkrw_rate
+    raise ValueError(f"unsupported market for valuation: {market!r}.")
+
+
 def run_local_monthly_evaluation_dry_run(
     *,
     repo_root: Path,
@@ -250,6 +436,11 @@ def run_local_monthly_evaluation_dry_run(
         cash_min_weight=run_config.cash_min_weight,
     )
 
+    nav_sanity_warnings = validate_local_monthly_walk_forward_nav_sanity(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+    )
+
     aligned_benchmark_points = align_local_monthly_benchmark_points_to_nav_calendar(
         run_config=run_config,
         walk_forward_result=walk_forward_result,
@@ -268,6 +459,7 @@ def run_local_monthly_evaluation_dry_run(
     warnings = _collect_warnings(
         dataset_warnings=dataset.warnings,
         run_config_warnings=run_config.warnings,
+        nav_sanity_warnings=nav_sanity_warnings,
     )
 
     return LocalMonthlyEvaluationDryRunResult(
@@ -287,9 +479,11 @@ def _collect_warnings(
     *,
     dataset_warnings: tuple[str, ...],
     run_config_warnings: tuple[str, ...],
+    nav_sanity_warnings: tuple[str, ...],
 ) -> tuple[str, ...]:
     combined = list(dataset_warnings)
     combined.extend(run_config_warnings)
+    combined.extend(nav_sanity_warnings)
     combined.append(_RESEARCH_ONLY_WARNING)
     combined.append(_KOSPI_PROXY_WARNING)
     combined.append(_BENCHMARK_CALENDAR_ALIGNMENT_WARNING)

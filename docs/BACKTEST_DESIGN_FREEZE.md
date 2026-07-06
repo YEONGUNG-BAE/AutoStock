@@ -1148,3 +1148,21 @@ Rules:
   and ``rolling_lookback_count``
 - evidence export remains opt-in and repo-external
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-5 Local NAV and Position Accounting Sanity Patch
+
+Phase 2e-4 enabled real-data sanitized evidence export. The first operator
+output produced an economically impossible strategy terminal return.
+
+Rules:
+
+- this phase adds local evidence-quality sanity checks before metrics/report/export
+- ``LOCAL_NAV_SANITY_POLICY_V1`` gates walk-forward NAV, holdings, and trades
+- checks include positive NAV, cash bounds, finite period/terminal returns,
+  duplicate holdings, post-trade accounting identity, and trade notional bounds
+- these checks are evidence-quality guards, not strategy objectives and not
+  investment rules
+- impossible NAV evidence fails fast with ``ValueError`` before benchmark
+  alignment, adapter metrics, or evidence export
+- evidence export remains opt-in and repo-external
+- no S&P-relative project conclusion exists yet

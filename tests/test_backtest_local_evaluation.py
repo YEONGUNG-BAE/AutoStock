@@ -22,16 +22,26 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1,
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_NAV_SANITY_POLICY_V1,
     LocalMonthlyEvaluationDryRunResult,
     align_local_monthly_benchmark_points_to_nav_calendar,
     run_local_monthly_evaluation_dry_run,
+    validate_local_monthly_walk_forward_nav_sanity,
+    _holding_value_krw_for_sanity,
 )
 from backtest_engine.local_run_config import (  # noqa: E402
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
-from backtest_engine.rebalance import _canonical_total_cost_krw  # noqa: E402
-from backtest_engine.walk_forward import BacktestWalkForwardResult  # noqa: E402
+from backtest_engine.rebalance import (  # noqa: E402
+    BacktestHolding,
+    BacktestTrade,
+    _canonical_total_cost_krw,
+)
+from backtest_engine.walk_forward import (  # noqa: E402
+    BacktestNavPoint,
+    BacktestWalkForwardResult,
+)
 from paper_review.models import BenchmarkReturnPoint  # noqa: E402
 
 MODULE_PATH = (
@@ -1159,12 +1169,356 @@ def test_module_has_no_forbidden_runtime_or_imports() -> None:
         "assemble_local_monthly_dataset",
         "build_kospi_primary_monthly_run_config",
         "run_explicit_schedule_rules_walk_forward_nav",
+        "validate_local_monthly_walk_forward_nav_sanity",
         "align_local_monthly_benchmark_points_to_nav_calendar",
         "compute_walk_forward_benchmark_relative_metrics",
         "render_backtest_evaluation_report_bundle",
     )
     for call in allowed_calls:
         assert call in text, f"expected allowed call present: {call}"
+
+
+def _sanity_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    result = _run_dry_run(tmp_path)
+    return result.run_config, result.walk_forward_result
+
+
+def test_local_nav_sanity_policy_constant_exists() -> None:
+    assert LOCAL_NAV_SANITY_POLICY_V1 == (
+        "local_monthly_walk_forward_nav_sanity.v1"
+    )
+
+
+def test_validate_local_monthly_walk_forward_nav_sanity_helper_exists() -> None:
+    assert callable(validate_local_monthly_walk_forward_nav_sanity)
+
+
+def test_sane_synthetic_dry_run_passes_nav_sanity(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    warnings = validate_local_monthly_walk_forward_nav_sanity(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+    )
+    assert "local monthly walk-forward NAV passed deterministic sanity checks" in warnings
+
+
+def test_nav_sanity_rejects_non_positive_nav(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    corrupted_nav = walk_forward_result.nav_points[0].model_copy(
+        update={"portfolio_value_krw": Decimal("0")}
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (corrupted_nav, *walk_forward_result.nav_points[1:])}
+    )
+    with pytest.raises(ValueError, match="portfolio_value_krw must be positive"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_cash_above_portfolio_value(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    nav_point = walk_forward_result.nav_points[0]
+    corrupted_nav = nav_point.model_copy(
+        update={"cash_krw": nav_point.portfolio_value_krw + Decimal("1")}
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (corrupted_nav, *walk_forward_result.nav_points[1:])}
+    )
+    with pytest.raises(ValueError, match="cash_krw must be <= portfolio_value_krw"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_negative_cash(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    rebalance = step.rebalance_result.model_copy(update={"cash_krw_after": Decimal("-1")})
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    with pytest.raises(ValueError, match="cash_krw_after must be >= 0"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_period_return_above_max_abs_period_return(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw * Decimal("3"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav)}
+    )
+    with pytest.raises(ValueError, match="period return exceeds max_abs_period_return"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_terminal_return_above_max_terminal_return(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    last_nav = walk_forward_result.nav_points[-1].model_copy(
+        update={"portfolio_value_krw": Decimal("3000000000")}
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (*walk_forward_result.nav_points[:-1], last_nav)}
+    )
+    with pytest.raises(ValueError, match="terminal strategy return exceeds max_terminal_return"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+            max_abs_period_return=Decimal("100"),
+        )
+
+
+def test_nav_sanity_rejects_duplicate_holdings(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    duplicate = (
+        BacktestHolding(asset_id="kospi", quantity=Decimal("1")),
+        BacktestHolding(asset_id="kospi", quantity=Decimal("2")),
+    )
+    rebalance = step.rebalance_result.model_copy(update={"post_trade_holdings": duplicate})
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    with pytest.raises(ValueError, match="unique asset ids"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_non_positive_trade_quantity(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    if not step.rebalance_result.trades:
+        pytest.skip("synthetic dry-run produced no trades in first step")
+    trade = step.rebalance_result.trades[0]
+    bad_trade = BacktestTrade.model_construct(
+        asset_id=trade.asset_id,
+        symbol=trade.symbol,
+        market=trade.market,
+        side=trade.side,
+        quantity=Decimal("0"),
+        execution_price=trade.execution_price,
+        usdkrw_rate=trade.usdkrw_rate,
+        gross_notional_krw=trade.gross_notional_krw,
+        fee_krw=trade.fee_krw,
+        tax_krw=trade.tax_krw,
+        fx_spread_krw=trade.fx_spread_krw,
+        total_cost_krw=trade.total_cost_krw,
+    )
+    rebalance = step.rebalance_result.model_copy(update={"trades": (bad_trade,)})
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    with pytest.raises(ValueError, match="quantity must be finite and positive"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_trade_gross_notional_above_nav_multiple(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    pre_trade = step.rebalance_result.pre_trade_portfolio_value_krw
+    huge_notional = pre_trade * Decimal("3")
+    bad_trade = BacktestTrade.model_construct(
+        asset_id="kospi",
+        symbol="KOSPI",
+        market="KR",
+        side="BUY",
+        quantity=Decimal("1"),
+        execution_price=Decimal("1"),
+        usdkrw_rate=None,
+        gross_notional_krw=huge_notional,
+        fee_krw=Decimal("0"),
+        tax_krw=Decimal("0"),
+        fx_spread_krw=Decimal("0"),
+        total_cost_krw=Decimal("0"),
+    )
+    rebalance = step.rebalance_result.model_copy(update={"trades": (bad_trade,)})
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    with pytest.raises(ValueError, match="exceeds deterministic pre-trade NAV multiple"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_rejects_post_trade_holdings_plus_cash_mismatch(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    rebalance = step.rebalance_result.model_copy(
+        update={"post_trade_portfolio_value_krw": step.rebalance_result.post_trade_portfolio_value_krw + Decimal("1")}
+    )
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    with pytest.raises(
+        ValueError,
+        match="post-trade holdings value plus cash must equal post_trade_portfolio_value_krw",
+    ):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+
+
+def test_nav_sanity_holding_value_us_gold_uses_usdkrw() -> None:
+    value = _holding_value_krw_for_sanity(
+        Decimal("2"),
+        Decimal("100"),
+        market="US",
+        usdkrw_rate=Decimal("1300"),
+    )
+    assert value == Decimal("260000")
+    gold_value = _holding_value_krw_for_sanity(
+        Decimal("1"),
+        Decimal("50"),
+        market="GOLD",
+        usdkrw_rate=Decimal("1200"),
+    )
+    assert gold_value == Decimal("60000")
+
+
+def test_nav_sanity_holding_value_kr_does_not_use_usdkrw() -> None:
+    value = _holding_value_krw_for_sanity(
+        Decimal("2"),
+        Decimal("100"),
+        market="KR",
+        usdkrw_rate=Decimal("1300"),
+    )
+    assert value == Decimal("200")
+
+
+def test_run_local_monthly_evaluation_dry_run_calls_sanity_before_alignment(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    call_order: list[str] = []
+
+    def _track_sanity(**kwargs: object) -> tuple[str, ...]:
+        call_order.append("sanity")
+        return validate_local_monthly_walk_forward_nav_sanity(**kwargs)
+
+    def _track_align(**kwargs: object) -> tuple[BenchmarkReturnPoint, ...]:
+        call_order.append("align")
+        return align_local_monthly_benchmark_points_to_nav_calendar(**kwargs)
+
+    with patch(
+        "backtest_engine.local_evaluation.validate_local_monthly_walk_forward_nav_sanity",
+        side_effect=_track_sanity,
+    ):
+        with patch(
+            "backtest_engine.local_evaluation.align_local_monthly_benchmark_points_to_nav_calendar",
+            side_effect=_track_align,
+        ):
+            run_local_monthly_evaluation_dry_run(
+                repo_root=repo_root,
+                data_root=data_root,
+            )
+    assert call_order.index("sanity") < call_order.index("align")
+
+
+def test_dry_run_skips_alignment_when_nav_sanity_raises(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_evaluation.validate_local_monthly_walk_forward_nav_sanity",
+        side_effect=ValueError("nav sanity failed"),
+    ):
+        with patch(
+            "backtest_engine.local_evaluation.align_local_monthly_benchmark_points_to_nav_calendar",
+        ) as align_mock:
+            with pytest.raises(ValueError, match="nav sanity failed"):
+                run_local_monthly_evaluation_dry_run(
+                    repo_root=repo_root,
+                    data_root=data_root,
+                )
+    align_mock.assert_not_called()
+
+
+def test_dry_run_skips_benchmark_adapter_when_nav_sanity_raises(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_evaluation.validate_local_monthly_walk_forward_nav_sanity",
+        side_effect=ValueError("nav sanity failed"),
+    ):
+        with patch(
+            "backtest_engine.local_evaluation.compute_walk_forward_benchmark_relative_metrics",
+        ) as adapter_mock:
+            with pytest.raises(ValueError, match="nav sanity failed"):
+                run_local_monthly_evaluation_dry_run(
+                    repo_root=repo_root,
+                    data_root=data_root,
+                )
+    adapter_mock.assert_not_called()
+
+
+def test_dry_run_skips_report_bundle_when_nav_sanity_raises(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_evaluation.validate_local_monthly_walk_forward_nav_sanity",
+        side_effect=ValueError("nav sanity failed"),
+    ):
+        with patch(
+            "backtest_engine.local_evaluation.render_backtest_evaluation_report_bundle",
+        ) as report_mock:
+            with pytest.raises(ValueError, match="nav sanity failed"):
+                run_local_monthly_evaluation_dry_run(
+                    repo_root=repo_root,
+                    data_root=data_root,
+                )
+    report_mock.assert_not_called()
+
+
+def test_successful_dry_run_includes_nav_sanity_passed_warning(tmp_path: Path) -> None:
+    result = _run_dry_run(tmp_path)
+    assert any(
+        "local monthly walk-forward NAV passed deterministic sanity checks" in warning
+        for warning in result.warnings
+    )
+
+
+def test_nav_sanity_errors_exclude_raw_csv_and_secrets() -> None:
+    text = MODULE_PATH.read_text(encoding="utf-8")
+    sanity_start = text.index("def validate_local_monthly_walk_forward_nav_sanity")
+    sanity_end = text.index("\ndef _holding_value_krw_for_sanity")
+    sanity_text = text[sanity_start:sanity_end]
+    forbidden = (
+        "close_adjusted",
+        "source_name",
+        "config.toml",
+        "api_key",
+        "secret",
+        "password",
+        "beats S&P",
+        "beat S&P",
+    )
+    for token in forbidden:
+        assert token not in sanity_text, f"forbidden token in NAV sanity helper: {token}"
 
 
 def test_focused_regression_suite_passes() -> None:
