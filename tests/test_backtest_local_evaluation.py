@@ -22,9 +22,12 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1,
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V1,
     LocalMonthlyEvaluationDryRunResult,
+    LocalNavSanityStepDiagnostic,
     align_local_monthly_benchmark_points_to_nav_calendar,
+    build_local_nav_sanity_step_diagnostic,
     run_local_monthly_evaluation_dry_run,
     validate_local_monthly_walk_forward_nav_sanity,
     _holding_value_krw_for_sanity,
@@ -1377,12 +1380,272 @@ def test_nav_sanity_rejects_post_trade_holdings_plus_cash_mismatch(
     corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
     with pytest.raises(
         ValueError,
-        match="post-trade holdings value plus cash must equal post_trade_portfolio_value_krw",
+        match=(
+            "post-trade holdings value plus cash must equal "
+            "post_trade_portfolio_value_krw; run sanitized NAV sanity diagnostic "
+            "for this step"
+        ),
     ):
         validate_local_monthly_walk_forward_nav_sanity(
             run_config=run_config,
             walk_forward_result=corrupted,
         )
+
+
+def test_local_nav_sanity_diagnostic_policy_constant_exists() -> None:
+    assert LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 == (
+        "local_monthly_walk_forward_nav_sanity_diagnostic.v1"
+    )
+
+
+def test_local_nav_sanity_step_diagnostic_model_is_frozen_and_forbids_extra() -> None:
+    assert LocalNavSanityStepDiagnostic.model_config.get("frozen") is True
+    assert LocalNavSanityStepDiagnostic.model_config.get("extra") == "forbid"
+
+
+def test_build_local_nav_sanity_step_diagnostic_helper_exists() -> None:
+    assert callable(build_local_nav_sanity_step_diagnostic)
+
+
+def test_diagnostic_rejects_negative_step_index(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="step_index must be in"):
+        build_local_nav_sanity_step_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            step_index=-1,
+        )
+
+
+def test_diagnostic_rejects_out_of_range_step_index(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="step_index must be in"):
+        build_local_nav_sanity_step_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            step_index=len(run_config.period_specs),
+        )
+
+
+def test_diagnostic_preserves_input_objects(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    run_config_before = run_config.model_copy(deep=True)
+    walk_forward_before = walk_forward_result.model_copy(deep=True)
+    build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert run_config == run_config_before
+    assert walk_forward_result == walk_forward_before
+
+
+def test_diagnostic_includes_step_period_and_timestamps(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    period_spec = run_config.period_specs[0]
+    nav_point = walk_forward_result.nav_points[0]
+    assert diagnostic.step_index == 0
+    assert diagnostic.period_index == run_config.rolling_lookback_count
+    assert diagnostic.decision_time == period_spec.decision_time
+    assert diagnostic.intended_execution_time == period_spec.intended_execution_time
+    assert diagnostic.nav_as_of == nav_point.as_of
+
+
+def test_diagnostic_includes_counts_not_raw_rows(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert diagnostic.asset_count == len(
+        walk_forward_result.steps[0].execution_prices.prices
+    )
+    assert diagnostic.trade_count == len(
+        walk_forward_result.steps[0].rebalance_result.trades
+    )
+    assert diagnostic.holding_count == len(
+        walk_forward_result.steps[0].rebalance_result.post_trade_holdings
+    )
+    dumped = diagnostic.model_dump()
+    assert "raw_csv_row" not in dumped
+    assert "source_record" not in dumped
+    assert "source_name" not in dumped
+
+
+def test_diagnostic_includes_aggregate_nav_cash_recomputed_and_delta(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    rebalance = walk_forward_result.steps[0].rebalance_result
+    assert diagnostic.pre_trade_nav_krw == rebalance.pre_trade_portfolio_value_krw
+    assert diagnostic.post_trade_portfolio_value_krw == (
+        rebalance.post_trade_portfolio_value_krw
+    )
+    assert diagnostic.cash_krw_after == rebalance.cash_krw_after
+    assert diagnostic.accounting_delta_krw == (
+        diagnostic.recomputed_post_trade_value_krw
+        - diagnostic.post_trade_portfolio_value_krw
+    )
+    assert diagnostic.recomputed_post_trade_value_krw >= diagnostic.cash_krw_after
+
+
+def test_diagnostic_includes_accounting_delta_ratio(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    if diagnostic.post_trade_portfolio_value_krw == Decimal("0"):
+        expected_ratio = Decimal("0")
+    else:
+        expected_ratio = (
+            diagnostic.accounting_delta_krw / diagnostic.post_trade_portfolio_value_krw
+        )
+    assert diagnostic.accounting_delta_ratio == expected_ratio
+
+
+def test_diagnostic_includes_max_trade_notional_to_pre_nav_ratio(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    rebalance = walk_forward_result.steps[0].rebalance_result
+    if rebalance.trades:
+        expected = max(
+            trade.gross_notional_krw / rebalance.pre_trade_portfolio_value_krw
+            for trade in rebalance.trades
+        )
+        assert diagnostic.max_trade_notional_to_pre_nav_ratio == expected
+    else:
+        assert diagnostic.max_trade_notional_to_pre_nav_ratio is None
+
+
+def test_diagnostic_includes_asset_ids_and_markets_only(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    step = walk_forward_result.steps[0]
+    expected_nonzero = tuple(
+        sorted(
+            holding.asset_id
+            for holding in step.rebalance_result.post_trade_holdings
+            if holding.quantity > Decimal("0")
+        )
+    )
+    expected_traded = tuple(
+        sorted({trade.asset_id for trade in step.rebalance_result.trades})
+    )
+    expected_markets = tuple(
+        sorted(
+            {
+                price_record.market
+                for price_record in step.execution_prices.prices
+            }
+            | {trade.market for trade in step.rebalance_result.trades}
+        )
+    )
+    assert diagnostic.nonzero_holding_asset_ids == expected_nonzero
+    assert diagnostic.traded_asset_ids == expected_traded
+    assert diagnostic.markets_seen == expected_markets
+    dumped = diagnostic.model_dump()
+    assert "source_record" not in dumped
+    assert "source_name" not in dumped
+
+
+def _corrupted_accounting_mismatch_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[0]
+    rebalance = step.rebalance_result.model_copy(
+        update={
+            "post_trade_portfolio_value_krw": (
+                step.rebalance_result.post_trade_portfolio_value_krw + Decimal("1")
+            )
+        }
+    )
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(
+        update={"steps": (corrupted_step, *walk_forward_result.steps[1:])}
+    )
+    return run_config, corrupted
+
+
+def test_diagnostic_warning_includes_accounting_delta_nonzero_for_mismatch(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_accounting_mismatch_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert "accounting_delta_nonzero" in diagnostic.warnings
+
+
+def test_diagnostic_warning_includes_cash_and_holdings_not_equal_nav_for_mismatch(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_accounting_mismatch_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert "cash_and_holdings_not_equal_nav" in diagnostic.warnings
+
+
+def test_diagnostic_model_has_no_forbidden_fields() -> None:
+    fields = set(LocalNavSanityStepDiagnostic.model_fields)
+    forbidden = {
+        "raw_csv_row",
+        "source_record",
+        "source_name",
+        "config_path",
+        "secret",
+        "recommendation",
+        "investment_advice",
+        "project_conclusion",
+    }
+    assert fields.isdisjoint(forbidden)
+
+
+def test_sanity_mismatch_error_is_sanitized_without_numeric_internals(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_accounting_mismatch_inputs(tmp_path)
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+        )
+    message = str(exc_info.value)
+    assert "run sanitized NAV sanity diagnostic for this step" in message
+    rebalance = walk_forward_result.steps[0].rebalance_result
+    forbidden_values = (
+        str(rebalance.post_trade_portfolio_value_krw),
+        str(rebalance.cash_krw_after),
+        str(rebalance.pre_trade_portfolio_value_krw),
+    )
+    for value in forbidden_values:
+        assert value not in message
 
 
 def test_nav_sanity_holding_value_us_gold_uses_usdkrw() -> None:

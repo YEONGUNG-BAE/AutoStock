@@ -1166,3 +1166,27 @@ Rules:
   alignment, adapter metrics, or evidence export
 - evidence export remains opt-in and repo-external
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-6 Sanitized NAV Accounting Diagnostic Patch
+
+Phase 2e-5 added a local NAV sanity gate before benchmark metrics, report
+rendering, or evidence export. The operator real-data run failed at step 20
+with a post-trade accounting identity violation:
+``cash + holdings != post_trade_portfolio_value_krw``.
+
+This phase adds sanitized diagnostics to identify the mismatch class without
+printing raw CSV rows, raw source records, config values, secrets, or
+investment conclusions.
+
+Rules:
+
+- ``LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1`` governs per-step sanitized NAV
+  accounting diagnostics
+- diagnostics include aggregate values, ratios, counts, asset IDs, markets,
+  and timestamps only
+- diagnostics exclude raw CSV rows, source records, source names, config/secrets,
+  and investment conclusions
+- ``validate_local_monthly_walk_forward_nav_sanity`` still fails fast before
+  benchmark alignment, adapter metrics, report rendering, or evidence export
+- evidence export remains blocked until NAV sanity passes
+- no S&P-relative project conclusion exists yet

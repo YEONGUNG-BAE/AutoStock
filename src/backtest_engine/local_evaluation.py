@@ -9,6 +9,7 @@ report files, create artifacts, or produce investment conclusions.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
@@ -31,6 +32,8 @@ from backtest_engine.local_run_config import (
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
+from backtest_engine.period_step import BacktestSinglePeriodStepResult
+from backtest_engine.rebalance import BacktestRebalanceResult
 from backtest_engine.report_bundle import (
     BacktestEvaluationReportBundle,
     render_backtest_evaluation_report_bundle,
@@ -48,6 +51,9 @@ LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 = (
     "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
 )
 LOCAL_NAV_SANITY_POLICY_V1 = "local_monthly_walk_forward_nav_sanity.v1"
+LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
+    "local_monthly_walk_forward_nav_sanity_diagnostic.v1"
+)
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -71,6 +77,35 @@ _BENCHMARK_CALENDAR_ALIGNMENT_WARNING = (
     "local benchmark points are calendar-aligned to strategy NAV timestamps "
     "before metric adaptation"
 )
+
+
+class LocalNavSanityStepDiagnostic(BaseModel):
+    """Sanitized per-step NAV accounting diagnostic for local evidence quality."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    local_nav_sanity_diagnostic_policy: Literal[
+        "local_monthly_walk_forward_nav_sanity_diagnostic.v1"
+    ]
+    step_index: int
+    period_index: int
+    decision_time: datetime
+    intended_execution_time: datetime
+    nav_as_of: datetime
+    asset_count: int
+    trade_count: int
+    holding_count: int
+    pre_trade_nav_krw: Decimal
+    post_trade_portfolio_value_krw: Decimal
+    cash_krw_after: Decimal
+    recomputed_post_trade_value_krw: Decimal
+    accounting_delta_krw: Decimal
+    accounting_delta_ratio: Decimal
+    max_trade_notional_to_pre_nav_ratio: Decimal | None
+    nonzero_holding_asset_ids: tuple[str, ...]
+    traded_asset_ids: tuple[str, ...]
+    markets_seen: tuple[str, ...]
+    warnings: tuple[str, ...]
 
 
 class LocalMonthlyEvaluationDryRunResult(BaseModel):
@@ -268,47 +303,18 @@ def validate_local_monthly_walk_forward_nav_sanity(
                 "must have unique asset ids."
             )
 
-        holdings_value_krw = _ZERO
-        for price_record in step.execution_prices.prices:
-            if price_record.market not in _SUPPORTED_MARKETS:
-                raise ValueError(
-                    f"steps[{index}] has unsupported market for valuation: "
-                    f"{price_record.market!r}."
-                )
-
-            quantity = _ZERO
-            for holding in rebalance.post_trade_holdings:
-                if holding.asset_id == price_record.asset_id:
-                    quantity = holding.quantity
-                    break
-
-            holding_value = _holding_value_krw_for_sanity(
-                quantity,
-                price_record.execution_price,
-                market=price_record.market,
-                usdkrw_rate=usdkrw_rate,
-            )
-            holdings_value_krw += holding_value
-
-            if price_record.market in _FX_MARKETS:
-                expected = quantity * price_record.execution_price * usdkrw_rate
-                if holding_value != expected:
-                    raise ValueError(
-                        f"steps[{index}] USD/GOLD holding value must use period "
-                        "USDKRW rate."
-                    )
-            elif price_record.market == "KR":
-                expected = quantity * price_record.execution_price
-                if holding_value != expected:
-                    raise ValueError(
-                        f"steps[{index}] KR holding value must not use USDKRW."
-                    )
+        holdings_value_krw = _compute_post_trade_holdings_value_krw_for_sanity(
+            step,
+            usdkrw_rate=usdkrw_rate,
+            step_index=index,
+        )
 
         recomputed_post_trade = rebalance.cash_krw_after + holdings_value_krw
         if recomputed_post_trade != rebalance.post_trade_portfolio_value_krw:
             raise ValueError(
                 f"steps[{index}] post-trade holdings value plus cash must equal "
-                "post_trade_portfolio_value_krw."
+                "post_trade_portfolio_value_krw; run sanitized NAV sanity diagnostic "
+                "for this step."
             )
 
         pre_trade_nav = rebalance.pre_trade_portfolio_value_krw
@@ -362,6 +368,195 @@ def validate_local_monthly_walk_forward_nav_sanity(
         raise ValueError("terminal strategy return exceeds max_terminal_return.")
 
     return (_NAV_SANITY_PASSED_WARNING,)
+
+
+def build_local_nav_sanity_step_diagnostic(
+    *,
+    run_config: LocalMonthlyRunConfig,
+    walk_forward_result: BacktestWalkForwardResult,
+    step_index: int,
+) -> LocalNavSanityStepDiagnostic:
+    """Build a sanitized NAV accounting diagnostic for one walk-forward step."""
+    period_specs = run_config.period_specs
+    steps = walk_forward_result.steps
+    nav_points = walk_forward_result.nav_points
+
+    if step_index < 0 or step_index >= len(period_specs):
+        raise ValueError(
+            f"step_index must be in [0, {len(period_specs)}); got {step_index}."
+        )
+    if len(steps) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.steps length must equal "
+            "run_config.period_specs length for NAV sanity diagnostic."
+        )
+    if len(nav_points) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.nav_points length must equal "
+            "run_config.period_specs length for NAV sanity diagnostic."
+        )
+
+    period_spec = period_specs[step_index]
+    step = steps[step_index]
+    nav_point = nav_points[step_index]
+    rebalance = step.rebalance_result
+    usdkrw_rate = period_spec.usdkrw_rate
+
+    recomputed_holdings_value_krw = _compute_post_trade_holdings_value_krw_for_sanity(
+        step,
+        usdkrw_rate=usdkrw_rate,
+        step_index=step_index,
+        raise_on_unsupported_market=False,
+    )
+    recomputed_post_trade_value_krw = (
+        rebalance.cash_krw_after + recomputed_holdings_value_krw
+    )
+    accounting_delta_krw = (
+        recomputed_post_trade_value_krw - rebalance.post_trade_portfolio_value_krw
+    )
+    if rebalance.post_trade_portfolio_value_krw == _ZERO:
+        accounting_delta_ratio = _ZERO
+    else:
+        accounting_delta_ratio = (
+            accounting_delta_krw / rebalance.post_trade_portfolio_value_krw
+        )
+
+    pre_trade_nav_krw = rebalance.pre_trade_portfolio_value_krw
+    if rebalance.trades:
+        max_trade_notional_to_pre_nav_ratio = max(
+            trade.gross_notional_krw / pre_trade_nav_krw
+            for trade in rebalance.trades
+            if pre_trade_nav_krw > _ZERO
+        )
+    else:
+        max_trade_notional_to_pre_nav_ratio = None
+
+    nonzero_holding_asset_ids = tuple(
+        sorted(
+            holding.asset_id
+            for holding in rebalance.post_trade_holdings
+            if holding.quantity > _ZERO
+        )
+    )
+    traded_asset_ids = tuple(
+        sorted({trade.asset_id for trade in rebalance.trades})
+    )
+    markets_seen = tuple(
+        sorted(
+            {
+                price_record.market
+                for price_record in step.execution_prices.prices
+            }
+            | {trade.market for trade in rebalance.trades}
+        )
+    )
+
+    warnings = _collect_nav_sanity_step_diagnostic_warnings(
+        rebalance=rebalance,
+        accounting_delta_krw=accounting_delta_krw,
+        max_trade_notional_to_pre_nav_ratio=max_trade_notional_to_pre_nav_ratio,
+        markets_seen=markets_seen,
+    )
+
+    return LocalNavSanityStepDiagnostic(
+        local_nav_sanity_diagnostic_policy=LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1,
+        step_index=step_index,
+        period_index=run_config.rolling_lookback_count + step_index,
+        decision_time=period_spec.decision_time,
+        intended_execution_time=period_spec.intended_execution_time,
+        nav_as_of=nav_point.as_of,
+        asset_count=len(step.execution_prices.prices),
+        trade_count=len(rebalance.trades),
+        holding_count=len(rebalance.post_trade_holdings),
+        pre_trade_nav_krw=pre_trade_nav_krw,
+        post_trade_portfolio_value_krw=rebalance.post_trade_portfolio_value_krw,
+        cash_krw_after=rebalance.cash_krw_after,
+        recomputed_post_trade_value_krw=recomputed_post_trade_value_krw,
+        accounting_delta_krw=accounting_delta_krw,
+        accounting_delta_ratio=accounting_delta_ratio,
+        max_trade_notional_to_pre_nav_ratio=max_trade_notional_to_pre_nav_ratio,
+        nonzero_holding_asset_ids=nonzero_holding_asset_ids,
+        traded_asset_ids=traded_asset_ids,
+        markets_seen=markets_seen,
+        warnings=warnings,
+    )
+
+
+def _compute_post_trade_holdings_value_krw_for_sanity(
+    step: BacktestSinglePeriodStepResult,
+    *,
+    usdkrw_rate: Decimal,
+    step_index: int,
+    raise_on_unsupported_market: bool = True,
+) -> Decimal:
+    rebalance = step.rebalance_result
+    holdings_value_krw = _ZERO
+    for price_record in step.execution_prices.prices:
+        if price_record.market not in _SUPPORTED_MARKETS:
+            if raise_on_unsupported_market:
+                raise ValueError(
+                    f"steps[{step_index}] has unsupported market for valuation: "
+                    f"{price_record.market!r}."
+                )
+            continue
+
+        quantity = _ZERO
+        for holding in rebalance.post_trade_holdings:
+            if holding.asset_id == price_record.asset_id:
+                quantity = holding.quantity
+                break
+
+        holding_value = _holding_value_krw_for_sanity(
+            quantity,
+            price_record.execution_price,
+            market=price_record.market,
+            usdkrw_rate=usdkrw_rate,
+        )
+        holdings_value_krw += holding_value
+
+        if raise_on_unsupported_market:
+            if price_record.market in _FX_MARKETS:
+                expected = quantity * price_record.execution_price * usdkrw_rate
+                if holding_value != expected:
+                    raise ValueError(
+                        f"steps[{step_index}] USD/GOLD holding value must use period "
+                        "USDKRW rate."
+                    )
+            elif price_record.market == "KR":
+                expected = quantity * price_record.execution_price
+                if holding_value != expected:
+                    raise ValueError(
+                        f"steps[{step_index}] KR holding value must not use USDKRW."
+                    )
+
+    return holdings_value_krw
+
+
+def _collect_nav_sanity_step_diagnostic_warnings(
+    *,
+    rebalance: BacktestRebalanceResult,
+    accounting_delta_krw: Decimal,
+    max_trade_notional_to_pre_nav_ratio: Decimal | None,
+    markets_seen: tuple[str, ...],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if accounting_delta_krw != _ZERO:
+        warnings.append("accounting_delta_nonzero")
+        warnings.append("post_trade_value_excludes_or_double_counts_holdings")
+        warnings.append("cash_and_holdings_not_equal_nav")
+    if rebalance.cash_krw_after < _ZERO:
+        warnings.append("negative_cash")
+    if rebalance.cash_krw_after > rebalance.post_trade_portfolio_value_krw:
+        warnings.append("cash_above_nav")
+    if (
+        max_trade_notional_to_pre_nav_ratio is not None
+        and max_trade_notional_to_pre_nav_ratio
+        > _MAX_TRADE_GROSS_NOTIONAL_NAV_MULTIPLE
+    ):
+        warnings.append("trade_notional_exceeds_nav_multiple")
+    if any(market not in _SUPPORTED_MARKETS for market in markets_seen):
+        warnings.append("unsupported_market")
+    return tuple(warnings)
 
 
 def _holding_value_krw_for_sanity(
