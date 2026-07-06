@@ -980,3 +980,28 @@ Rules:
 - does not fetch or download data
 - does not commit real data
 - real-data backtest execution is deferred to a later explicit phase
+
+### Phase 2d-3 Local Real-Data Evaluation Dry-Run Contract
+
+Phase 2d-3 introduces the first explicit operator-local real-data evaluation
+dry-run runner.
+
+Rules:
+
+- reads local monthly CSVs only from sibling ``autostock-data``
+- assembles dataset through ``assemble_local_monthly_dataset(...)``
+- builds frozen KOSPI-primary run config through
+  ``build_kospi_primary_monthly_run_config(...)``
+- runs walk-forward NAV in memory through
+  ``run_explicit_schedule_rules_walk_forward_nav(...)``
+- computes benchmark-relative metrics in memory through
+  ``compute_walk_forward_benchmark_relative_metrics(...)``
+- renders markdown report bundle in memory through
+  ``render_backtest_evaluation_report_bundle(...)``
+- does not write files or artifacts
+- does not fetch or download data
+- does not commit real data
+- does not call ``run_explicit_synthetic_backtest_evaluation_pipeline(...)``
+- KOSPI primary is KR proxy, not implementable ETF evidence
+- result is research evidence only
+- no project-level investment conclusion or S&P-beat claim

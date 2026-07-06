@@ -6,9 +6,9 @@ rolling feature helpers, count-based observation spacing guards, a single-step
 rules decision composer, explicit-schedule walk-forward NAV, and a
 benchmark-relative metrics adapter, a benchmark-relative markdown report
 bundle renderer, a synthetic end-to-end evaluation pipeline composer,
-metadata-only local data preflight, and local monthly dataset/run-config
-assembly. It does not fetch or download data, does not execute real-data
-backtests unless an explicit execution function is called, does not run live or
+metadata-only local data preflight, local monthly dataset/run-config assembly,
+and a sibling local real-data evaluation dry-run runner. It does not fetch or
+download data, does not write report files or artifacts, does not run live or
 paper trading, and does not produce project-level investment conclusions.
 """
 
@@ -46,6 +46,11 @@ from backtest_engine.local_run_config import (
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
+)
+from backtest_engine.local_evaluation import (
+    LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LocalMonthlyEvaluationDryRunResult,
+    run_local_monthly_evaluation_dry_run,
 )
 from backtest_engine.report_bundle import (
     BACKTEST_REPORT_BUNDLE_POLICY_V1,
@@ -120,6 +125,7 @@ __all__ = [
     "LOCAL_DATA_PREFLIGHT_POLICY_V1",
     "LOCAL_MONTHLY_DATASET_POLICY_V1",
     "LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1",
+    "LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1",
     "BacktestBenchmarkRelativeResult",
     "BacktestEvaluationPipelineResult",
     "BacktestEvaluationReportBundle",
@@ -131,6 +137,7 @@ __all__ = [
     "LocalMonthlyFxRatePoint",
     "LocalMonthlyInstrumentSpec",
     "LocalMonthlyRunConfig",
+    "LocalMonthlyEvaluationDryRunResult",
     "BacktestAssetFeature",
     "BacktestCostModel",
     "BacktestExecutionPrice",
@@ -159,6 +166,7 @@ __all__ = [
     "run_local_data_preflight",
     "assemble_local_monthly_dataset",
     "build_kospi_primary_monthly_run_config",
+    "run_local_monthly_evaluation_dry_run",
     "allocate_rules_only_v1",
     "apply_single_rebalance_accounting",
     "build_feature_snapshot_from_source_records",
