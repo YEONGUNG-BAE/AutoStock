@@ -965,12 +965,17 @@ Rules:
 
 - builds frozen KOSPI-primary monthly run config from assembled local dataset
 - uses explicit common periods only
-- first common period is warm-up baseline
-- creates explicit ``BacktestPeriodSpec`` values
+- first common period is warm-up baseline for initial portfolio state
+- the first ``rolling_lookback_count`` common periods are signal warm-up
+- first execution starts only after enough visible rolling observations exist
+- for lookback 3, first execution uses the 4th common period
+- ``period_specs`` count equals ``len(common_periods) - rolling_lookback_count``
+- creates explicit ``BacktestPeriodSpec`` values after signal warm-up
 - uses previous period timestamp for decision and current period timestamp for
   execution
 - uses current period USDKRW rate
 - creates rolling configs, initial portfolio, cost model, and cash settings
+- ``asset_us`` and benchmark may both read ``monthly/sp500tr_monthly.csv``
 - KOSPI primary is KR proxy, not implementable ETF evidence
 - does not read CSVs directly
 - does not run backtest
@@ -1002,6 +1007,23 @@ Rules:
 - does not fetch or download data
 - does not commit real data
 - does not call ``run_explicit_synthetic_backtest_evaluation_pipeline(...)``
+- KOSPI primary is KR proxy, not implementable ETF evidence
+- ``asset_us`` and benchmark may both read ``monthly/sp500tr_monthly.csv``
+- result is research evidence only
+- no project-level investment conclusion or S&P-beat claim
+
+### Phase 2d-3a Warm-Up-Safe Local Dry-Run Patch
+
+Phase 2d-3a corrects local dry-run warm-up semantics so default KOSPI-primary
+evaluation succeeds with normal one-row-per-period monthly CSVs.
+
+Rules:
+
+- the first ``rolling_lookback_count`` common periods are signal warm-up
+- first execution starts only after enough visible rolling observations exist
+- for lookback 3, first execution uses the 4th common period
+- this avoids insufficient visible observations without duplicating rows
+- ``asset_us`` and benchmark may both read ``monthly/sp500tr_monthly.csv``
 - KOSPI primary is KR proxy, not implementable ETF evidence
 - result is research evidence only
 - no project-level investment conclusion or S&P-beat claim

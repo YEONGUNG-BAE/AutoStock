@@ -85,7 +85,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path]:
 def _assemble_kospi_primary_dataset(
     tmp_path: Path,
     *,
-    periods: tuple[str, ...] = ("2020-01", "2020-02", "2020-03", "2020-04"),
+    periods: tuple[str, ...] = ("2020-01", "2020-02", "2020-03", "2020-04", "2020-05"),
     first_day_of_month_dates: bool = False,
 ):
     repo_root, data_root = _layout(tmp_path)
@@ -290,13 +290,15 @@ def test_builds_cost_model_from_args(tmp_path: Path) -> None:
 def test_builds_period_specs_from_common_periods(tmp_path: Path) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
-    assert len(result.period_specs) == len(dataset.common_periods) - 1
+    assert len(result.period_specs) == (
+        len(dataset.common_periods) - result.rolling_lookback_count
+    )
 
 
 def test_first_common_period_is_warm_up_baseline(tmp_path: Path) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
-    first_execution_period = dataset.common_periods[1]
+    first_execution_period = dataset.common_periods[result.rolling_lookback_count]
     first_spec = result.period_specs[0]
     expected_execution = max(
         record.source_timestamp
@@ -308,10 +310,74 @@ def test_first_common_period_is_warm_up_baseline(tmp_path: Path) -> None:
     assert first_spec.intended_execution_time == expected_execution
 
 
-def test_period_spec_count_equals_common_periods_minus_one(tmp_path: Path) -> None:
+def test_period_spec_count_equals_common_periods_minus_rolling_lookback(
+    tmp_path: Path,
+) -> None:
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
-    assert len(result.period_specs) == len(dataset.common_periods) - 1
+    assert len(result.period_specs) == (
+        len(dataset.common_periods) - result.rolling_lookback_count
+    )
+
+
+def test_first_period_spec_for_lookback_three_uses_third_decision_and_fourth_execution(
+    tmp_path: Path,
+) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rolling_lookback_count=3,
+    )
+    assert dataset.common_periods[:3] == ("2020-01", "2020-02", "2020-03")
+    assert dataset.common_periods[3] == "2020-04"
+
+    decision_period = dataset.common_periods[2]
+    execution_period = dataset.common_periods[3]
+    expected_decision = max(
+        record.source_timestamp
+        for record in dataset.source_records
+        if record.payload["date"].startswith(
+            decision_period[:4] + "-" + decision_period[5:]
+        )
+    )
+    expected_execution = max(
+        record.source_timestamp
+        for record in dataset.source_records
+        if record.payload["date"].startswith(
+            execution_period[:4] + "-" + execution_period[5:]
+        )
+    )
+    fx_by_period = {point.period_key: point.usdkrw_rate for point in dataset.fx_points}
+
+    first_spec = result.period_specs[0]
+    assert first_spec.decision_time == expected_decision
+    assert first_spec.intended_execution_time == expected_execution
+    assert first_spec.usdkrw_rate == fx_by_period[execution_period]
+
+
+def test_first_rolling_lookback_count_common_periods_are_signal_warm_up(
+    tmp_path: Path,
+) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rolling_lookback_count=3,
+    )
+    assert result.period_specs
+    warmup_periods = dataset.common_periods[: result.rolling_lookback_count]
+    assert warmup_periods == ("2020-01", "2020-02", "2020-03")
+    assert any("signal warm-up" in warning for warning in result.warnings)
+
+
+def test_result_includes_rolling_lookback_count_and_is_frozen(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rolling_lookback_count=3,
+    )
+    assert result.rolling_lookback_count == 3
+    with pytest.raises(ValidationError):
+        result.rolling_lookback_count = 4  # type: ignore[misc]
 
 
 def test_each_decision_time_is_previous_period_latest_source_timestamp(
@@ -320,13 +386,14 @@ def test_each_decision_time_is_previous_period_latest_source_timestamp(
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
 
+    lookback = result.rolling_lookback_count
     for index, period_spec in enumerate(result.period_specs):
-        previous_period = dataset.common_periods[index]
+        decision_period = dataset.common_periods[lookback + index - 1]
         expected = max(
             record.source_timestamp
             for record in dataset.source_records
             if record.payload["date"].startswith(
-                previous_period[:4] + "-" + previous_period[5:]
+                decision_period[:4] + "-" + decision_period[5:]
             )
         )
         assert period_spec.decision_time == expected
@@ -338,13 +405,14 @@ def test_each_intended_execution_time_is_current_period_latest_source_timestamp(
     dataset = _assemble_kospi_primary_dataset(tmp_path)
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
 
+    lookback = result.rolling_lookback_count
     for index, period_spec in enumerate(result.period_specs):
-        current_period = dataset.common_periods[index + 1]
+        execution_period = dataset.common_periods[lookback + index]
         expected = max(
             record.source_timestamp
             for record in dataset.source_records
             if record.payload["date"].startswith(
-                current_period[:4] + "-" + current_period[5:]
+                execution_period[:4] + "-" + execution_period[5:]
             )
         )
         assert period_spec.intended_execution_time == expected
@@ -355,9 +423,10 @@ def test_each_period_uses_current_period_usdkrw_rate(tmp_path: Path) -> None:
     result = build_kospi_primary_monthly_run_config(dataset=dataset)
     fx_by_period = {point.period_key: point.usdkrw_rate for point in dataset.fx_points}
 
+    lookback = result.rolling_lookback_count
     for index, period_spec in enumerate(result.period_specs):
-        current_period = dataset.common_periods[index + 1]
-        assert period_spec.usdkrw_rate == fx_by_period[current_period]
+        execution_period = dataset.common_periods[lookback + index]
+        assert period_spec.usdkrw_rate == fx_by_period[execution_period]
 
 
 def test_rejects_insufficient_common_periods(tmp_path: Path) -> None:
@@ -417,6 +486,7 @@ def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None
             cost_model=result.cost_model,
             cash_asset_id="cash",
             cash_min_weight=Decimal("0.05"),
+            rolling_lookback_count=result.rolling_lookback_count,
             warnings=(),
             nav_points=(),  # type: ignore[call-arg]
         )

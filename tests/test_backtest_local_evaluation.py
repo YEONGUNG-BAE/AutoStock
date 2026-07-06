@@ -14,7 +14,6 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from backtest_engine.local_dataset import (  # noqa: E402
-    LocalMonthlyInstrumentSpec,
     assemble_local_monthly_dataset,
     default_local_monthly_benchmark_spec,
     default_local_monthly_instrument_specs_for_kospi_primary,
@@ -83,77 +82,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path]:
     return repo_root, data_root
 
 
-def _month_add(*, year: int, month: int, offset: int) -> tuple[int, int]:
-    month += offset
-    while month > 12:
-        month -= 12
-        year += 1
-    while month < 1:
-        month += 12
-        year -= 1
-    return year, month
-
-
-def _iso_as_of(*, year: int, month: int) -> str:
-    return f"{year:04d}-{month:02d}-01T00:00:00+00:00"
-
-
-def _instrument_rows_for_period(
-    *,
-    period: str,
-    symbol: str,
-    market: str,
-    close: Decimal,
-    lookback_count: int,
-) -> tuple[str, ...]:
-    year, month = period.split("-")
-    year_int = int(year)
-    month_int = int(month)
-    day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
-    early_year, early_month = _month_add(
-        year=year_int,
-        month=month_int,
-        offset=1,
-    )
-    late_year, late_month = _month_add(
-        year=year_int,
-        month=month_int,
-        offset=lookback_count,
-    )
-    row_prefix = f"{year}-{month}-{day}"
-    return (
-        f"{row_prefix},{_iso_as_of(year=early_year, month=early_month)},"
-        f"{symbol},{market},{close},synthetic",
-        f"{row_prefix},{_iso_as_of(year=late_year, month=late_month)},"
-        f"{symbol},{market},{close},synthetic",
-    )
-
-
-def _kospi_primary_working_instrument_specs() -> tuple[LocalMonthlyInstrumentSpec, ...]:
-    """Mirror default KOSPI-primary specs with a separate US asset CSV path."""
-    return (
-        LocalMonthlyInstrumentSpec(
-            asset_id="asset_us",
-            symbol="SP500TR",
-            market="US",
-            relative_path="monthly/sp500tr_asset_monthly.csv",
-        ),
-        LocalMonthlyInstrumentSpec(
-            asset_id="asset_kr",
-            symbol="KOSPI",
-            market="KR",
-            relative_path="monthly/kospi_monthly.csv",
-        ),
-        LocalMonthlyInstrumentSpec(
-            asset_id="asset_gold",
-            symbol="GLD",
-            market="US",
-            relative_path="monthly/gld_monthly.csv",
-        ),
-    )
-
-
-def _write_kospi_primary_csvs(
+def _write_default_kospi_primary_csvs(
     data_root: Path,
     *,
     periods: tuple[str, ...] = (
@@ -162,93 +91,68 @@ def _write_kospi_primary_csvs(
         "2020-03",
         "2020-04",
         "2020-05",
-        "2020-06",
     ),
-    lookback_count: int = 3,
-    instrument_specs: tuple[LocalMonthlyInstrumentSpec, ...] | None = None,
 ) -> None:
-    specs = (
-        _kospi_primary_working_instrument_specs()
-        if instrument_specs is None
-        else instrument_specs
-    )
+    specs = default_local_monthly_instrument_specs_for_kospi_primary()
     benchmark = default_local_monthly_benchmark_spec()
 
     for spec in specs:
         rows: list[str] = []
         for index, period in enumerate(periods):
+            year, month = period.split("-")
+            day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
             close = Decimal("100") + Decimal(index)
-            if spec.relative_path.endswith("sp500tr_monthly.csv"):
-                year, month = period.split("-")
-                year_int = int(year)
-                month_int = int(month)
-                day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
-                late_year, late_month = _month_add(
-                    year=year_int,
-                    month=month_int,
-                    offset=lookback_count,
-                )
-                rows.append(
-                    f"{year}-{month}-{day},{_iso_as_of(year=late_year, month=late_month)},"
-                    f"{spec.symbol},{spec.market},{close},synthetic"
-                )
-            else:
-                rows.extend(
-                    _instrument_rows_for_period(
-                        period=period,
-                        symbol=spec.symbol,
-                        market=spec.market,
-                        close=close,
-                        lookback_count=lookback_count,
-                    )
-                )
+            as_of_month = int(month) + 1
+            as_of_year = int(year)
+            if as_of_month > 12:
+                as_of_month = 1
+                as_of_year += 1
+            rows.append(
+                f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
+                f"{spec.symbol},{spec.market},{close},synthetic"
+            )
         _write_csv(data_root / spec.relative_path, tuple(rows))
 
     sp_rows: list[str] = []
     fx_rows: list[str] = []
     for index, period in enumerate(periods):
         year, month = period.split("-")
-        month_int = int(month)
-        year_int = int(year)
         day = "31" if month in {"01", "03", "05", "07", "08", "10", "12"} else "29"
-        late_year, late_month = _month_add(
-            year=year_int,
-            month=month_int,
-            offset=lookback_count,
-        )
-        as_of = _iso_as_of(year=late_year, month=late_month)
+        as_of_month = int(month) + 1
+        as_of_year = int(year)
+        if as_of_month > 12:
+            as_of_month = 1
+            as_of_year += 1
         sp_rows.append(
-            f"{year}-{month}-{day},{as_of},"
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
             f"SP500TR,US,{100 + index},synthetic"
         )
         fx_rows.append(
-            f"{year}-{month}-{day},{as_of},"
+            f"{year}-{month}-{day},{as_of_year:04d}-{as_of_month:02d}-01T00:00:00+00:00,"
             f"USDKRW,FX,{1300 + index},synthetic"
         )
     _write_csv(data_root / benchmark.sp500tr_relative_path, tuple(sp_rows))
     _write_csv(data_root / benchmark.usdkrw_relative_path, tuple(fx_rows))
 
 
-def _prepare_working_layout(
+def _prepare_default_layout(
     tmp_path: Path,
     *,
     periods: tuple[str, ...] | None = None,
-) -> tuple[Path, Path, tuple[LocalMonthlyInstrumentSpec, ...]]:
+) -> tuple[Path, Path]:
     repo_root, data_root = _layout(tmp_path)
-    working_specs = _kospi_primary_working_instrument_specs()
-    kwargs: dict[str, object] = {"instrument_specs": working_specs}
-    if periods is not None:
-        kwargs["periods"] = periods
-    _write_kospi_primary_csvs(data_root, **kwargs)  # type: ignore[arg-type]
-    return repo_root, data_root, working_specs
+    if periods is None:
+        _write_default_kospi_primary_csvs(data_root)
+    else:
+        _write_default_kospi_primary_csvs(data_root, periods=periods)
+    return repo_root, data_root
 
 
 def _run_dry_run(tmp_path: Path) -> LocalMonthlyEvaluationDryRunResult:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     return run_local_monthly_evaluation_dry_run(
         repo_root=repo_root,
         data_root=data_root,
-        instrument_specs=working_specs,
     )
 
 
@@ -268,7 +172,7 @@ def test_builds_local_monthly_evaluation_dry_run_result_from_synthetic_csvs(
 
 
 def test_calls_assemble_local_monthly_dataset(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.assemble_local_monthly_dataset",
         wraps=assemble_local_monthly_dataset,
@@ -276,13 +180,12 @@ def test_calls_assemble_local_monthly_dataset(tmp_path: Path) -> None:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked.assert_called_once()
 
 
 def test_calls_build_kospi_primary_monthly_run_config(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.build_kospi_primary_monthly_run_config"
     ) as mocked:
@@ -293,13 +196,12 @@ def test_calls_build_kospi_primary_monthly_run_config(tmp_path: Path) -> None:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked.assert_called_once()
 
 
 def test_calls_run_explicit_schedule_rules_walk_forward_nav(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.run_explicit_schedule_rules_walk_forward_nav",
         wraps=__import__(
@@ -310,7 +212,6 @@ def test_calls_run_explicit_schedule_rules_walk_forward_nav(tmp_path: Path) -> N
         result = run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
         mocked.assert_called_once()
         assert mocked.call_args.args[0] == result.dataset.source_records
@@ -319,7 +220,7 @@ def test_calls_run_explicit_schedule_rules_walk_forward_nav(tmp_path: Path) -> N
 def test_calls_compute_walk_forward_benchmark_relative_metrics(
     tmp_path: Path,
 ) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.compute_walk_forward_benchmark_relative_metrics"
     ) as mocked:
@@ -330,13 +231,12 @@ def test_calls_compute_walk_forward_benchmark_relative_metrics(
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked.assert_called_once()
 
 
 def test_calls_render_backtest_evaluation_report_bundle(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.render_backtest_evaluation_report_bundle"
     ) as mocked:
@@ -347,51 +247,59 @@ def test_calls_render_backtest_evaluation_report_bundle(tmp_path: Path) -> None:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked.assert_called_once()
 
 
 def test_does_not_call_synthetic_pipeline_wrapper(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.evaluation_pipeline.run_explicit_synthetic_backtest_evaluation_pipeline"
     ) as mocked:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked.assert_not_called()
+
+
+def test_default_kospi_primary_dry_run_succeeds_with_one_row_per_period_csvs(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=None,
+        benchmark_spec=None,
+    )
+    assert result.walk_forward_result.steps
+    assert result.dataset.instrument_specs == (
+        default_local_monthly_instrument_specs_for_kospi_primary()
+    )
+    assert result.dataset.benchmark_spec == default_local_monthly_benchmark_spec()
+    assert not any(
+        "sp500tr_asset_monthly.csv" in spec.relative_path
+        for spec in result.dataset.instrument_specs
+    )
 
 
 def test_uses_default_kospi_primary_instrument_specs_when_none_supplied(
     tmp_path: Path,
 ) -> None:
-    repo_root, data_root = _layout(tmp_path)
-    _write_kospi_primary_csvs(
-        data_root,
-        instrument_specs=default_local_monthly_instrument_specs_for_kospi_primary(),
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=None,
     )
-    with patch(
-        "backtest_engine.local_evaluation.assemble_local_monthly_dataset",
-        wraps=assemble_local_monthly_dataset,
-    ) as mocked_assemble:
-        with pytest.raises(ValueError, match="insufficient visible price observations"):
-            run_local_monthly_evaluation_dry_run(
-                repo_root=repo_root,
-                data_root=data_root,
-                instrument_specs=None,
-            )
-    assert mocked_assemble.call_args.kwargs["instrument_specs"] == (
+    assert result.dataset.instrument_specs == (
         default_local_monthly_instrument_specs_for_kospi_primary()
     )
 
 
 def test_uses_default_benchmark_spec_when_none_supplied(tmp_path: Path) -> None:
-    repo_root, data_root = _layout(tmp_path)
-    working_specs = _kospi_primary_working_instrument_specs()
-    _write_kospi_primary_csvs(data_root, instrument_specs=working_specs)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.assemble_local_monthly_dataset",
         wraps=assemble_local_monthly_dataset,
@@ -399,7 +307,6 @@ def test_uses_default_benchmark_spec_when_none_supplied(tmp_path: Path) -> None:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
             benchmark_spec=None,
         )
     assert mocked_assemble.call_args.kwargs["benchmark_spec"] == (
@@ -408,17 +315,16 @@ def test_uses_default_benchmark_spec_when_none_supplied(tmp_path: Path) -> None:
 
 
 def test_preserves_dataset(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     dataset = assemble_local_monthly_dataset(
         repo_root=repo_root,
         data_root=data_root,
-        instrument_specs=working_specs,
+        instrument_specs=default_local_monthly_instrument_specs_for_kospi_primary(),
         benchmark_spec=default_local_monthly_benchmark_spec(),
     )
     result = run_local_monthly_evaluation_dry_run(
         repo_root=repo_root,
         data_root=data_root,
-        instrument_specs=working_specs,
     )
     assert result.dataset == dataset
 
@@ -459,34 +365,31 @@ def test_produces_non_empty_markdown_report_in_memory(tmp_path: Path) -> None:
 
 
 def test_does_not_write_markdown_report_file(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch("pathlib.Path.write_text") as mocked_write_text:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked_write_text.assert_not_called()
 
 
 def test_does_not_write_json_artifact(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch("json.dump") as mocked_json_dump:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     mocked_json_dump.assert_not_called()
 
 
 def test_does_not_call_open_for_write(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch("builtins.open") as mocked_open:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
         )
     for call in mocked_open.call_args_list:
         mode = call.args[1] if len(call.args) > 1 else call.kwargs.get("mode", "r")
@@ -622,7 +525,7 @@ def test_propagates_dataset_assembly_failure(tmp_path: Path) -> None:
 
 
 def test_propagates_run_config_failure(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(
+    repo_root, data_root = _prepare_default_layout(
         tmp_path,
         periods=("2020-01", "2020-02", "2020-03"),
     )
@@ -630,13 +533,12 @@ def test_propagates_run_config_failure(tmp_path: Path) -> None:
         run_local_monthly_evaluation_dry_run(
             repo_root=repo_root,
             data_root=data_root,
-            instrument_specs=working_specs,
             rolling_lookback_count=3,
         )
 
 
 def test_propagates_walk_forward_failure(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.run_explicit_schedule_rules_walk_forward_nav",
         side_effect=ValueError("walk-forward failed"),
@@ -645,12 +547,11 @@ def test_propagates_walk_forward_failure(tmp_path: Path) -> None:
             run_local_monthly_evaluation_dry_run(
                 repo_root=repo_root,
                 data_root=data_root,
-                instrument_specs=working_specs,
             )
 
 
 def test_propagates_benchmark_adapter_failure(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.compute_walk_forward_benchmark_relative_metrics",
         side_effect=ValueError("benchmark adapter failed"),
@@ -659,12 +560,11 @@ def test_propagates_benchmark_adapter_failure(tmp_path: Path) -> None:
             run_local_monthly_evaluation_dry_run(
                 repo_root=repo_root,
                 data_root=data_root,
-                instrument_specs=working_specs,
             )
 
 
 def test_propagates_report_bundle_failure(tmp_path: Path) -> None:
-    repo_root, data_root, working_specs = _prepare_working_layout(tmp_path)
+    repo_root, data_root = _prepare_default_layout(tmp_path)
     with patch(
         "backtest_engine.local_evaluation.render_backtest_evaluation_report_bundle",
         side_effect=ValueError("report bundle failed"),
@@ -673,7 +573,6 @@ def test_propagates_report_bundle_failure(tmp_path: Path) -> None:
             run_local_monthly_evaluation_dry_run(
                 repo_root=repo_root,
                 data_root=data_root,
-                instrument_specs=working_specs,
             )
 
 

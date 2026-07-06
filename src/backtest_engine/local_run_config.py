@@ -28,6 +28,10 @@ LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 = "kospi_primary_monthly_rules_config.v1"
 
 _FIRST_DAY_OF_MONTH_WARNING_SUBSTRING = "first day of month"
 
+_SIGNAL_WARMUP_WARNING = (
+    "first rolling_lookback_count common periods are used as signal warm-up"
+)
+
 _KOSPI_PRIMARY_ROLLING_SPECS: tuple[
     tuple[str, str, str, Decimal, Decimal, Decimal, Decimal],
     ...,
@@ -54,7 +58,17 @@ class LocalMonthlyRunConfig(BaseModel):
     cost_model: BacktestCostModel
     cash_asset_id: str
     cash_min_weight: Decimal
+    rolling_lookback_count: int
     warnings: tuple[str, ...]
+
+    @field_validator("rolling_lookback_count", mode="before")
+    @classmethod
+    def validate_rolling_lookback_count(cls, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("rolling_lookback_count must be an integer.")
+        if value < 2:
+            raise ValueError("rolling_lookback_count must be >= 2.")
+        return value
 
     @field_validator("cash_asset_id")
     @classmethod
@@ -78,10 +92,13 @@ class LocalMonthlyRunConfig(BaseModel):
         if not self.rolling_asset_configs:
             raise ValueError("rolling_asset_configs must not be empty.")
 
-        expected_period_count = len(self.dataset.common_periods) - 1
+        expected_period_count = (
+            len(self.dataset.common_periods) - self.rolling_lookback_count
+        )
         if len(self.period_specs) != expected_period_count:
             raise ValueError(
-                "period_specs count must equal len(dataset.common_periods) - 1."
+                "period_specs count must equal "
+                "len(dataset.common_periods) - rolling_lookback_count."
             )
 
         for previous, current in zip(self.period_specs, self.period_specs[1:], strict=False):
@@ -140,6 +157,7 @@ def build_kospi_primary_monthly_run_config(
         common_periods=common_periods,
         latest_timestamps=latest_timestamps,
         fx_rates=fx_rates,
+        warmup_count=rolling_lookback_count,
     )
 
     first_period = common_periods[0]
@@ -178,6 +196,7 @@ def build_kospi_primary_monthly_run_config(
         cost_model=cost_model,
         cash_asset_id=cash_asset_id,
         cash_min_weight=cash_floor,
+        rolling_lookback_count=rolling_lookback_count,
         warnings=warnings,
     )
 
@@ -214,19 +233,23 @@ def _build_period_specs(
     common_periods: tuple[str, ...],
     latest_timestamps: dict[str, datetime],
     fx_rates: dict[str, Decimal],
+    warmup_count: int,
 ) -> tuple[BacktestPeriodSpec, ...]:
     specs: list[BacktestPeriodSpec] = []
-    for previous_period, current_period in zip(common_periods, common_periods[1:], strict=False):
-        if previous_period not in latest_timestamps:
-            raise ValueError(f"missing source timestamp for period: {previous_period}")
-        if current_period not in latest_timestamps:
-            raise ValueError(f"missing source timestamp for period: {current_period}")
-        if current_period not in fx_rates:
-            raise ValueError(f"missing USDKRW rate for period: {current_period}")
+    for current_index in range(warmup_count, len(common_periods)):
+        decision_period = common_periods[current_index - 1]
+        execution_period = common_periods[current_index]
 
-        decision_time = latest_timestamps[previous_period]
-        intended_execution_time = latest_timestamps[current_period]
-        usdkrw_rate = fx_rates[current_period]
+        if decision_period not in latest_timestamps:
+            raise ValueError(f"missing source timestamp for period: {decision_period}")
+        if execution_period not in latest_timestamps:
+            raise ValueError(f"missing source timestamp for period: {execution_period}")
+        if execution_period not in fx_rates:
+            raise ValueError(f"missing USDKRW rate for period: {execution_period}")
+
+        decision_time = latest_timestamps[decision_period]
+        intended_execution_time = latest_timestamps[execution_period]
+        usdkrw_rate = fx_rates[execution_period]
 
         require_timezone_aware_datetime(decision_time, field_name="decision_time")
         require_timezone_aware_datetime(intended_execution_time, field_name="intended_execution_time")
@@ -278,6 +301,7 @@ def _collect_warnings(dataset_warnings: tuple[str, ...]) -> tuple[str, ...]:
         for warning in dataset_warnings
         if _FIRST_DAY_OF_MONTH_WARNING_SUBSTRING in warning
     ]
+    collected.append(_SIGNAL_WARMUP_WARNING)
     return tuple(collected)
 
 
