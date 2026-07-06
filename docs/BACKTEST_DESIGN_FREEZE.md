@@ -1190,3 +1190,32 @@ Rules:
   benchmark alignment, adapter metrics, report rendering, or evidence export
 - evidence export remains blocked until NAV sanity passes
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-7 Local NAV Accounting Materiality Tolerance Patch
+
+Phase 2e-6 sanitized NAV diagnostics showed the operator real-data step 20
+accounting delta was ``-1E-19 KRW``, a sub-atomic Decimal drift rather than an
+economically meaningful accounting mismatch.
+
+Rules:
+
+- local NAV sanity policy is updated to ``LOCAL_NAV_SANITY_POLICY_V2``
+  (``local_monthly_walk_forward_nav_sanity.v2``); ``LOCAL_NAV_SANITY_POLICY_V1``
+  remains as historical reference
+- the post-trade accounting identity
+  (``cash_krw_after + recomputed_holdings_value_krw ==
+  post_trade_portfolio_value_krw``) now allows only explicit immaterial Decimal
+  drift tolerance
+- tolerance values are ``1E-6 KRW`` absolute
+  (``LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW``) and ``1E-18`` relative
+  (``LOCAL_NAV_ACCOUNTING_REL_TOLERANCE``)
+- material mismatches still fail fast with sanitized ``ValueError`` messages
+  that exclude raw numeric internals
+- immaterial drift within tolerance passes NAV sanity and may emit a dry-run
+  warning; diagnostics distinguish ``accounting_delta_immaterial_decimal_drift``
+  from ``accounting_delta_material``
+- no rounding or quantization is introduced; monetary values remain ``Decimal``
+- rebalance, walk-forward, execution-price, local-run-config, and benchmark math
+  remain unchanged
+- evidence export remains blocked until all NAV sanity checks pass
+- no S&P-relative project conclusion exists yet

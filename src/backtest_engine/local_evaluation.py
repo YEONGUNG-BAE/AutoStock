@@ -51,9 +51,13 @@ LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 = (
     "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
 )
 LOCAL_NAV_SANITY_POLICY_V1 = "local_monthly_walk_forward_nav_sanity.v1"
+LOCAL_NAV_SANITY_POLICY_V2 = "local_monthly_walk_forward_nav_sanity.v2"
 LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
     "local_monthly_walk_forward_nav_sanity_diagnostic.v1"
 )
+
+LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW = Decimal("1E-6")
+LOCAL_NAV_ACCOUNTING_REL_TOLERANCE = Decimal("1E-18")
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -64,6 +68,9 @@ _MAX_TRADE_GROSS_NOTIONAL_NAV_MULTIPLE = Decimal("2.00")
 
 _NAV_SANITY_PASSED_WARNING = (
     "local monthly walk-forward NAV passed deterministic sanity checks"
+)
+_NAV_ACCOUNTING_DRIFT_WARNING = (
+    "local NAV accounting identity had immaterial Decimal drift within tolerance"
 )
 
 _RESEARCH_ONLY_WARNING = (
@@ -241,6 +248,35 @@ def align_local_monthly_benchmark_points_to_nav_calendar(
     return tuple(aligned_points)
 
 
+def _is_material_nav_accounting_delta(
+    *,
+    accounting_delta_krw: Decimal,
+    post_trade_portfolio_value_krw: Decimal,
+    abs_tolerance_krw: Decimal = LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW,
+    rel_tolerance: Decimal = LOCAL_NAV_ACCOUNTING_REL_TOLERANCE,
+) -> bool:
+    if not abs_tolerance_krw.is_finite() or abs_tolerance_krw < _ZERO:
+        raise ValueError("abs_tolerance_krw must be a non-negative finite Decimal.")
+    if not rel_tolerance.is_finite() or rel_tolerance < _ZERO:
+        raise ValueError("rel_tolerance must be a non-negative finite Decimal.")
+    if not post_trade_portfolio_value_krw.is_finite():
+        raise ValueError(
+            "post_trade_portfolio_value_krw must be a finite Decimal."
+        )
+
+    abs_delta = abs(accounting_delta_krw)
+
+    if abs_delta <= abs_tolerance_krw:
+        return False
+
+    if post_trade_portfolio_value_krw > _ZERO:
+        rel_delta = abs_delta / post_trade_portfolio_value_krw
+        if rel_delta <= rel_tolerance:
+            return False
+
+    return True
+
+
 def validate_local_monthly_walk_forward_nav_sanity(
     *,
     run_config: LocalMonthlyRunConfig,
@@ -268,6 +304,9 @@ def validate_local_monthly_walk_forward_nav_sanity(
             "walk_forward_result.steps length must equal "
             "run_config.period_specs length for NAV sanity."
         )
+
+    nav_sanity_warnings: list[str] = []
+    saw_immaterial_accounting_drift = False
 
     for index, nav_point in enumerate(nav_points):
         if nav_point.portfolio_value_krw <= _ZERO:
@@ -310,12 +349,20 @@ def validate_local_monthly_walk_forward_nav_sanity(
         )
 
         recomputed_post_trade = rebalance.cash_krw_after + holdings_value_krw
-        if recomputed_post_trade != rebalance.post_trade_portfolio_value_krw:
+        accounting_delta_krw = (
+            recomputed_post_trade - rebalance.post_trade_portfolio_value_krw
+        )
+        if _is_material_nav_accounting_delta(
+            accounting_delta_krw=accounting_delta_krw,
+            post_trade_portfolio_value_krw=rebalance.post_trade_portfolio_value_krw,
+        ):
             raise ValueError(
                 f"steps[{index}] post-trade holdings value plus cash must equal "
                 "post_trade_portfolio_value_krw; run sanitized NAV sanity diagnostic "
                 "for this step."
             )
+        if accounting_delta_krw != _ZERO:
+            saw_immaterial_accounting_drift = True
 
         pre_trade_nav = rebalance.pre_trade_portfolio_value_krw
         max_trade_notional = pre_trade_nav * _MAX_TRADE_GROSS_NOTIONAL_NAV_MULTIPLE
@@ -367,7 +414,10 @@ def validate_local_monthly_walk_forward_nav_sanity(
     if terminal_return > max_terminal_return:
         raise ValueError("terminal strategy return exceeds max_terminal_return.")
 
-    return (_NAV_SANITY_PASSED_WARNING,)
+    nav_sanity_warnings.append(_NAV_SANITY_PASSED_WARNING)
+    if saw_immaterial_accounting_drift:
+        nav_sanity_warnings.append(_NAV_ACCOUNTING_DRIFT_WARNING)
+    return tuple(nav_sanity_warnings)
 
 
 def build_local_nav_sanity_step_diagnostic(
@@ -454,6 +504,7 @@ def build_local_nav_sanity_step_diagnostic(
     warnings = _collect_nav_sanity_step_diagnostic_warnings(
         rebalance=rebalance,
         accounting_delta_krw=accounting_delta_krw,
+        post_trade_portfolio_value_krw=rebalance.post_trade_portfolio_value_krw,
         max_trade_notional_to_pre_nav_ratio=max_trade_notional_to_pre_nav_ratio,
         markets_seen=markets_seen,
     )
@@ -536,14 +587,22 @@ def _collect_nav_sanity_step_diagnostic_warnings(
     *,
     rebalance: BacktestRebalanceResult,
     accounting_delta_krw: Decimal,
+    post_trade_portfolio_value_krw: Decimal,
     max_trade_notional_to_pre_nav_ratio: Decimal | None,
     markets_seen: tuple[str, ...],
 ) -> tuple[str, ...]:
     warnings: list[str] = []
     if accounting_delta_krw != _ZERO:
         warnings.append("accounting_delta_nonzero")
-        warnings.append("post_trade_value_excludes_or_double_counts_holdings")
-        warnings.append("cash_and_holdings_not_equal_nav")
+        if _is_material_nav_accounting_delta(
+            accounting_delta_krw=accounting_delta_krw,
+            post_trade_portfolio_value_krw=post_trade_portfolio_value_krw,
+        ):
+            warnings.append("accounting_delta_material")
+            warnings.append("post_trade_value_excludes_or_double_counts_holdings")
+            warnings.append("cash_and_holdings_not_equal_nav")
+        else:
+            warnings.append("accounting_delta_immaterial_decimal_drift")
     if rebalance.cash_krw_after < _ZERO:
         warnings.append("negative_cash")
     if rebalance.cash_krw_after > rebalance.post_trade_portfolio_value_krw:

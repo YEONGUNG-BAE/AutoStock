@@ -22,15 +22,20 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1,
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW,
+    LOCAL_NAV_ACCOUNTING_REL_TOLERANCE,
     LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V1,
+    LOCAL_NAV_SANITY_POLICY_V2,
     LocalMonthlyEvaluationDryRunResult,
     LocalNavSanityStepDiagnostic,
     align_local_monthly_benchmark_points_to_nav_calendar,
     build_local_nav_sanity_step_diagnostic,
     run_local_monthly_evaluation_dry_run,
     validate_local_monthly_walk_forward_nav_sanity,
+    _compute_post_trade_holdings_value_krw_for_sanity,
     _holding_value_krw_for_sanity,
+    _is_material_nav_accounting_delta,
 )
 from backtest_engine.local_run_config import (  # noqa: E402
     LocalMonthlyRunConfig,
@@ -1194,6 +1199,92 @@ def test_local_nav_sanity_policy_constant_exists() -> None:
     )
 
 
+def test_local_nav_sanity_policy_v2_constant_exists() -> None:
+    assert LOCAL_NAV_SANITY_POLICY_V2 == (
+        "local_monthly_walk_forward_nav_sanity.v2"
+    )
+
+
+def test_local_nav_accounting_abs_tolerance_constant_exists() -> None:
+    assert LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW == Decimal("1E-6")
+
+
+def test_local_nav_accounting_rel_tolerance_constant_exists() -> None:
+    assert LOCAL_NAV_ACCOUNTING_REL_TOLERANCE == Decimal("1E-18")
+
+
+def test_is_material_nav_accounting_delta_returns_false_for_sub_atomic_drift() -> None:
+    assert not _is_material_nav_accounting_delta(
+        accounting_delta_krw=Decimal("-1E-19"),
+        post_trade_portfolio_value_krw=Decimal("100000000"),
+    )
+
+
+def test_is_material_nav_accounting_delta_returns_false_when_relative_within_tolerance() -> None:
+    assert not _is_material_nav_accounting_delta(
+        accounting_delta_krw=Decimal("2E-6"),
+        post_trade_portfolio_value_krw=Decimal("2E15"),
+    )
+
+
+def test_is_material_nav_accounting_delta_returns_true_for_material_one_krw_mismatch() -> None:
+    assert _is_material_nav_accounting_delta(
+        accounting_delta_krw=Decimal("1"),
+        post_trade_portfolio_value_krw=Decimal("100"),
+    )
+
+
+def test_is_material_nav_accounting_delta_rejects_negative_tolerance() -> None:
+    with pytest.raises(ValueError, match="abs_tolerance_krw must be"):
+        _is_material_nav_accounting_delta(
+            accounting_delta_krw=Decimal("1"),
+            post_trade_portfolio_value_krw=Decimal("100"),
+            abs_tolerance_krw=Decimal("-1"),
+        )
+
+
+def test_is_material_nav_accounting_delta_rejects_non_finite_tolerance() -> None:
+    with pytest.raises(ValueError, match="rel_tolerance must be"):
+        _is_material_nav_accounting_delta(
+            accounting_delta_krw=Decimal("1"),
+            post_trade_portfolio_value_krw=Decimal("100"),
+            rel_tolerance=Decimal("NaN"),
+        )
+
+
+def _corrupted_immaterial_drift_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step_index = 0
+    step = walk_forward_result.steps[step_index]
+    period_spec = run_config.period_specs[step_index]
+    holdings_value_krw = _compute_post_trade_holdings_value_krw_for_sanity(
+        step,
+        usdkrw_rate=period_spec.usdkrw_rate,
+        step_index=step_index,
+    )
+    recomputed_post_trade = step.rebalance_result.cash_krw_after + holdings_value_krw
+    drifted_post_trade = recomputed_post_trade + Decimal("1E-19")
+    rebalance = step.rebalance_result.model_copy(
+        update={"post_trade_portfolio_value_krw": drifted_post_trade}
+    )
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted_nav = walk_forward_result.nav_points[step_index].model_copy(
+        update={"portfolio_value_krw": drifted_post_trade}
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={
+            "steps": (corrupted_step, *walk_forward_result.steps[1:]),
+            "nav_points": (
+                corrupted_nav,
+                *walk_forward_result.nav_points[1:],
+            ),
+        }
+    )
+    return run_config, corrupted
+
+
 def test_validate_local_monthly_walk_forward_nav_sanity_helper_exists() -> None:
     assert callable(validate_local_monthly_walk_forward_nav_sanity)
 
@@ -1371,13 +1462,7 @@ def test_nav_sanity_rejects_trade_gross_notional_above_nav_multiple(
 def test_nav_sanity_rejects_post_trade_holdings_plus_cash_mismatch(
     tmp_path: Path,
 ) -> None:
-    run_config, walk_forward_result = _sanity_inputs(tmp_path)
-    step = walk_forward_result.steps[0]
-    rebalance = step.rebalance_result.model_copy(
-        update={"post_trade_portfolio_value_krw": step.rebalance_result.post_trade_portfolio_value_krw + Decimal("1")}
-    )
-    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
-    corrupted = walk_forward_result.model_copy(update={"steps": (corrupted_step, *walk_forward_result.steps[1:])})
+    run_config, walk_forward_result = _corrupted_accounting_mismatch_inputs(tmp_path)
     with pytest.raises(
         ValueError,
         match=(
@@ -1388,7 +1473,33 @@ def test_nav_sanity_rejects_post_trade_holdings_plus_cash_mismatch(
     ):
         validate_local_monthly_walk_forward_nav_sanity(
             run_config=run_config,
-            walk_forward_result=corrupted,
+            walk_forward_result=walk_forward_result,
+        )
+
+
+def test_nav_sanity_passes_for_immaterial_sub_atomic_accounting_drift(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_immaterial_drift_inputs(tmp_path)
+    warnings = validate_local_monthly_walk_forward_nav_sanity(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+    )
+    assert "local monthly walk-forward NAV passed deterministic sanity checks" in warnings
+    assert (
+        "local NAV accounting identity had immaterial Decimal drift within tolerance"
+        in warnings
+    )
+
+
+def test_nav_sanity_still_rejects_material_accounting_mismatch(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_accounting_mismatch_inputs(tmp_path)
+    with pytest.raises(ValueError, match="run sanitized NAV sanity diagnostic"):
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
         )
 
 
@@ -1610,6 +1721,37 @@ def test_diagnostic_warning_includes_cash_and_holdings_not_equal_nav_for_mismatc
         step_index=0,
     )
     assert "cash_and_holdings_not_equal_nav" in diagnostic.warnings
+    assert "accounting_delta_material" in diagnostic.warnings
+
+
+def test_diagnostic_warns_immaterial_decimal_drift_for_sub_atomic_delta(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_immaterial_drift_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert "accounting_delta_nonzero" in diagnostic.warnings
+    assert "accounting_delta_immaterial_decimal_drift" in diagnostic.warnings
+    assert "accounting_delta_material" not in diagnostic.warnings
+
+
+def test_diagnostic_does_not_warn_cash_and_holdings_not_equal_nav_for_immaterial_drift(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_immaterial_drift_inputs(tmp_path)
+    diagnostic = build_local_nav_sanity_step_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        step_index=0,
+    )
+    assert "cash_and_holdings_not_equal_nav" not in diagnostic.warnings
+    assert (
+        "post_trade_value_excludes_or_double_counts_holdings"
+        not in diagnostic.warnings
+    )
 
 
 def test_diagnostic_model_has_no_forbidden_fields() -> None:
@@ -1763,6 +1905,47 @@ def test_successful_dry_run_includes_nav_sanity_passed_warning(tmp_path: Path) -
         "local monthly walk-forward NAV passed deterministic sanity checks" in warning
         for warning in result.warnings
     )
+
+
+def test_successful_dry_run_includes_drift_warning_if_immaterial_drift_present(
+    tmp_path: Path,
+) -> None:
+    _, corrupted = _corrupted_immaterial_drift_inputs(tmp_path)
+    repo_root = tmp_path / "AutoStock"
+    data_root = tmp_path / "autostock-data"
+    with patch(
+        "backtest_engine.local_evaluation.run_explicit_schedule_rules_walk_forward_nav",
+        return_value=corrupted,
+    ):
+        result = run_local_monthly_evaluation_dry_run(
+            repo_root=repo_root,
+            data_root=data_root,
+        )
+    assert any(
+        "local NAV accounting identity had immaterial Decimal drift within tolerance"
+        in warning
+        for warning in result.warnings
+    )
+
+
+def test_materiality_helper_does_not_use_float_or_quantize() -> None:
+    text = MODULE_PATH.read_text(encoding="utf-8")
+    helper_start = text.index("def _is_material_nav_accounting_delta")
+    helper_end = text.index("\ndef validate_local_monthly_walk_forward_nav_sanity")
+    helper_text = text[helper_start:helper_end]
+    assert "float(" not in helper_text
+    assert "quantize" not in helper_text
+    assert "round(" not in helper_text
+
+
+def test_nav_sanity_accounting_identity_does_not_use_float_or_quantize() -> None:
+    text = MODULE_PATH.read_text(encoding="utf-8")
+    sanity_start = text.index("def validate_local_monthly_walk_forward_nav_sanity")
+    sanity_end = text.index("\ndef build_local_nav_sanity_step_diagnostic")
+    sanity_text = text[sanity_start:sanity_end]
+    assert "float(" not in sanity_text
+    assert "quantize" not in sanity_text
+    assert "round(" not in sanity_text
 
 
 def test_nav_sanity_errors_exclude_raw_csv_and_secrets() -> None:
