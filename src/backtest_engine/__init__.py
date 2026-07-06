@@ -4,8 +4,10 @@ The package contains a deterministic LLM-free rules-only allocator, a
 single-step backtest contract, an as-of-safe snapshot builder, as-of-safe
 rolling feature helpers, count-based observation spacing guards, a single-step
 rules decision composer, explicit-schedule walk-forward NAV, and a
-benchmark-relative metrics adapter. It does not load real data, fetch data,
-run live or paper trading, or produce project-level investment conclusions.
+benchmark-relative metrics adapter, a benchmark-relative markdown report
+bundle renderer, and a synthetic end-to-end evaluation pipeline composer. It
+does not load real data, fetch data, run live or paper trading, or produce
+project-level investment conclusions.
 """
 
 from __future__ import annotations
@@ -14,6 +16,11 @@ from backtest_engine.benchmark_adapter import (
     BENCHMARK_ADAPTER_POLICY_V1,
     BacktestBenchmarkRelativeResult,
     compute_walk_forward_benchmark_relative_metrics,
+)
+from backtest_engine.evaluation_pipeline import (
+    BACKTEST_EVALUATION_PIPELINE_POLICY_V1,
+    BacktestEvaluationPipelineResult,
+    run_explicit_synthetic_backtest_evaluation_pipeline,
 )
 from backtest_engine.report_bundle import (
     BACKTEST_REPORT_BUNDLE_POLICY_V1,
@@ -83,8 +90,10 @@ __all__ = [
     "REBALANCE_ACCOUNTING_POLICY_V1",
     "RULES_ALLOCATOR_V1",
     "WALK_FORWARD_POLICY_V1",
+    "BACKTEST_EVALUATION_PIPELINE_POLICY_V1",
     "BACKTEST_REPORT_BUNDLE_POLICY_V1",
     "BacktestBenchmarkRelativeResult",
+    "BacktestEvaluationPipelineResult",
     "BacktestEvaluationReportBundle",
     "BacktestAssetFeature",
     "BacktestCostModel",
@@ -107,6 +116,7 @@ __all__ = [
     "SnapshotAssetConfig",
     "compute_walk_forward_benchmark_relative_metrics",
     "render_backtest_evaluation_report_bundle",
+    "run_explicit_synthetic_backtest_evaluation_pipeline",
     "allocate_rules_only_v1",
     "apply_single_rebalance_accounting",
     "build_feature_snapshot_from_source_records",

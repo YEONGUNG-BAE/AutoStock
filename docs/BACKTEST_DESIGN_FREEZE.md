@@ -885,3 +885,31 @@ Rules:
   renderer output
 - real-data execution and persisted report artifacts are deferred to a later
   explicit phase
+
+### Phase 2c-10 Synthetic Evaluation Pipeline Contract
+
+Phase 2c-10 composes explicit synthetic source records, period specs, rolling
+asset configs, initial portfolio state, cost model, cash settings, and explicit
+``BenchmarkReturnPoint`` inputs into one ``BacktestEvaluationPipelineResult``.
+
+Rules:
+
+- input is read-only source records, explicit period specs, rolling asset
+  configs, initial portfolio state, cost model, cash settings, and explicit
+  benchmark return points supplied by the caller
+- output is one immutable ``BacktestEvaluationPipelineResult``
+- the public API is ``run_explicit_synthetic_backtest_evaluation_pipeline``
+- the evaluation pipeline policy string is
+  ``explicit_synthetic_walk_forward_benchmark_report_pipeline.v1``
+- calls existing ``run_explicit_schedule_rules_walk_forward_nav`` for
+  walk-forward NAV
+- calls existing ``compute_walk_forward_benchmark_relative_metrics`` for
+  benchmark-relative metrics
+- calls existing ``render_backtest_evaluation_report_bundle`` for markdown
+  report bundle output
+- does not load or fetch real data
+- does not generate rebalance schedule
+- does not fetch benchmark data
+- does not write report files or create artifacts
+- does not add project-level investment conclusions
+- real-data backtest execution is deferred to a later explicit phase
