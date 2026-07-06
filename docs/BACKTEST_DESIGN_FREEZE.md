@@ -1050,3 +1050,25 @@ Rules:
 - rejected output/write/fetch/live/paper CLI args exit nonzero
 - result is research evidence only
 - no project-level investment conclusion or S&P-beat claim
+
+### Phase 2d-5 Sanitized Local Evidence Export Contract
+
+Phase 2d-5 adds an explicit opt-in writer for sanitized local dry-run evidence
+bundles.
+
+Rules:
+
+- export is opt-in only through ``--export-output-root``
+- without ``--export-output-root``, CLI remains summary-only and writes no files
+- default output root is sibling ``repo_root.parent / "autostock-data" / "outputs"``
+- output root must be outside the repository
+- export accepts an already-computed ``LocalMonthlyEvaluationDryRunResult`` and
+  does not rerun the dry-run
+- writes exactly three files: summary markdown, metrics JSON, manifest JSON
+- no raw CSV rows
+- no raw source records
+- no config or secrets
+- no fetch or download
+- no live/paper/runtime writes
+- no project-level investment conclusion or S&P-beat claim
+- output artifacts must not be committed

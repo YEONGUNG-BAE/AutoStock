@@ -22,6 +22,11 @@ from backtest_engine.local_dry_run_cli import (  # noqa: E402
     main,
     render_local_dry_run_summary,
 )
+from backtest_engine.local_evidence_export import (  # noqa: E402
+    MANIFEST_JSON_FILENAME,
+    METRICS_JSON_FILENAME,
+    SUMMARY_MARKDOWN_FILENAME,
+)
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
     LocalMonthlyEvaluationDryRunResult,
@@ -46,6 +51,7 @@ REQUIRED_COLUMNS = (
 HEADER = ",".join(REQUIRED_COLUMNS)
 
 FOCUSED_TEST_FILES = (
+    "tests/test_backtest_local_evidence_export.py",
     "tests/test_backtest_local_dry_run_cli.py",
     "tests/test_backtest_local_evaluation.py",
     "tests/test_backtest_local_run_config.py",
@@ -198,6 +204,9 @@ def test_build_arg_parser_accepts_allowed_args() -> None:
             "--fx-spread-bps",
             "15",
             "--show-markdown-preview",
+            "--export-output-root",
+            "/tmp/autostock-outputs",
+            "--overwrite-export",
         ]
     )
     assert args.repo_root == Path("/tmp/AutoStock")
@@ -209,6 +218,8 @@ def test_build_arg_parser_accepts_allowed_args() -> None:
     assert args.kr_sell_tax_bps == Decimal("23")
     assert args.fx_spread_bps == Decimal("15")
     assert args.show_markdown_preview is True
+    assert args.export_output_root == Path("/tmp/autostock-outputs")
+    assert args.overwrite_export is True
 
 
 @pytest.mark.parametrize("forbidden_arg", FORBIDDEN_CLI_ARGS)
@@ -412,7 +423,7 @@ def test_markdown_preview_prints_at_most_first_20_lines(tmp_path: Path) -> None:
     assert preview_body == markdown_lines[:20]
 
 
-def test_cli_does_not_write_files(tmp_path: Path) -> None:
+def test_cli_without_export_output_root_writes_no_files(tmp_path: Path) -> None:
     repo_root, data_root = _prepare_default_layout(tmp_path)
     before = {
         path
@@ -427,6 +438,112 @@ def test_cli_does_not_write_files(tmp_path: Path) -> None:
     }
     assert exit_code == 0
     assert before == after
+
+
+def test_cli_does_not_write_files(tmp_path: Path) -> None:
+    test_cli_without_export_output_root_writes_no_files(tmp_path)
+
+
+def test_cli_with_export_output_root_calls_export_local_dry_run_evidence(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    output_root = tmp_path / "autostock-data" / "outputs"
+    with patch(
+        "backtest_engine.local_dry_run_cli.export_local_dry_run_evidence"
+    ) as mocked:
+        mocked.return_value = type(
+            "ExportResult",
+            (),
+            {
+                "summary_markdown_path": str(output_root / SUMMARY_MARKDOWN_FILENAME),
+                "metrics_json_path": str(output_root / METRICS_JSON_FILENAME),
+                "manifest_json_path": str(output_root / MANIFEST_JSON_FILENAME),
+            },
+        )()
+        exit_code = main(
+            _cli_argv(
+                repo_root,
+                data_root,
+                "--export-output-root",
+                str(output_root),
+            )
+        )
+    mocked.assert_called_once()
+    call_kwargs = mocked.call_args.kwargs
+    assert call_kwargs["repo_root"] == repo_root
+    assert call_kwargs["output_root"] == output_root
+    assert call_kwargs["overwrite"] is False
+    assert exit_code == 0
+
+
+def test_cli_passes_overwrite_export_flag(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    output_root = tmp_path / "autostock-data" / "outputs"
+    with patch(
+        "backtest_engine.local_dry_run_cli.export_local_dry_run_evidence"
+    ) as mocked:
+        mocked.return_value = type(
+            "ExportResult",
+            (),
+            {
+                "summary_markdown_path": str(output_root / SUMMARY_MARKDOWN_FILENAME),
+                "metrics_json_path": str(output_root / METRICS_JSON_FILENAME),
+                "manifest_json_path": str(output_root / MANIFEST_JSON_FILENAME),
+            },
+        )()
+        exit_code = main(
+            _cli_argv(
+                repo_root,
+                data_root,
+                "--export-output-root",
+                str(output_root),
+                "--overwrite-export",
+            )
+        )
+    assert mocked.call_args.kwargs["overwrite"] is True
+    assert exit_code == 0
+
+
+def test_cli_export_output_root_inside_repo_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    inside_repo_output = repo_root / "outputs"
+    exit_code = main(
+        _cli_argv(
+            repo_root,
+            data_root,
+            "--export-output-root",
+            str(inside_repo_output),
+        )
+    )
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert "evidence export failed" in captured.err
+
+
+def test_cli_prints_exported_evidence_paths_only_after_export(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    output_root = tmp_path / "autostock-data" / "outputs"
+    exit_code = main(
+        _cli_argv(
+            repo_root,
+            data_root,
+            "--export-output-root",
+            str(output_root),
+        )
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "evidence_exported: true" in captured.out
+    assert f"summary_markdown_path: {output_root / SUMMARY_MARKDOWN_FILENAME}" in captured.out
+    assert f"metrics_json_path: {output_root / METRICS_JSON_FILENAME}" in captured.out
+    assert f"manifest_json_path: {output_root / MANIFEST_JSON_FILENAME}" in captured.out
 
 
 def test_cli_does_not_create_artifacts(tmp_path: Path) -> None:
@@ -536,6 +653,7 @@ def test_module_static_scan_rejects_forbidden_tokens() -> None:
 
     allowed_calls = (
         "run_local_monthly_evaluation_dry_run",
+        "export_local_dry_run_evidence",
         "LocalMonthlyEvaluationDryRunResult",
     )
     for call in allowed_calls:

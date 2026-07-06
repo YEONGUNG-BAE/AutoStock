@@ -1,9 +1,10 @@
-"""Operator local monthly real-data evaluation dry-run CLI for Phase 2d-4.
+"""Operator local monthly real-data evaluation dry-run CLI for Phase 2d-4/2d-5.
 
 This module exposes a command-line entry point that calls
 ``run_local_monthly_evaluation_dry_run(...)`` and prints a sanitized summary to
-stdout. It does not fetch or download data, read CSVs directly, write report
-files, create artifacts, or produce investment conclusions.
+stdout. Optional export writes sanitized evidence bundles outside the repository
+through ``export_local_dry_run_evidence(...)``. It does not fetch or download
+data, read CSVs directly, or produce investment conclusions.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from backtest_engine.local_evaluation import (
     LocalMonthlyEvaluationDryRunResult,
     run_local_monthly_evaluation_dry_run,
 )
+from backtest_engine.local_evidence_export import export_local_dry_run_evidence
 
 _FORBIDDEN_CLI_ARGS = frozenset(
     {
@@ -98,6 +100,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--show-markdown-preview",
         action="store_true",
         help="Print the first 20 lines of the in-memory markdown report.",
+    )
+    parser.add_argument(
+        "--export-output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Repo-external directory for sanitized evidence export "
+            "(opt-in; default writes no files)."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite-export",
+        action="store_true",
+        help="Replace existing evidence export files in the output root.",
     )
     return parser
 
@@ -207,6 +223,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         end="",
     )
+
+    if args.export_output_root is not None:
+        try:
+            export_result = export_local_dry_run_evidence(
+                repo_root=repo_root,
+                result=result,
+                output_root=args.export_output_root,
+                overwrite=args.overwrite_export,
+            )
+        except Exception as exc:  # noqa: BLE001 - operator CLI must surface failure safely
+            print(f"evidence export failed: {exc}", file=sys.stderr)
+            return 1
+
+        print("evidence_exported: true")
+        print(f"summary_markdown_path: {export_result.summary_markdown_path}")
+        print(f"metrics_json_path: {export_result.metrics_json_path}")
+        print(f"manifest_json_path: {export_result.manifest_json_path}")
+
     return 0
 
 

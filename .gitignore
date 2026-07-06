@@ -39,4 +39,9 @@ memory/
 
 # Local tool state (Claude Code session locks, scheduled-task state, etc.)
 /.claude/get_data.py
+/get_data.py
 *_monthly.csv
+autostock-data/
+backtest_outputs/
+*.backtest.json
+*.backtest.md
