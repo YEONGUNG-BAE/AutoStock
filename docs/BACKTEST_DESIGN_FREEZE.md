@@ -806,3 +806,30 @@ Rules:
 - does not produce a NAV series
 - does not compute benchmark-relative metrics
 - does not fetch or use real data
+
+### Phase 2c-7 Explicit-Schedule Walk-Forward NAV Contract
+
+Phase 2c-7 repeats the frozen Phase 2c-6 one-period step over an explicit
+schedule, carries portfolio state forward, and produces AutoStock-only NAV
+points.
+
+Rules:
+
+- input is read-only source records, explicit ``BacktestPeriodSpec`` values,
+  one ``initial_portfolio_state``, rolling asset configs, one
+  ``BacktestCostModel``, and cash settings
+- output is one immutable ``BacktestWalkForwardResult``
+- the public API is ``run_explicit_schedule_rules_walk_forward_nav``
+- the walk-forward policy string is
+  ``explicit_schedule_rules_walk_forward_nav.v1``
+- repeats ``run_single_period_rules_rebalance_step`` once per supplied period
+- carries ``next_portfolio_state`` forward as the next period input state
+- produces one post-trade ``BacktestNavPoint`` per period with
+  ``portfolio_value_krw = post_trade_portfolio_value_krw``
+- uses explicit per-period ``usdkrw_rate`` from each period spec
+- the schedule is supplied by the caller; it is not generated from calendars
+- does not load real data
+- does not compute benchmark-relative metrics
+- does not compare with S&P
+- does not render reports
+- benchmark-relative scoring is deferred to a later phase
