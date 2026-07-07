@@ -1305,3 +1305,26 @@ Rules:
   conclusions
 - evidence export remains blocked until dataset and NAV sanity pass
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-13 Frequency-Aware Benchmark Metric Policy Patch
+
+Phase 2e-12 produced the first repaired-data sanitized local evidence export.
+Metrics still required an explicit frequency policy before interpretation.
+
+Rules:
+
+- generic paper-review benchmark metrics keep default
+  ``periods_per_year=252`` for daily/paper-review callers
+- local monthly dry-run passes ``periods_per_year=12`` through the benchmark
+  adapter into ``compute_benchmark_relative_metrics``
+- ``information_ratio_annualized`` annualizes with
+  ``sqrt(periods_per_year)`` and is therefore frequency-aware
+- ``BENCHMARK_ADAPTER_POLICY_V2`` applies when a non-default
+  ``periods_per_year`` is used; default adapter behavior remains v1
+- ``LOCAL_BENCHMARK_METRIC_FREQUENCY_POLICY_V1`` documents the local monthly
+  ``periods_per_year=12`` policy
+- ``tracking_error_daily_percent`` remains a legacy field name; local monthly
+  dry-run warnings clarify that the value is per aligned observation
+- benchmark return, excess return, relative drawdown, capture, and beta math are
+  unchanged
+- no evidence interpretation or S&P-relative project conclusion exists yet

@@ -19,6 +19,29 @@ from paper_review.models import (
     SampleSufficiency,
 )
 
+DEFAULT_BENCHMARK_PERIODS_PER_YEAR = Decimal("252")
+
+
+def resolve_periods_per_year(
+    periods_per_year: Decimal | int | str = DEFAULT_BENCHMARK_PERIODS_PER_YEAR,
+) -> Decimal:
+    """Validate and coerce benchmark metric annualization frequency."""
+    if isinstance(periods_per_year, bool):
+        raise ValueError("periods_per_year must not be a bool.")
+    if isinstance(periods_per_year, float):
+        raise ValueError("periods_per_year must not be a float.")
+    try:
+        resolved = Decimal(str(periods_per_year))
+    except Exception as exc:
+        raise ValueError(
+            "periods_per_year must be a finite positive Decimal, int, or str."
+        ) from exc
+    if not resolved.is_finite():
+        raise ValueError("periods_per_year must be finite.")
+    if resolved <= Decimal("0"):
+        raise ValueError("periods_per_year must be positive.")
+    return resolved
+
 
 def sort_nav_snapshots(nav_snapshots: Sequence[NavSnapshot]) -> tuple[NavSnapshot, ...]:
     """as_of 기준 deterministic sort."""
@@ -137,8 +160,11 @@ def _compound_return(returns: Sequence[Decimal]) -> Decimal:
 def compute_benchmark_relative_metrics(
     nav_snapshots: Sequence[NavSnapshot],
     benchmark_points: Sequence[BenchmarkReturnPoint],
+    *,
+    periods_per_year: Decimal | int | str = DEFAULT_BENCHMARK_PERIODS_PER_YEAR,
 ) -> BenchmarkRelativeMetrics:
     """NAV와 외부 benchmark total-return 관측치를 날짜 기준으로 맞춰 성과를 계산한다."""
+    resolved_periods_per_year = resolve_periods_per_year(periods_per_year)
     warnings: list[str] = []
     benchmark_observation_count = len(benchmark_points)
     nav_by_date = _latest_nav_by_calendar_date(nav_snapshots)
@@ -227,7 +253,10 @@ def compute_benchmark_relative_metrics(
                 len(excess_period_returns)
             )
             information_ratio = Decimal(
-                str((float(mean_excess) / float(excess_stddev)) * math.sqrt(252))
+                str(
+                    (float(mean_excess) / float(excess_stddev))
+                    * math.sqrt(float(resolved_periods_per_year))
+                )
             )
 
     benchmark_up_indexes = [

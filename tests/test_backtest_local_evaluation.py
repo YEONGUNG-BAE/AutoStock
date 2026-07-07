@@ -21,6 +21,7 @@ from backtest_engine.local_dataset import (  # noqa: E402
 )
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1,
+    LOCAL_BENCHMARK_METRIC_FREQUENCY_POLICY_V1,
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
     LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW,
     LOCAL_NAV_ACCOUNTING_REL_TOLERANCE,
@@ -3006,6 +3007,49 @@ def test_valuation_component_diagnostic_dump_excludes_raw_prices_and_quantities(
     for raw_quantity in raw_quantities:
         if raw_quantity not in {"0", "0.0"}:
             assert raw_quantity not in serialized
+
+
+def test_local_benchmark_metric_frequency_policy_v1_exists() -> None:
+    assert (
+        LOCAL_BENCHMARK_METRIC_FREQUENCY_POLICY_V1
+        == "local_monthly_benchmark_metrics_periods_per_year_12.v1"
+    )
+
+
+def test_local_dry_run_calls_adapter_with_periods_per_year_12(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_evaluation.compute_walk_forward_benchmark_relative_metrics",
+        wraps=__import__(
+            "backtest_engine.benchmark_adapter",
+            fromlist=["compute_walk_forward_benchmark_relative_metrics"],
+        ).compute_walk_forward_benchmark_relative_metrics,
+    ) as mocked:
+        run_local_monthly_evaluation_dry_run(
+            repo_root=repo_root,
+            data_root=data_root,
+        )
+    assert mocked.call_args.kwargs["periods_per_year"] == Decimal("12")
+
+
+def test_warnings_include_monthly_benchmark_metric_frequency_notice(tmp_path: Path) -> None:
+    result = _run_dry_run(tmp_path)
+    assert any(
+        "local monthly benchmark metrics use periods_per_year=12 for annualized "
+        "information ratio"
+        in warning
+        for warning in result.warnings
+    )
+
+
+def test_warnings_include_tracking_error_legacy_field_notice(tmp_path: Path) -> None:
+    result = _run_dry_run(tmp_path)
+    assert any(
+        "tracking_error_daily_percent is a legacy field name; local monthly value "
+        "is per aligned observation"
+        in warning
+        for warning in result.warnings
+    )
 
 
 def test_focused_regression_suite_passes() -> None:

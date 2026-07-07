@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from backtest_engine.benchmark_adapter import (  # noqa: E402
     BENCHMARK_ADAPTER_POLICY_V1,
+    BENCHMARK_ADAPTER_POLICY_V2,
     BacktestBenchmarkRelativeResult,
     compute_walk_forward_benchmark_relative_metrics,
 )
@@ -682,3 +683,99 @@ def test_adapter_source_does_not_define_benchmark_relative_math() -> None:
     assert "information_ratio" not in source
     assert "tracking_error" not in source
     assert "beta_to_benchmark" not in source
+
+
+def test_benchmark_adapter_policy_v2_exists() -> None:
+    assert (
+        BENCHMARK_ADAPTER_POLICY_V2
+        == "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
+    )
+
+
+def test_adapter_default_behavior_returns_v1_and_preserves_outputs() -> None:
+    walk_forward = _run_walk_forward()
+    benchmarks = _benchmarks_for_nav_points(walk_forward.nav_points, ("100", "105"))
+
+    result = compute_walk_forward_benchmark_relative_metrics(
+        walk_forward_result=walk_forward,
+        benchmark_points=benchmarks,
+    )
+
+    assert result.benchmark_adapter_policy == BENCHMARK_ADAPTER_POLICY_V1
+    assert result.metrics.aligned_observation_count == len(walk_forward.nav_points)
+
+
+def test_adapter_with_periods_per_year_12_returns_v2() -> None:
+    walk_forward = _run_walk_forward()
+    benchmarks = _benchmarks_for_nav_points(walk_forward.nav_points, ("100", "105"))
+
+    result = compute_walk_forward_benchmark_relative_metrics(
+        walk_forward_result=walk_forward,
+        benchmark_points=benchmarks,
+        periods_per_year=12,
+    )
+
+    assert result.benchmark_adapter_policy == BENCHMARK_ADAPTER_POLICY_V2
+
+
+def test_adapter_passes_periods_per_year_12_to_compute_benchmark_relative_metrics() -> None:
+    walk_forward = _run_walk_forward()
+    benchmarks = _benchmarks_for_nav_points(walk_forward.nav_points, ("100", "105"))
+
+    with patch(
+        "backtest_engine.benchmark_adapter.compute_benchmark_relative_metrics",
+        wraps=compute_benchmark_relative_metrics,
+    ) as mocked:
+        compute_walk_forward_benchmark_relative_metrics(
+            walk_forward_result=walk_forward,
+            benchmark_points=benchmarks,
+            periods_per_year=12,
+        )
+
+    assert mocked.call_args.kwargs["periods_per_year"] == Decimal("12")
+
+
+def test_adapter_date_alignment_unchanged_with_periods_per_year_12() -> None:
+    walk_forward = _run_walk_forward()
+    benchmarks = (
+        _benchmark_at(walk_forward.nav_points[0].as_of, "100"),
+        _benchmark_at(
+            walk_forward.nav_points[0].as_of + timedelta(days=15),
+            "105",
+        ),
+        _benchmark_at(walk_forward.nav_points[1].as_of, "110"),
+    )
+
+    default_result = compute_walk_forward_benchmark_relative_metrics(
+        walk_forward_result=walk_forward,
+        benchmark_points=benchmarks,
+    )
+    monthly_result = compute_walk_forward_benchmark_relative_metrics(
+        walk_forward_result=walk_forward,
+        benchmark_points=benchmarks,
+        periods_per_year=12,
+    )
+
+    assert monthly_result.common_dates == default_result.common_dates
+    assert (
+        monthly_result.metrics.aligned_observation_count
+        == default_result.metrics.aligned_observation_count
+    )
+
+
+def test_adapter_duplicate_date_behavior_unchanged_with_periods_per_year_12() -> None:
+    walk_forward = _invalid_walk_forward_shell(
+        (
+            _nav_point(0, "100", hour=9),
+            _nav_point(0, "110", hour=15),
+            _nav_point(1, "120"),
+        )
+    )
+    benchmarks = (_benchmark(0, "100"), _benchmark(1, "105"))
+
+    with pytest.raises(ValueError, match="duplicate strategy NAV calendar date"):
+        compute_walk_forward_benchmark_relative_metrics(
+            walk_forward_result=walk_forward,
+            benchmark_points=benchmarks,
+            periods_per_year=12,
+        )

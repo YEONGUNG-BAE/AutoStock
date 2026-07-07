@@ -10,16 +10,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import date
+from decimal import Decimal
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from backtest_engine.walk_forward import BacktestNavPoint, BacktestWalkForwardResult
 from domain.portfolio import NavSnapshot
-from paper_review.metrics import compute_benchmark_relative_metrics
+from paper_review.metrics import (
+    DEFAULT_BENCHMARK_PERIODS_PER_YEAR,
+    compute_benchmark_relative_metrics,
+    resolve_periods_per_year,
+)
 from paper_review.models import BenchmarkRelativeMetrics, BenchmarkReturnPoint
 
 BENCHMARK_ADAPTER_POLICY_V1 = "walk_forward_nav_to_benchmark_relative_metrics.v1"
+BENCHMARK_ADAPTER_POLICY_V2 = (
+    "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
+)
 
 
 class BacktestBenchmarkRelativeResult(BaseModel):
@@ -27,7 +35,10 @@ class BacktestBenchmarkRelativeResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    benchmark_adapter_policy: Literal["walk_forward_nav_to_benchmark_relative_metrics.v1"]
+    benchmark_adapter_policy: Literal[
+        "walk_forward_nav_to_benchmark_relative_metrics.v1",
+        "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2",
+    ]
     walk_forward_result: BacktestWalkForwardResult
     benchmark_points: tuple[BenchmarkReturnPoint, ...]
     common_dates: tuple[date, ...]
@@ -100,8 +111,10 @@ def compute_walk_forward_benchmark_relative_metrics(
     *,
     walk_forward_result: BacktestWalkForwardResult,
     benchmark_points: Iterable[BenchmarkReturnPoint],
+    periods_per_year: Decimal | int | str = DEFAULT_BENCHMARK_PERIODS_PER_YEAR,
 ) -> BacktestBenchmarkRelativeResult:
     """Walk-forward NAV와 explicit benchmark points를 Phase 1 metric 함수로 연결한다."""
+    resolved_periods_per_year = resolve_periods_per_year(periods_per_year)
     materialized_benchmark_points = tuple(benchmark_points)
     if not materialized_benchmark_points:
         raise ValueError("benchmark_points must not be empty.")
@@ -132,6 +145,7 @@ def compute_walk_forward_benchmark_relative_metrics(
     metrics = compute_benchmark_relative_metrics(
         nav_snapshots,
         materialized_benchmark_points,
+        periods_per_year=resolved_periods_per_year,
     )
 
     if len(common_dates) != metrics.aligned_observation_count:
@@ -139,8 +153,14 @@ def compute_walk_forward_benchmark_relative_metrics(
             "common_dates length must equal metrics.aligned_observation_count."
         )
 
+    adapter_policy = (
+        BENCHMARK_ADAPTER_POLICY_V1
+        if resolved_periods_per_year == DEFAULT_BENCHMARK_PERIODS_PER_YEAR
+        else BENCHMARK_ADAPTER_POLICY_V2
+    )
+
     return BacktestBenchmarkRelativeResult(
-        benchmark_adapter_policy=BENCHMARK_ADAPTER_POLICY_V1,
+        benchmark_adapter_policy=adapter_policy,
         walk_forward_result=walk_forward_result,
         benchmark_points=materialized_benchmark_points,
         common_dates=common_dates,

@@ -13,7 +13,11 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from domain.portfolio import NavSnapshot
-from paper_review.metrics import compute_benchmark_relative_metrics
+from paper_review.metrics import (
+    DEFAULT_BENCHMARK_PERIODS_PER_YEAR,
+    compute_benchmark_relative_metrics,
+    resolve_periods_per_year,
+)
 from paper_review.models import BenchmarkReturnPoint
 
 
@@ -232,3 +236,167 @@ def test_benchmark_relative_metrics_function_has_no_data_fetch_imports() -> None
 
     for forbidden in ("yfinance", "fred", "requests", "urlopen", "socket"):
         assert forbidden not in source
+
+
+def test_default_periods_per_year_is_252() -> None:
+    assert DEFAULT_BENCHMARK_PERIODS_PER_YEAR == Decimal("252")
+    assert resolve_periods_per_year() == Decimal("252")
+
+    navs = (
+        _nav(0, "100"),
+        _nav(1, "110"),
+        _nav(2, "104.5"),
+        _nav(3, "117.04"),
+    )
+    benchmarks = (
+        _benchmark(0, "100"),
+        _benchmark(1, "104"),
+        _benchmark(2, "101.92"),
+        _benchmark(3, "110.0736"),
+    )
+
+    default_metrics = compute_benchmark_relative_metrics(navs, benchmarks)
+    explicit_metrics = compute_benchmark_relative_metrics(
+        navs,
+        benchmarks,
+        periods_per_year=Decimal("252"),
+    )
+
+    assert (
+        default_metrics.information_ratio_annualized
+        == explicit_metrics.information_ratio_annualized
+    )
+
+
+def test_periods_per_year_12_scales_information_ratio_by_sqrt_12() -> None:
+    navs = (
+        _nav(0, "100"),
+        _nav(1, "110"),
+        _nav(2, "104.5"),
+        _nav(3, "117.04"),
+    )
+    benchmarks = (
+        _benchmark(0, "100"),
+        _benchmark(1, "104"),
+        _benchmark(2, "101.92"),
+        _benchmark(3, "110.0736"),
+    )
+
+    daily_metrics = compute_benchmark_relative_metrics(navs, benchmarks)
+    monthly_metrics = compute_benchmark_relative_metrics(
+        navs,
+        benchmarks,
+        periods_per_year=12,
+    )
+
+    assert daily_metrics.information_ratio_annualized is not None
+    assert monthly_metrics.information_ratio_annualized is not None
+    expected_monthly = daily_metrics.information_ratio_annualized * Decimal(
+        str(math.sqrt(12 / 252))
+    )
+    _assert_decimal_close(
+        monthly_metrics.information_ratio_annualized,
+        expected_monthly,
+        tolerance=Decimal("1E-10"),
+    )
+
+
+def test_periods_per_year_does_not_change_total_or_relative_drawdown_metrics() -> None:
+    navs = (
+        _nav(0, "100"),
+        _nav(1, "110"),
+        _nav(2, "104.5"),
+        _nav(3, "117.04"),
+    )
+    benchmarks = (
+        _benchmark(0, "100"),
+        _benchmark(1, "104"),
+        _benchmark(2, "101.92"),
+        _benchmark(3, "110.0736"),
+    )
+
+    daily_metrics = compute_benchmark_relative_metrics(navs, benchmarks)
+    monthly_metrics = compute_benchmark_relative_metrics(
+        navs,
+        benchmarks,
+        periods_per_year=12,
+    )
+
+    assert (
+        daily_metrics.bot_total_return_percent
+        == monthly_metrics.bot_total_return_percent
+    )
+    assert (
+        daily_metrics.benchmark_total_return_percent
+        == monthly_metrics.benchmark_total_return_percent
+    )
+    assert daily_metrics.excess_return_percent == monthly_metrics.excess_return_percent
+    assert (
+        daily_metrics.relative_drawdown_percent
+        == monthly_metrics.relative_drawdown_percent
+    )
+
+
+def test_periods_per_year_does_not_change_capture_or_beta_metrics() -> None:
+    navs = (
+        _nav(0, "100"),
+        _nav(1, "110"),
+        _nav(2, "104.5"),
+        _nav(3, "117.04"),
+    )
+    benchmarks = (
+        _benchmark(0, "100"),
+        _benchmark(1, "104"),
+        _benchmark(2, "101.92"),
+        _benchmark(3, "110.0736"),
+    )
+
+    daily_metrics = compute_benchmark_relative_metrics(navs, benchmarks)
+    monthly_metrics = compute_benchmark_relative_metrics(
+        navs,
+        benchmarks,
+        periods_per_year=12,
+    )
+
+    assert daily_metrics.up_capture_percent == monthly_metrics.up_capture_percent
+    assert daily_metrics.down_capture_percent == monthly_metrics.down_capture_percent
+    assert daily_metrics.beta_to_benchmark == monthly_metrics.beta_to_benchmark
+    assert (
+        daily_metrics.tracking_error_daily_percent
+        == monthly_metrics.tracking_error_daily_percent
+    )
+
+
+@pytest.mark.parametrize("invalid_value", [True, False])
+def test_rejects_bool_periods_per_year(invalid_value: bool) -> None:
+    with pytest.raises(ValueError, match="periods_per_year must not be a bool"):
+        resolve_periods_per_year(invalid_value)
+
+
+@pytest.mark.parametrize("invalid_value", [0, "0", Decimal("0")])
+def test_rejects_zero_periods_per_year(invalid_value: object) -> None:
+    with pytest.raises(ValueError, match="periods_per_year must be positive"):
+        resolve_periods_per_year(invalid_value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid_value", [-1, "-12", Decimal("-12")])
+def test_rejects_negative_periods_per_year(invalid_value: object) -> None:
+    with pytest.raises(ValueError, match="periods_per_year must be positive"):
+        resolve_periods_per_year(invalid_value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid_value", ["NaN", "Infinity", "-Infinity"])
+def test_rejects_non_finite_periods_per_year(invalid_value: str) -> None:
+    with pytest.raises(ValueError, match="periods_per_year must be finite"):
+        resolve_periods_per_year(invalid_value)
+
+
+def test_rejects_float_periods_per_year() -> None:
+    with pytest.raises(ValueError, match="periods_per_year must not be a float"):
+        resolve_periods_per_year(12.0)  # type: ignore[arg-type]
+
+
+def test_information_ratio_uses_resolved_periods_not_hardcoded_sqrt_252() -> None:
+    source = inspect.getsource(compute_benchmark_relative_metrics)
+    assert "math.sqrt(float(resolved_periods_per_year))" in source
+    assert "math.sqrt(252)" not in source

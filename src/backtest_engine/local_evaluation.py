@@ -50,6 +50,9 @@ LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1 = (
 LOCAL_BENCHMARK_CALENDAR_ALIGNMENT_POLICY_V1 = (
     "local_monthly_benchmark_points_aligned_to_strategy_nav_calendar.v1"
 )
+LOCAL_BENCHMARK_METRIC_FREQUENCY_POLICY_V1 = (
+    "local_monthly_benchmark_metrics_periods_per_year_12.v1"
+)
 LOCAL_NAV_SANITY_POLICY_V1 = "local_monthly_walk_forward_nav_sanity.v1"
 LOCAL_NAV_SANITY_POLICY_V2 = "local_monthly_walk_forward_nav_sanity.v2"
 LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
@@ -89,6 +92,14 @@ _KOSPI_PROXY_WARNING = (
 _BENCHMARK_CALENDAR_ALIGNMENT_WARNING = (
     "local benchmark points are calendar-aligned to strategy NAV timestamps "
     "before metric adaptation"
+)
+_BENCHMARK_METRIC_FREQUENCY_WARNING = (
+    "local monthly benchmark metrics use periods_per_year=12 for annualized "
+    "information ratio"
+)
+_TRACKING_ERROR_LEGACY_FIELD_WARNING = (
+    "tracking_error_daily_percent is a legacy field name; local monthly value "
+    "is per aligned observation"
 )
 
 
@@ -1330,6 +1341,7 @@ def run_local_monthly_evaluation_dry_run(
     benchmark_relative_result = compute_walk_forward_benchmark_relative_metrics(
         walk_forward_result=walk_forward_result,
         benchmark_points=aligned_benchmark_points,
+        periods_per_year=Decimal("12"),
     )
 
     report_bundle = render_backtest_evaluation_report_bundle(
@@ -1367,4 +1379,6 @@ def _collect_warnings(
     combined.append(_RESEARCH_ONLY_WARNING)
     combined.append(_KOSPI_PROXY_WARNING)
     combined.append(_BENCHMARK_CALENDAR_ALIGNMENT_WARNING)
+    combined.append(_BENCHMARK_METRIC_FREQUENCY_WARNING)
+    combined.append(_TRACKING_ERROR_LEGACY_FIELD_WARNING)
     return tuple(combined)
