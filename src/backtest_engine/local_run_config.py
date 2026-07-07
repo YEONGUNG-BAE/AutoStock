@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from backtest_engine.local_dataset import (
     LOCAL_MONTHLY_DATASET_POLICY_V1,
+    LOCAL_MONTHLY_DATASET_POLICY_V2,
     LocalMonthlyDatasetAssemblyResult,
 )
 from backtest_engine.rebalance import COST_MODEL_V1, BacktestCostModel, BacktestPortfolioState
@@ -130,8 +131,13 @@ def build_kospi_primary_monthly_run_config(
     fx_spread_bps: Decimal = Decimal("15"),
 ) -> LocalMonthlyRunConfig:
     """Build a frozen KOSPI-primary monthly run config from an assembled dataset."""
-    if dataset.local_monthly_dataset_policy != LOCAL_MONTHLY_DATASET_POLICY_V1:
-        raise ValueError(f"dataset must use {LOCAL_MONTHLY_DATASET_POLICY_V1} policy.")
+    if dataset.local_monthly_dataset_policy not in (
+        LOCAL_MONTHLY_DATASET_POLICY_V1,
+        LOCAL_MONTHLY_DATASET_POLICY_V2,
+    ):
+        raise ValueError(
+            "dataset must use a supported sibling local monthly CSV dataset policy."
+        )
 
     initial_cash = _to_decimal_no_float(initial_cash_krw, field_name="initial_cash_krw")
     if initial_cash <= ZERO:

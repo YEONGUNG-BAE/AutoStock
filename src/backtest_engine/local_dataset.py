@@ -26,6 +26,16 @@ from domain.source import DateIdSourceRecord, FactType
 from paper_review.models import BenchmarkReturnPoint
 
 LOCAL_MONTHLY_DATASET_POLICY_V1 = "sibling_local_monthly_csv_dataset.v1"
+LOCAL_MONTHLY_DATASET_POLICY_V2 = "sibling_local_monthly_csv_dataset.v2"
+
+LOCAL_USDKRW_MIN_RATE = Decimal("100")
+LOCAL_USDKRW_MAX_RATE = Decimal("10000")
+LOCAL_USDKRW_MAX_MONTHLY_RATIO = Decimal("2.00")
+LOCAL_USDKRW_MIN_MONTHLY_RATIO = Decimal("0.50")
+
+_USDKRW_CONTINUITY_PASSED_WARNING = (
+    "local USDKRW rate continuity passed broad sanity checks"
+)
 
 REQUIRED_MONTHLY_COLUMNS = (
     "date",
@@ -130,7 +140,10 @@ class LocalMonthlyDatasetAssemblyResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    local_monthly_dataset_policy: Literal["sibling_local_monthly_csv_dataset.v1"]
+    local_monthly_dataset_policy: Literal[
+        "sibling_local_monthly_csv_dataset.v1",
+        "sibling_local_monthly_csv_dataset.v2",
+    ]
     repo_root: str
     data_root: str
     instrument_specs: tuple[LocalMonthlyInstrumentSpec, ...]
@@ -271,7 +284,7 @@ def assemble_local_monthly_dataset(
         raise ValueError("common_periods must not be empty.")
 
     return LocalMonthlyDatasetAssemblyResult(
-        local_monthly_dataset_policy=LOCAL_MONTHLY_DATASET_POLICY_V1,
+        local_monthly_dataset_policy=LOCAL_MONTHLY_DATASET_POLICY_V2,
         repo_root=str(resolved_repo_root),
         data_root=str(resolved_data_root),
         instrument_specs=materialized_specs,
@@ -537,7 +550,62 @@ def _build_benchmark_points(
     if not points:
         raise ValueError("benchmark_points must not be empty.")
 
+    fx_warnings = validate_local_usdkrw_rate_continuity(fx_rate_points)
+    warnings.extend(fx_warnings)
+
     return tuple(points), tuple(fx_rate_points), common_periods, tuple(warnings)
+
+
+def validate_local_usdkrw_rate_continuity(
+    fx_points: Iterable[LocalMonthlyFxRatePoint],
+) -> tuple[str, ...]:
+    """Validate local USDKRW level and month-to-month ratio continuity."""
+    materialized = tuple(fx_points)
+
+    if not materialized:
+        raise ValueError("USDKRW fx points must not be empty.")
+
+    for index, point in enumerate(materialized):
+        if index > 0:
+            previous_period = materialized[index - 1].period_key
+            if previous_period == point.period_key:
+                raise ValueError(
+                    f"USDKRW fx points contain duplicate period key at {point.period_key}."
+                )
+            if previous_period >= point.period_key:
+                raise ValueError(
+                    "USDKRW fx points must be strictly increasing by period key at "
+                    f"{point.period_key}."
+                )
+
+        rate = point.usdkrw_rate
+        if not rate.is_finite() or rate <= Decimal("0"):
+            raise ValueError(
+                f"USDKRW rate must be positive and finite at period {point.period_key}."
+            )
+        if rate < LOCAL_USDKRW_MIN_RATE:
+            raise ValueError(
+                f"USDKRW rate is below local sanity minimum at period {point.period_key}."
+            )
+        if rate > LOCAL_USDKRW_MAX_RATE:
+            raise ValueError(
+                f"USDKRW rate is above local sanity maximum at period {point.period_key}."
+            )
+
+    for previous, current in zip(materialized, materialized[1:], strict=False):
+        ratio = current.usdkrw_rate / previous.usdkrw_rate
+        if ratio > LOCAL_USDKRW_MAX_MONTHLY_RATIO:
+            raise ValueError(
+                "USDKRW month-to-month ratio exceeds local sanity maximum between "
+                f"{previous.period_key} and {current.period_key}."
+            )
+        if ratio < LOCAL_USDKRW_MIN_MONTHLY_RATIO:
+            raise ValueError(
+                "USDKRW month-to-month ratio is below local sanity minimum between "
+                f"{previous.period_key} and {current.period_key}."
+            )
+
+    return (_USDKRW_CONTINUITY_PASSED_WARNING,)
 
 
 class _BenchmarkCsvRow:

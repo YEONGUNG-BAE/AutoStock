@@ -16,12 +16,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from backtest_data import BACKTEST_INSTRUMENT_PRICE_SCHEMA  # noqa: E402
 from backtest_engine.local_dataset import (  # noqa: E402
     LOCAL_MONTHLY_DATASET_POLICY_V1,
+    LOCAL_MONTHLY_DATASET_POLICY_V2,
+    LOCAL_USDKRW_MAX_MONTHLY_RATIO,
+    LOCAL_USDKRW_MAX_RATE,
+    LOCAL_USDKRW_MIN_MONTHLY_RATIO,
+    LOCAL_USDKRW_MIN_RATE,
     LocalMonthlyBenchmarkSpec,
     LocalMonthlyDatasetAssemblyResult,
+    LocalMonthlyFxRatePoint,
     LocalMonthlyInstrumentSpec,
     assemble_local_monthly_dataset,
     default_local_monthly_benchmark_spec,
     default_local_monthly_instrument_specs_for_kospi_primary,
+    validate_local_usdkrw_rate_continuity,
 )
 from domain import DateIdSourceRecord, FactType  # noqa: E402
 
@@ -994,6 +1001,272 @@ def test_module_has_no_forbidden_runtime_or_imports() -> None:
 
 def test_policy_constant_matches_result_model() -> None:
     assert LOCAL_MONTHLY_DATASET_POLICY_V1 == "sibling_local_monthly_csv_dataset.v1"
+
+
+def test_local_monthly_dataset_policy_v2_exists() -> None:
+    assert LOCAL_MONTHLY_DATASET_POLICY_V2 == "sibling_local_monthly_csv_dataset.v2"
+
+
+def test_local_monthly_dataset_policy_v1_remains() -> None:
+    assert LOCAL_MONTHLY_DATASET_POLICY_V1 == "sibling_local_monthly_csv_dataset.v1"
+
+
+def test_assemble_returns_v2_policy(tmp_path: Path) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    specs = _write_minimal_dataset(data_root)
+
+    result = assemble_local_monthly_dataset(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=specs,
+        benchmark_spec=default_local_monthly_benchmark_spec(),
+    )
+
+    assert result.local_monthly_dataset_policy == LOCAL_MONTHLY_DATASET_POLICY_V2
+
+
+def test_local_usdkrw_min_rate_constant() -> None:
+    assert LOCAL_USDKRW_MIN_RATE == Decimal("100")
+
+
+def test_local_usdkrw_max_rate_constant() -> None:
+    assert LOCAL_USDKRW_MAX_RATE == Decimal("10000")
+
+
+def test_local_usdkrw_min_monthly_ratio_constant() -> None:
+    assert LOCAL_USDKRW_MIN_MONTHLY_RATIO == Decimal("0.50")
+
+
+def test_local_usdkrw_max_monthly_ratio_constant() -> None:
+    assert LOCAL_USDKRW_MAX_MONTHLY_RATIO == Decimal("2.00")
+
+
+def _fx_point(period_key: str, rate: str) -> LocalMonthlyFxRatePoint:
+    year, month = period_key.split("-")
+    return LocalMonthlyFxRatePoint(
+        period_key=period_key,
+        as_of=datetime(int(year), int(month), 1, tzinfo=UTC),
+        usdkrw_rate=Decimal(rate),
+    )
+
+
+def test_validate_local_usdkrw_rate_continuity_exists() -> None:
+    assert callable(validate_local_usdkrw_rate_continuity)
+
+
+def test_valid_synthetic_usdkrw_sequence_passes_with_warning() -> None:
+    warnings = validate_local_usdkrw_rate_continuity(
+        (
+            _fx_point("2020-01", "1300"),
+            _fx_point("2020-02", "1301"),
+        )
+    )
+
+    assert warnings == (
+        "local USDKRW rate continuity passed broad sanity checks",
+    )
+
+
+def test_validate_rejects_empty_fx_points() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        validate_local_usdkrw_rate_continuity(())
+
+
+def test_validate_rejects_unsorted_period_keys() -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        validate_local_usdkrw_rate_continuity(
+            (
+                _fx_point("2020-02", "1300"),
+                _fx_point("2020-01", "1301"),
+            )
+        )
+
+
+def test_validate_rejects_duplicate_period_keys() -> None:
+    with pytest.raises(ValueError, match="duplicate period key"):
+        validate_local_usdkrw_rate_continuity(
+            (
+                _fx_point("2020-01", "1300"),
+                _fx_point("2020-01", "1301"),
+            )
+        )
+
+
+def test_validate_rejects_usdkrw_below_minimum() -> None:
+    with pytest.raises(ValueError, match="below local sanity minimum at period 2020-01"):
+        validate_local_usdkrw_rate_continuity((_fx_point("2020-01", "99"),))
+
+
+def test_validate_rejects_usdkrw_above_maximum() -> None:
+    with pytest.raises(ValueError, match="above local sanity maximum at period 2020-01"):
+        validate_local_usdkrw_rate_continuity((_fx_point("2020-01", "10001"),))
+
+
+def test_validate_rejects_month_to_month_ratio_above_max() -> None:
+    with pytest.raises(
+        ValueError,
+        match="exceeds local sanity maximum between 2020-01 and 2020-02",
+    ):
+        validate_local_usdkrw_rate_continuity(
+            (
+                _fx_point("2020-01", "1300"),
+                _fx_point("2020-02", "2800"),
+            )
+        )
+
+
+def test_validate_rejects_month_to_month_ratio_below_min() -> None:
+    with pytest.raises(
+        ValueError,
+        match="is below local sanity minimum between 2020-01 and 2020-02",
+    ):
+        validate_local_usdkrw_rate_continuity(
+            (
+                _fx_point("2020-01", "1300"),
+                _fx_point("2020-02", "600"),
+            )
+        )
+
+
+def test_validate_error_messages_exclude_raw_fx_numeric_values() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_usdkrw_rate_continuity((_fx_point("2020-01", "99"),))
+
+    message = str(exc_info.value)
+    assert "99" not in message
+    assert "1300" not in message
+
+
+def test_validate_error_messages_exclude_source_names() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_usdkrw_rate_continuity((_fx_point("2020-01", "99"),))
+
+    message = str(exc_info.value).lower()
+    assert "synthetic" not in message
+    assert "usdkrw" in message or "fx" not in message
+
+
+def test_validate_error_messages_exclude_raw_csv_rows() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_usdkrw_rate_continuity((_fx_point("2020-01", "99"),))
+
+    message = str(exc_info.value)
+    assert "," not in message
+    assert "close_adjusted" not in message
+
+
+def test_validate_does_not_mutate_input() -> None:
+    points = [
+        _fx_point("2020-01", "1300"),
+        _fx_point("2020-02", "1301"),
+    ]
+    original = tuple(points)
+
+    validate_local_usdkrw_rate_continuity(points)
+
+    assert tuple(points) == original
+
+
+def test_dataset_warnings_include_continuity_passed_warning(tmp_path: Path) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    specs = _write_minimal_dataset(data_root)
+
+    result = assemble_local_monthly_dataset(
+        repo_root=repo_root,
+        data_root=data_root,
+        instrument_specs=specs,
+        benchmark_spec=default_local_monthly_benchmark_spec(),
+    )
+
+    assert any(
+        "local USDKRW rate continuity passed broad sanity checks" in warning
+        for warning in result.warnings
+    )
+
+
+def test_real_data_like_10027x_ratio_fixture_fails_before_walk_forward(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _layout(tmp_path)
+    specs = _write_minimal_dataset(data_root, periods=("2020-01", "2020-02"))
+    _write_csv(
+        data_root / "monthly/sp500tr_monthly.csv",
+        (
+            "2020-01-31,2020-02-01T00:00:00+00:00,SP500TR,US,100,synthetic",
+            "2020-02-29,2020-03-01T00:00:00+00:00,SP500TR,US,101,synthetic",
+        ),
+    )
+    _write_csv(
+        data_root / "monthly/usdkrw_monthly.csv",
+        (
+            "2020-01-31,2020-02-01T00:00:00+00:00,USDKRW,FX,100,synthetic",
+            "2020-02-29,2020-03-01T00:00:00+00:00,USDKRW,FX,1002700,synthetic",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="USDKRW"):
+        assemble_local_monthly_dataset(
+            repo_root=repo_root,
+            data_root=data_root,
+            instrument_specs=specs,
+            benchmark_spec=default_local_monthly_benchmark_spec(),
+        )
+
+
+def test_no_auto_normalization_or_rescaling_introduced() -> None:
+    text = MODULE_PATH.read_text(encoding="utf-8")
+    forbidden = (
+        "normalize",
+        "normalise",
+        "rescale",
+        "auto_divide",
+        "auto_multiply",
+    )
+    for token in forbidden:
+        assert token not in text.lower()
+
+
+def test_no_fetch_or_network_libraries_introduced() -> None:
+    text = MODULE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+
+    forbidden_roots = {
+        "yfinance",
+        "fred",
+        "requests",
+        "httpx",
+        "urllib",
+        "socket",
+        "websocket",
+        "websockets",
+        "aiohttp",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported = {alias.name.split(".")[0] for alias in node.names}
+            assert imported.isdisjoint(forbidden_roots)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            assert node.module.split(".")[0] not in forbidden_roots
+
+
+def test_no_investment_conclusion_fields_or_text_added() -> None:
+    fields = set(LocalMonthlyDatasetAssemblyResult.model_fields)
+    forbidden_fields = {
+        "recommendation",
+        "recommendations",
+        "investment_advice",
+        "conclusion",
+        "project_conclusion",
+    }
+    assert fields.isdisjoint(forbidden_fields)
+
+    text = MODULE_PATH.read_text(encoding="utf-8").lower()
+    forbidden_text = (
+        "beats s&p",
+        "beat s&p",
+    )
+    for token in forbidden_text:
+        assert token not in text
 
 
 def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None:

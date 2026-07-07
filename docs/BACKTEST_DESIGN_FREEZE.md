@@ -1282,3 +1282,26 @@ Rules:
 - existing stale output files under sibling ``autostock-data/outputs`` are not
   valid current evidence
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-11 Local USDKRW Continuity Guard Patch
+
+Phase 2e-10 diagnosed the positive NAV spike at ``nav_point_index=121`` as driven
+primarily by USDKRW discontinuity in US/GOLD valuation. Sanitized valuation
+component diagnostics showed extreme ``usdkrw_rate_ratio`` values for US and
+GOLD assets.
+
+Rules:
+
+- local monthly dataset policy is updated to
+  ``sibling_local_monthly_csv_dataset.v2``; v1 remains for historical reference
+- ``LOCAL_USDKRW_MIN_RATE``, ``LOCAL_USDKRW_MAX_RATE``,
+  ``LOCAL_USDKRW_MIN_MONTHLY_RATIO``, and ``LOCAL_USDKRW_MAX_MONTHLY_RATIO``
+  provide broad USDKRW level and month-to-month ratio sanity guards
+- ``validate_local_usdkrw_rate_continuity`` rejects impossible FX data during
+  dataset assembly before walk-forward NAV can be computed
+- no automatic FX normalization or rescaling is performed
+- diagnostics and errors remain sanitized and exclude raw CSV rows, source
+  records, source names, raw FX values, config/secrets, and investment
+  conclusions
+- evidence export remains blocked until dataset and NAV sanity pass
+- no S&P-relative project conclusion exists yet
