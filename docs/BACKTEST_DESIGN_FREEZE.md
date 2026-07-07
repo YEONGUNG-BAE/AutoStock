@@ -1219,3 +1219,44 @@ Rules:
   remain unchanged
 - evidence export remains blocked until all NAV sanity checks pass
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-8 Operator Real CSV Dry-Run After NAV Materiality Patch
+
+Phase 2e-7 added immaterial Decimal drift tolerance for the post-trade NAV
+accounting identity. The operator reran the real CSV local dry-run after that
+patch.
+
+Result:
+
+- the prior step-20 accounting drift blocker was removed
+- the next real-data blocker is ``nav_points[121] period return exceeds
+  max_abs_period_return``
+
+Evidence export remains blocked until NAV sanity passes. Existing stale output
+files under sibling ``autostock-data/outputs`` are not valid current evidence.
+No S&P-relative project conclusion exists yet.
+
+### Phase 2e-9 Sanitized NAV Period Return Diagnostic Patch
+
+Phase 2e-8 confirmed the step-20 accounting drift blocker was removed. The next
+real-data blocker is ``nav_points[121] period return exceeds
+max_abs_period_return``.
+
+This phase adds sanitized diagnostics for excessive period-return failures.
+
+Rules:
+
+- ``LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1`` governs per-nav-point
+  sanitized period-return diagnostics
+- diagnostics include aggregate NAV/cash values, period return, cash weights,
+  counts, asset IDs, markets, and ratios only
+- diagnostics exclude raw CSV rows, source records, source names, raw prices,
+  raw quantities, config/secrets, and investment conclusions
+- ``validate_local_monthly_walk_forward_nav_sanity`` period-return failures emit
+  sanitized ``ValueError`` messages that instruct operators to run the period
+  return diagnostic; raw numeric internals are excluded
+- the period-return sanity threshold is not weakened
+- evidence export remains blocked until NAV sanity passes
+- existing stale output files under sibling ``autostock-data/outputs`` are not
+  valid current evidence
+- no S&P-relative project conclusion exists yet

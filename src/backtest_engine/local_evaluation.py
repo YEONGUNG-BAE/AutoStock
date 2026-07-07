@@ -55,6 +55,9 @@ LOCAL_NAV_SANITY_POLICY_V2 = "local_monthly_walk_forward_nav_sanity.v2"
 LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
     "local_monthly_walk_forward_nav_sanity_diagnostic.v1"
 )
+LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1 = (
+    "local_monthly_walk_forward_nav_period_return_diagnostic.v1"
+)
 
 LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW = Decimal("1E-6")
 LOCAL_NAV_ACCOUNTING_REL_TOLERANCE = Decimal("1E-18")
@@ -112,6 +115,39 @@ class LocalNavSanityStepDiagnostic(BaseModel):
     nonzero_holding_asset_ids: tuple[str, ...]
     traded_asset_ids: tuple[str, ...]
     markets_seen: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+class LocalNavPeriodReturnDiagnostic(BaseModel):
+    """Sanitized NAV period-return diagnostic for local evidence quality."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    local_nav_period_return_diagnostic_policy: Literal[
+        "local_monthly_walk_forward_nav_period_return_diagnostic.v1"
+    ]
+    nav_point_index: int
+    previous_nav_point_index: int
+    previous_step_index: int
+    current_step_index: int
+    previous_as_of: datetime
+    current_as_of: datetime
+    previous_portfolio_value_krw: Decimal
+    current_portfolio_value_krw: Decimal
+    period_return: Decimal
+    abs_period_return: Decimal
+    max_abs_period_return: Decimal
+    previous_cash_krw: Decimal
+    current_cash_krw: Decimal
+    previous_cash_weight: Decimal
+    current_cash_weight: Decimal
+    previous_holding_asset_ids: tuple[str, ...]
+    current_holding_asset_ids: tuple[str, ...]
+    current_traded_asset_ids: tuple[str, ...]
+    current_markets_seen: tuple[str, ...]
+    current_trade_count: int
+    current_holding_count: int
+    current_max_trade_notional_to_pre_nav_ratio: Decimal | None
     warnings: tuple[str, ...]
 
 
@@ -401,7 +437,8 @@ def validate_local_monthly_walk_forward_nav_sanity(
             raise ValueError(f"nav_points[{index}] period return must be finite.")
         if abs(period_return) > max_abs_period_return:
             raise ValueError(
-                f"nav_points[{index}] period return exceeds max_abs_period_return."
+                f"nav_points[{index}] period return exceeds max_abs_period_return; "
+                "run sanitized NAV period return diagnostic for this nav point."
             )
 
     initial_nav = steps[0].rebalance_result.pre_trade_portfolio_value_krw
@@ -531,6 +568,173 @@ def build_local_nav_sanity_step_diagnostic(
         markets_seen=markets_seen,
         warnings=warnings,
     )
+
+
+def build_local_nav_period_return_diagnostic(
+    *,
+    run_config: LocalMonthlyRunConfig,
+    walk_forward_result: BacktestWalkForwardResult,
+    nav_point_index: int,
+    max_abs_period_return: Decimal = Decimal("1.00"),
+) -> LocalNavPeriodReturnDiagnostic:
+    """Build a sanitized NAV period-return diagnostic for one nav point pair."""
+    nav_points = walk_forward_result.nav_points
+    steps = walk_forward_result.steps
+    period_specs = run_config.period_specs
+
+    if nav_point_index < 1:
+        raise ValueError(
+            f"nav_point_index must be >= 1; got {nav_point_index}."
+        )
+    if nav_point_index >= len(nav_points):
+        raise ValueError(
+            f"nav_point_index must be in [1, {len(nav_points)}); got {nav_point_index}."
+        )
+    if len(nav_points) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.nav_points length must equal "
+            "run_config.period_specs length for NAV period return diagnostic."
+        )
+    if len(steps) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.steps length must equal "
+            "run_config.period_specs length for NAV period return diagnostic."
+        )
+    if not max_abs_period_return.is_finite() or max_abs_period_return < _ZERO:
+        raise ValueError(
+            "max_abs_period_return must be a non-negative finite Decimal."
+        )
+
+    previous_nav_point_index = nav_point_index - 1
+    previous_step_index = nav_point_index - 1
+    current_step_index = nav_point_index
+
+    previous_nav_point = nav_points[previous_nav_point_index]
+    current_nav_point = nav_points[nav_point_index]
+    previous_step = steps[previous_step_index]
+    current_step = steps[current_step_index]
+
+    previous_portfolio_value_krw = previous_nav_point.portfolio_value_krw
+    current_portfolio_value_krw = current_nav_point.portfolio_value_krw
+    period_return = (current_portfolio_value_krw / previous_portfolio_value_krw) - _ONE
+    abs_period_return = abs(period_return)
+
+    previous_cash_krw = previous_nav_point.cash_krw
+    current_cash_krw = current_nav_point.cash_krw
+    previous_cash_weight = previous_cash_krw / previous_portfolio_value_krw
+    current_cash_weight = current_cash_krw / current_portfolio_value_krw
+
+    previous_holding_asset_ids = tuple(
+        sorted(
+            holding.asset_id
+            for holding in previous_step.rebalance_result.post_trade_holdings
+            if holding.quantity > _ZERO
+        )
+    )
+    current_holding_asset_ids = tuple(
+        sorted(
+            holding.asset_id
+            for holding in current_step.rebalance_result.post_trade_holdings
+            if holding.quantity > _ZERO
+        )
+    )
+    current_traded_asset_ids = tuple(
+        sorted({trade.asset_id for trade in current_step.rebalance_result.trades})
+    )
+    current_markets_seen = tuple(
+        sorted(
+            {
+                price_record.market
+                for price_record in current_step.execution_prices.prices
+            }
+            | {trade.market for trade in current_step.rebalance_result.trades}
+        )
+    )
+
+    current_rebalance = current_step.rebalance_result
+    current_trade_count = len(current_rebalance.trades)
+    current_holding_count = len(current_rebalance.post_trade_holdings)
+
+    pre_trade_nav_krw = current_rebalance.pre_trade_portfolio_value_krw
+    if current_rebalance.trades and pre_trade_nav_krw > _ZERO:
+        current_max_trade_notional_to_pre_nav_ratio = max(
+            trade.gross_notional_krw / pre_trade_nav_krw
+            for trade in current_rebalance.trades
+        )
+    else:
+        current_max_trade_notional_to_pre_nav_ratio = None
+
+    warnings = _collect_nav_period_return_diagnostic_warnings(
+        period_return=period_return,
+        abs_period_return=abs_period_return,
+        max_abs_period_return=max_abs_period_return,
+        previous_cash_weight=previous_cash_weight,
+        current_cash_weight=current_cash_weight,
+        current_max_trade_notional_to_pre_nav_ratio=(
+            current_max_trade_notional_to_pre_nav_ratio
+        ),
+        current_trade_count=current_trade_count,
+    )
+
+    return LocalNavPeriodReturnDiagnostic(
+        local_nav_period_return_diagnostic_policy=(
+            LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1
+        ),
+        nav_point_index=nav_point_index,
+        previous_nav_point_index=previous_nav_point_index,
+        previous_step_index=previous_step_index,
+        current_step_index=current_step_index,
+        previous_as_of=previous_nav_point.as_of,
+        current_as_of=current_nav_point.as_of,
+        previous_portfolio_value_krw=previous_portfolio_value_krw,
+        current_portfolio_value_krw=current_portfolio_value_krw,
+        period_return=period_return,
+        abs_period_return=abs_period_return,
+        max_abs_period_return=max_abs_period_return,
+        previous_cash_krw=previous_cash_krw,
+        current_cash_krw=current_cash_krw,
+        previous_cash_weight=previous_cash_weight,
+        current_cash_weight=current_cash_weight,
+        previous_holding_asset_ids=previous_holding_asset_ids,
+        current_holding_asset_ids=current_holding_asset_ids,
+        current_traded_asset_ids=current_traded_asset_ids,
+        current_markets_seen=current_markets_seen,
+        current_trade_count=current_trade_count,
+        current_holding_count=current_holding_count,
+        current_max_trade_notional_to_pre_nav_ratio=(
+            current_max_trade_notional_to_pre_nav_ratio
+        ),
+        warnings=warnings,
+    )
+
+
+def _collect_nav_period_return_diagnostic_warnings(
+    *,
+    period_return: Decimal,
+    abs_period_return: Decimal,
+    max_abs_period_return: Decimal,
+    previous_cash_weight: Decimal,
+    current_cash_weight: Decimal,
+    current_max_trade_notional_to_pre_nav_ratio: Decimal | None,
+    current_trade_count: int,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if abs_period_return > max_abs_period_return:
+        warnings.append("period_return_exceeds_max_abs_period_return")
+    if period_return > max_abs_period_return:
+        warnings.append("positive_nav_spike")
+    if period_return < -max_abs_period_return:
+        warnings.append("negative_nav_crash")
+    if abs(current_cash_weight - previous_cash_weight) > Decimal("0.50"):
+        warnings.append("cash_weight_changed_materially")
+    if (
+        current_max_trade_notional_to_pre_nav_ratio is not None
+        and current_max_trade_notional_to_pre_nav_ratio > Decimal("1.00")
+    ):
+        warnings.append("large_trade_notional_to_pre_nav_ratio")
+    if current_trade_count == 0:
+        warnings.append("no_current_trades")
+    return tuple(warnings)
 
 
 def _compute_post_trade_holdings_value_krw_for_sanity(

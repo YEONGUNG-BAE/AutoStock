@@ -24,12 +24,15 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
     LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW,
     LOCAL_NAV_ACCOUNTING_REL_TOLERANCE,
+    LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1,
     LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V2,
     LocalMonthlyEvaluationDryRunResult,
+    LocalNavPeriodReturnDiagnostic,
     LocalNavSanityStepDiagnostic,
     align_local_monthly_benchmark_points_to_nav_calendar,
+    build_local_nav_period_return_diagnostic,
     build_local_nav_sanity_step_diagnostic,
     run_local_monthly_evaluation_dry_run,
     validate_local_monthly_walk_forward_nav_sanity,
@@ -1361,6 +1364,450 @@ def test_nav_sanity_rejects_period_return_above_max_abs_period_return(
             run_config=run_config,
             walk_forward_result=corrupted,
         )
+
+
+def test_nav_sanity_period_return_error_includes_diagnostic_instruction(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw * Decimal("3"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav)}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+    message = str(exc_info.value)
+    assert "run sanitized NAV period return diagnostic for this nav point" in message
+
+
+def test_nav_sanity_period_return_error_excludes_raw_nav_numeric_internals(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw * Decimal("3"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav)}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        validate_local_monthly_walk_forward_nav_sanity(
+            run_config=run_config,
+            walk_forward_result=corrupted,
+        )
+    message = str(exc_info.value)
+    forbidden_values = (
+        str(first_nav.portfolio_value_krw),
+        str(second_nav.portfolio_value_krw),
+        str(first_nav.cash_krw),
+        str(second_nav.cash_krw),
+    )
+    for value in forbidden_values:
+        assert value not in message
+
+
+def test_local_nav_period_return_diagnostic_policy_constant_exists() -> None:
+    assert LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1 == (
+        "local_monthly_walk_forward_nav_period_return_diagnostic.v1"
+    )
+
+
+def test_local_nav_period_return_diagnostic_model_is_frozen_and_forbids_extra() -> None:
+    assert LocalNavPeriodReturnDiagnostic.model_config.get("frozen") is True
+    assert LocalNavPeriodReturnDiagnostic.model_config.get("extra") == "forbid"
+
+
+def test_build_local_nav_period_return_diagnostic_helper_exists() -> None:
+    assert callable(build_local_nav_period_return_diagnostic)
+
+
+def test_period_return_diagnostic_rejects_nav_point_index_zero(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="nav_point_index must be >= 1"):
+        build_local_nav_period_return_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=0,
+        )
+
+
+def test_period_return_diagnostic_rejects_out_of_range_nav_point_index(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="nav_point_index must be in"):
+        build_local_nav_period_return_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=len(walk_forward_result.nav_points),
+        )
+
+
+def test_period_return_diagnostic_rejects_negative_max_abs_period_return(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="max_abs_period_return must be"):
+        build_local_nav_period_return_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=1,
+            max_abs_period_return=Decimal("-1"),
+        )
+
+
+def test_period_return_diagnostic_rejects_non_finite_max_abs_period_return(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="max_abs_period_return must be"):
+        build_local_nav_period_return_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=1,
+            max_abs_period_return=Decimal("NaN"),
+        )
+
+
+def test_period_return_diagnostic_includes_nav_and_step_indices(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert diagnostic.nav_point_index == 1
+    assert diagnostic.previous_nav_point_index == 0
+    assert diagnostic.previous_step_index == 0
+    assert diagnostic.current_step_index == 1
+
+
+def test_period_return_diagnostic_includes_previous_and_current_timestamps(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert diagnostic.previous_as_of == walk_forward_result.nav_points[0].as_of
+    assert diagnostic.current_as_of == walk_forward_result.nav_points[1].as_of
+
+
+def test_period_return_diagnostic_computes_period_return_from_nav_values(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_nav = walk_forward_result.nav_points[0].portfolio_value_krw
+    current_nav = walk_forward_result.nav_points[1].portfolio_value_krw
+    expected_return = (current_nav / previous_nav) - Decimal("1")
+    assert diagnostic.period_return == expected_return
+    assert diagnostic.abs_period_return == abs(expected_return)
+
+
+def test_period_return_diagnostic_computes_cash_weights_exactly(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_nav = walk_forward_result.nav_points[0]
+    current_nav = walk_forward_result.nav_points[1]
+    assert diagnostic.previous_cash_weight == (
+        previous_nav.cash_krw / previous_nav.portfolio_value_krw
+    )
+    assert diagnostic.current_cash_weight == (
+        current_nav.cash_krw / current_nav.portfolio_value_krw
+    )
+
+
+def test_period_return_diagnostic_includes_asset_ids_and_markets_only(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_step = walk_forward_result.steps[0]
+    current_step = walk_forward_result.steps[1]
+    expected_previous = tuple(
+        sorted(
+            holding.asset_id
+            for holding in previous_step.rebalance_result.post_trade_holdings
+            if holding.quantity > Decimal("0")
+        )
+    )
+    expected_current = tuple(
+        sorted(
+            holding.asset_id
+            for holding in current_step.rebalance_result.post_trade_holdings
+            if holding.quantity > Decimal("0")
+        )
+    )
+    expected_traded = tuple(
+        sorted({trade.asset_id for trade in current_step.rebalance_result.trades})
+    )
+    expected_markets = tuple(
+        sorted(
+            {
+                price_record.market
+                for price_record in current_step.execution_prices.prices
+            }
+            | {trade.market for trade in current_step.rebalance_result.trades}
+        )
+    )
+    assert diagnostic.previous_holding_asset_ids == expected_previous
+    assert diagnostic.current_holding_asset_ids == expected_current
+    assert diagnostic.current_traded_asset_ids == expected_traded
+    assert diagnostic.current_markets_seen == expected_markets
+    dumped = diagnostic.model_dump()
+    assert "execution_price" not in dumped
+    assert "quantity" not in dumped
+    assert "raw_csv_row" not in dumped
+    assert "source_record" not in dumped
+    assert "source_name" not in dumped
+
+
+def test_period_return_diagnostic_includes_current_trade_and_holding_counts(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    current_step = walk_forward_result.steps[1]
+    assert diagnostic.current_trade_count == len(
+        current_step.rebalance_result.trades
+    )
+    assert diagnostic.current_holding_count == len(
+        current_step.rebalance_result.post_trade_holdings
+    )
+
+
+def test_period_return_diagnostic_includes_max_trade_notional_to_pre_nav_ratio(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    rebalance = walk_forward_result.steps[1].rebalance_result
+    if rebalance.trades:
+        expected = max(
+            trade.gross_notional_krw / rebalance.pre_trade_portfolio_value_krw
+            for trade in rebalance.trades
+        )
+        assert diagnostic.current_max_trade_notional_to_pre_nav_ratio == expected
+    else:
+        assert diagnostic.current_max_trade_notional_to_pre_nav_ratio is None
+
+
+def _corrupted_positive_period_return_spike_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw * Decimal("3"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav, *walk_forward_result.nav_points[2:])}
+    )
+    return run_config, corrupted
+
+
+def _corrupted_negative_period_return_crash_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw / Decimal("10"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav, *walk_forward_result.nav_points[2:])}
+    )
+    return run_config, corrupted
+
+
+def test_period_return_diagnostic_warns_period_return_exceeds_max_for_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_positive_period_return_spike_inputs(
+        tmp_path
+    )
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert "period_return_exceeds_max_abs_period_return" in diagnostic.warnings
+
+
+def test_period_return_diagnostic_warns_positive_nav_spike_for_positive_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_positive_period_return_spike_inputs(
+        tmp_path
+    )
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert "positive_nav_spike" in diagnostic.warnings
+
+
+def test_period_return_diagnostic_warns_negative_nav_crash_for_negative_crash(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_negative_period_return_crash_inputs(
+        tmp_path
+    )
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+        max_abs_period_return=Decimal("0.50"),
+    )
+    assert "negative_nav_crash" in diagnostic.warnings
+
+
+def test_period_return_diagnostic_warns_cash_weight_changed_materially(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    previous_nav = walk_forward_result.nav_points[0]
+    current_nav = walk_forward_result.nav_points[1]
+    corrupted_previous = previous_nav.model_copy(
+        update={
+            "cash_krw": previous_nav.portfolio_value_krw * Decimal("0.05"),
+        }
+    )
+    corrupted_current = current_nav.model_copy(
+        update={
+            "cash_krw": current_nav.portfolio_value_krw * Decimal("0.90"),
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={
+            "nav_points": (
+                corrupted_previous,
+                corrupted_current,
+                *walk_forward_result.nav_points[2:],
+            )
+        }
+    )
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    assert "cash_weight_changed_materially" in diagnostic.warnings
+
+
+def test_period_return_diagnostic_warns_large_trade_notional_to_pre_nav_ratio(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    step = walk_forward_result.steps[1]
+    pre_trade = step.rebalance_result.pre_trade_portfolio_value_krw
+    huge_notional = pre_trade * Decimal("1.5")
+    bad_trade = BacktestTrade.model_construct(
+        asset_id="kospi",
+        symbol="KOSPI",
+        market="KR",
+        side="BUY",
+        quantity=Decimal("1"),
+        execution_price=Decimal("1"),
+        usdkrw_rate=None,
+        gross_notional_krw=huge_notional,
+        fee_krw=Decimal("0"),
+        tax_krw=Decimal("0"),
+        fx_spread_krw=Decimal("0"),
+        total_cost_krw=Decimal("0"),
+    )
+    rebalance = step.rebalance_result.model_copy(update={"trades": (bad_trade,)})
+    corrupted_step = step.model_copy(update={"rebalance_result": rebalance})
+    corrupted = walk_forward_result.model_copy(
+        update={
+            "steps": (
+                walk_forward_result.steps[0],
+                corrupted_step,
+                *walk_forward_result.steps[2:],
+            )
+        }
+    )
+    diagnostic = build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    assert "large_trade_notional_to_pre_nav_ratio" in diagnostic.warnings
+
+
+def test_period_return_diagnostic_preserves_input_objects(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    run_config_before = run_config.model_copy(deep=True)
+    walk_forward_before = walk_forward_result.model_copy(deep=True)
+    build_local_nav_period_return_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert run_config == run_config_before
+    assert walk_forward_result == walk_forward_before
+
+
+def test_period_return_diagnostic_model_has_no_forbidden_fields() -> None:
+    fields = set(LocalNavPeriodReturnDiagnostic.model_fields)
+    forbidden = {
+        "raw_csv_row",
+        "source_record",
+        "source_name",
+        "execution_price",
+        "quantity",
+        "config_path",
+        "secret",
+        "recommendation",
+        "investment_advice",
+        "project_conclusion",
+    }
+    assert fields.isdisjoint(forbidden)
 
 
 def test_nav_sanity_rejects_terminal_return_above_max_terminal_return(
