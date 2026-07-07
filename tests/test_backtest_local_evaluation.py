@@ -28,12 +28,16 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V2,
+    LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1,
     LocalMonthlyEvaluationDryRunResult,
     LocalNavPeriodReturnDiagnostic,
     LocalNavSanityStepDiagnostic,
+    LocalNavValuationComponentAssetDiagnostic,
+    LocalNavValuationComponentDiagnostic,
     align_local_monthly_benchmark_points_to_nav_calendar,
     build_local_nav_period_return_diagnostic,
     build_local_nav_sanity_step_diagnostic,
+    build_local_nav_valuation_component_diagnostic,
     run_local_monthly_evaluation_dry_run,
     validate_local_monthly_walk_forward_nav_sanity,
     _compute_post_trade_holdings_value_krw_for_sanity,
@@ -2412,6 +2416,596 @@ def test_nav_sanity_errors_exclude_raw_csv_and_secrets() -> None:
     )
     for token in forbidden:
         assert token not in sanity_text, f"forbidden token in NAV sanity helper: {token}"
+
+
+def test_local_nav_valuation_component_diagnostic_policy_constant_exists() -> None:
+    assert LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1 == (
+        "local_monthly_walk_forward_nav_valuation_component_diagnostic.v1"
+    )
+
+
+def test_local_nav_valuation_component_asset_diagnostic_model_is_frozen_and_forbids_extra() -> (
+    None
+):
+    assert LocalNavValuationComponentAssetDiagnostic.model_config.get("frozen") is True
+    assert LocalNavValuationComponentAssetDiagnostic.model_config.get("extra") == "forbid"
+
+
+def test_local_nav_valuation_component_diagnostic_model_is_frozen_and_forbids_extra() -> (
+    None
+):
+    assert LocalNavValuationComponentDiagnostic.model_config.get("frozen") is True
+    assert LocalNavValuationComponentDiagnostic.model_config.get("extra") == "forbid"
+
+
+def test_build_local_nav_valuation_component_diagnostic_helper_exists() -> None:
+    assert callable(build_local_nav_valuation_component_diagnostic)
+
+
+def test_valuation_component_diagnostic_rejects_nav_point_index_zero(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="nav_point_index must be >= 1"):
+        build_local_nav_valuation_component_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=0,
+        )
+
+
+def test_valuation_component_diagnostic_rejects_out_of_range_nav_point_index(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    with pytest.raises(ValueError, match="nav_point_index must be in"):
+        build_local_nav_valuation_component_diagnostic(
+            run_config=run_config,
+            walk_forward_result=walk_forward_result,
+            nav_point_index=len(walk_forward_result.nav_points),
+        )
+
+
+def test_valuation_component_diagnostic_preserves_input_objects(tmp_path: Path) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    run_config_before = run_config.model_copy(deep=True)
+    walk_forward_before = walk_forward_result.model_copy(deep=True)
+    build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert run_config == run_config_before
+    assert walk_forward_result == walk_forward_before
+
+
+def test_valuation_component_diagnostic_includes_timestamps_and_step_indices(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert diagnostic.nav_point_index == 1
+    assert diagnostic.previous_step_index == 0
+    assert diagnostic.current_step_index == 1
+    assert diagnostic.previous_as_of == walk_forward_result.nav_points[0].as_of
+    assert diagnostic.current_as_of == walk_forward_result.nav_points[1].as_of
+
+
+def test_valuation_component_diagnostic_computes_nav_delta_and_period_return(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_nav = walk_forward_result.nav_points[0].portfolio_value_krw
+    current_nav = walk_forward_result.nav_points[1].portfolio_value_krw
+    assert diagnostic.nav_delta_krw == current_nav - previous_nav
+    assert diagnostic.period_return == (current_nav / previous_nav) - Decimal("1")
+
+
+def test_valuation_component_diagnostic_includes_cash_delta_and_ratio(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_cash = walk_forward_result.nav_points[0].cash_krw
+    current_cash = walk_forward_result.nav_points[1].cash_krw
+    assert diagnostic.previous_cash_krw == previous_cash
+    assert diagnostic.current_cash_krw == current_cash
+    assert diagnostic.cash_delta_krw == current_cash - previous_cash
+    if diagnostic.nav_delta_krw == Decimal("0"):
+        assert diagnostic.cash_delta_to_nav_delta_ratio is None
+    else:
+        assert diagnostic.cash_delta_to_nav_delta_ratio == (
+            diagnostic.cash_delta_krw / diagnostic.nav_delta_krw
+        )
+
+
+def test_valuation_component_diagnostic_includes_one_asset_diagnostic_per_relevant_asset(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_step = walk_forward_result.steps[0]
+    current_step = walk_forward_result.steps[1]
+    expected_asset_ids = {
+        price.asset_id for price in previous_step.execution_prices.prices
+    } | {price.asset_id for price in current_step.execution_prices.prices}
+    expected_asset_ids |= {
+        holding.asset_id
+        for holding in previous_step.rebalance_result.post_trade_holdings
+    }
+    expected_asset_ids |= {
+        holding.asset_id
+        for holding in current_step.rebalance_result.post_trade_holdings
+    }
+    expected_asset_ids |= {
+        trade.asset_id for trade in current_step.rebalance_result.trades
+    }
+    assert diagnostic.asset_count == len(expected_asset_ids)
+    assert {asset.asset_id for asset in diagnostic.asset_diagnostics} == expected_asset_ids
+
+
+def test_valuation_component_diagnostic_per_asset_value_delta_equals_difference(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    for asset_diag in diagnostic.asset_diagnostics:
+        assert asset_diag.value_delta_krw == (
+            asset_diag.current_value_krw - asset_diag.previous_value_krw
+        )
+
+
+def test_valuation_component_diagnostic_component_sum_equals_cash_plus_assets(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    asset_delta_sum = sum(
+        (asset.value_delta_krw for asset in diagnostic.asset_diagnostics),
+        start=Decimal("0"),
+    )
+    assert diagnostic.component_sum_delta_krw == (
+        diagnostic.cash_delta_krw + asset_delta_sum
+    )
+
+
+def test_valuation_component_diagnostic_component_sum_minus_nav_delta_computed(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert diagnostic.component_sum_delta_minus_nav_delta_krw == (
+        diagnostic.component_sum_delta_krw - diagnostic.nav_delta_krw
+    )
+
+
+def test_valuation_component_diagnostic_identifies_largest_positive_component(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    positive_assets = [
+        asset for asset in diagnostic.asset_diagnostics if asset.value_delta_krw > Decimal("0")
+    ]
+    if not positive_assets:
+        assert diagnostic.largest_positive_component_asset_id is None
+        assert diagnostic.largest_positive_component_delta_to_nav_delta_ratio is None
+        return
+    expected = max(positive_assets, key=lambda asset: asset.value_delta_krw)
+    assert diagnostic.largest_positive_component_asset_id == expected.asset_id
+    if diagnostic.nav_delta_krw != Decimal("0"):
+        assert diagnostic.largest_positive_component_delta_to_nav_delta_ratio == (
+            expected.value_delta_krw / diagnostic.nav_delta_krw
+        )
+
+
+def _replace_step_execution_price_multiplier(
+    walk_forward_result: BacktestWalkForwardResult,
+    step_index: int,
+    asset_id: str,
+    *,
+    multiplier: Decimal,
+) -> BacktestWalkForwardResult:
+    step = walk_forward_result.steps[step_index]
+    new_prices = tuple(
+        price.model_copy(
+            update={"execution_price": price.execution_price * multiplier}
+        )
+        if price.asset_id == asset_id
+        else price
+        for price in step.execution_prices.prices
+    )
+    new_execution_prices = step.execution_prices.model_copy(
+        update={"prices": new_prices}
+    )
+    new_step = step.model_copy(update={"execution_prices": new_execution_prices})
+    new_steps = list(walk_forward_result.steps)
+    new_steps[step_index] = new_step
+    return walk_forward_result.model_copy(update={"steps": tuple(new_steps)})
+
+
+def _replace_step_holding_quantity_multiplier(
+    walk_forward_result: BacktestWalkForwardResult,
+    step_index: int,
+    asset_id: str,
+    *,
+    multiplier: Decimal,
+) -> BacktestWalkForwardResult:
+    step = walk_forward_result.steps[step_index]
+    new_holdings = tuple(
+        BacktestHolding(
+            asset_id=holding.asset_id,
+            quantity=holding.quantity * multiplier,
+        )
+        if holding.asset_id == asset_id
+        else holding
+        for holding in step.rebalance_result.post_trade_holdings
+    )
+    rebalance = step.rebalance_result.model_copy(
+        update={"post_trade_holdings": new_holdings}
+    )
+    new_step = step.model_copy(update={"rebalance_result": rebalance})
+    new_steps = list(walk_forward_result.steps)
+    new_steps[step_index] = new_step
+    return walk_forward_result.model_copy(update={"steps": tuple(new_steps)})
+
+
+def _corrupted_valuation_component_nav_mismatch_inputs(
+    tmp_path: Path,
+) -> tuple[LocalMonthlyRunConfig, BacktestWalkForwardResult]:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={
+            "portfolio_value_krw": first_nav.portfolio_value_krw * Decimal("3"),
+            "cash_krw": walk_forward_result.nav_points[1].cash_krw,
+        }
+    )
+    corrupted = walk_forward_result.model_copy(
+        update={"nav_points": (first_nav, second_nav, *walk_forward_result.nav_points[2:])}
+    )
+    return run_config, corrupted
+
+
+def test_valuation_component_diagnostic_execution_price_ratio_without_raw_prices(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_step = walk_forward_result.steps[0]
+    current_step = walk_forward_result.steps[1]
+    for asset_diag in diagnostic.asset_diagnostics:
+        previous_price = next(
+            (
+                price.execution_price
+                for price in previous_step.execution_prices.prices
+                if price.asset_id == asset_diag.asset_id
+            ),
+            None,
+        )
+        current_price = next(
+            (
+                price.execution_price
+                for price in current_step.execution_prices.prices
+                if price.asset_id == asset_diag.asset_id
+            ),
+            None,
+        )
+        if (
+            previous_price is not None
+            and current_price is not None
+            and previous_price != Decimal("0")
+        ):
+            assert asset_diag.execution_price_ratio == current_price / previous_price
+        else:
+            assert asset_diag.execution_price_ratio is None
+    dumped = diagnostic.model_dump()
+    assert "execution_price" not in dumped
+    for asset_dump in dumped["asset_diagnostics"]:
+        assert "execution_price" not in asset_dump
+
+
+def test_valuation_component_diagnostic_usdkrw_ratio_only_for_us_gold(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_rate = run_config.period_specs[0].usdkrw_rate
+    current_rate = run_config.period_specs[1].usdkrw_rate
+    for asset_diag in diagnostic.asset_diagnostics:
+        if asset_diag.market in {"US", "GOLD"}:
+            assert asset_diag.usdkrw_rate_ratio == current_rate / previous_rate
+            assert "fx_market_uses_usdkrw_ratio" in asset_diag.warnings
+        elif asset_diag.market == "KR":
+            assert asset_diag.usdkrw_rate_ratio is None
+            assert "fx_market_uses_usdkrw_ratio" not in asset_diag.warnings
+
+
+def test_valuation_component_diagnostic_quantity_ratio_without_raw_quantities(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    previous_step = walk_forward_result.steps[0]
+    current_step = walk_forward_result.steps[1]
+    for asset_diag in diagnostic.asset_diagnostics:
+        previous_qty = next(
+            (
+                holding.quantity
+                for holding in previous_step.rebalance_result.post_trade_holdings
+                if holding.asset_id == asset_diag.asset_id
+            ),
+            Decimal("0"),
+        )
+        current_qty = next(
+            (
+                holding.quantity
+                for holding in current_step.rebalance_result.post_trade_holdings
+                if holding.asset_id == asset_diag.asset_id
+            ),
+            Decimal("0"),
+        )
+        if previous_qty != Decimal("0"):
+            assert asset_diag.holding_quantity_ratio == current_qty / previous_qty
+        else:
+            assert asset_diag.holding_quantity_ratio is None
+    dumped = diagnostic.model_dump()
+    assert "quantity" not in dumped
+    for asset_dump in dumped["asset_diagnostics"]:
+        assert "quantity" not in asset_dump
+
+
+def test_valuation_component_diagnostic_warns_large_value_ratio_for_constructed_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    target_asset_id = walk_forward_result.steps[1].execution_prices.prices[0].asset_id
+    corrupted = _replace_step_execution_price_multiplier(
+        walk_forward_result,
+        step_index=1,
+        asset_id=target_asset_id,
+        multiplier=Decimal("20"),
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    target = next(
+        asset for asset in diagnostic.asset_diagnostics if asset.asset_id == target_asset_id
+    )
+    assert "large_value_ratio" in target.warnings
+
+
+def test_valuation_component_diagnostic_warns_large_price_ratio_for_constructed_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    target_asset_id = walk_forward_result.steps[1].execution_prices.prices[0].asset_id
+    corrupted = _replace_step_execution_price_multiplier(
+        walk_forward_result,
+        step_index=1,
+        asset_id=target_asset_id,
+        multiplier=Decimal("20"),
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    target = next(
+        asset for asset in diagnostic.asset_diagnostics if asset.asset_id == target_asset_id
+    )
+    assert "large_price_ratio" in target.warnings
+
+
+def test_valuation_component_diagnostic_warns_large_quantity_ratio_for_constructed_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    current_step = walk_forward_result.steps[1]
+    target_asset_id = next(
+        holding.asset_id
+        for holding in current_step.rebalance_result.post_trade_holdings
+        if holding.quantity > Decimal("0")
+    )
+    corrupted = _replace_step_holding_quantity_multiplier(
+        walk_forward_result,
+        step_index=1,
+        asset_id=target_asset_id,
+        multiplier=Decimal("20"),
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    target = next(
+        asset for asset in diagnostic.asset_diagnostics if asset.asset_id == target_asset_id
+    )
+    assert "large_quantity_ratio" in target.warnings
+
+
+def test_valuation_component_diagnostic_warns_traded_current_step_for_traded_asset(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    traded_ids = {
+        trade.asset_id for trade in walk_forward_result.steps[1].rebalance_result.trades
+    }
+    if not traded_ids:
+        pytest.skip("synthetic dry-run produced no trades at nav point 1")
+    for asset_diag in diagnostic.asset_diagnostics:
+        if asset_diag.asset_id in traded_ids:
+            assert "traded_current_step" in asset_diag.warnings
+
+
+def test_valuation_component_diagnostic_warns_positive_nav_spike_for_constructed_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_positive_period_return_spike_inputs(
+        tmp_path
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert "positive_nav_spike" in diagnostic.warnings
+
+
+def test_valuation_component_diagnostic_warns_single_asset_dominates_for_constructed_spike(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    first_nav = walk_forward_result.nav_points[0]
+    target_asset_id = walk_forward_result.steps[1].execution_prices.prices[0].asset_id
+    corrupted = _replace_step_execution_price_multiplier(
+        walk_forward_result,
+        step_index=1,
+        asset_id=target_asset_id,
+        multiplier=Decimal("20"),
+    )
+    previous_components = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    target_before = next(
+        asset
+        for asset in previous_components.asset_diagnostics
+        if asset.asset_id == target_asset_id
+    )
+    inflated_nav = first_nav.portfolio_value_krw + target_before.value_delta_krw * Decimal(
+        "20"
+    )
+    second_nav = walk_forward_result.nav_points[1].model_copy(
+        update={"portfolio_value_krw": inflated_nav}
+    )
+    corrupted = corrupted.model_copy(
+        update={"nav_points": (first_nav, second_nav, *corrupted.nav_points[2:])}
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=corrupted,
+        nav_point_index=1,
+    )
+    assert "single_asset_dominates_nav_delta" in diagnostic.warnings
+
+
+def test_valuation_component_diagnostic_warns_component_sum_mismatch_for_constructed_mismatch(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _corrupted_valuation_component_nav_mismatch_inputs(
+        tmp_path
+    )
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    assert "component_sum_delta_does_not_match_nav_delta" in diagnostic.warnings
+
+
+def test_valuation_component_diagnostic_model_has_no_forbidden_fields() -> None:
+    top_fields = set(LocalNavValuationComponentDiagnostic.model_fields)
+    asset_fields = set(LocalNavValuationComponentAssetDiagnostic.model_fields)
+    forbidden = {
+        "raw_csv_row",
+        "source_record",
+        "source_name",
+        "execution_price",
+        "quantity",
+        "config_path",
+        "secret",
+        "recommendation",
+        "investment_advice",
+        "project_conclusion",
+    }
+    assert top_fields.isdisjoint(forbidden)
+    assert asset_fields.isdisjoint(forbidden)
+
+
+def test_valuation_component_diagnostic_dump_excludes_raw_prices_and_quantities(
+    tmp_path: Path,
+) -> None:
+    run_config, walk_forward_result = _sanity_inputs(tmp_path)
+    diagnostic = build_local_nav_valuation_component_diagnostic(
+        run_config=run_config,
+        walk_forward_result=walk_forward_result,
+        nav_point_index=1,
+    )
+    dumped = diagnostic.model_dump()
+    serialized = str(dumped)
+    previous_step = walk_forward_result.steps[0]
+    current_step = walk_forward_result.steps[1]
+    raw_prices = [
+        str(price.execution_price)
+        for price in previous_step.execution_prices.prices
+    ] + [str(price.execution_price) for price in current_step.execution_prices.prices]
+    raw_quantities = [
+        str(holding.quantity)
+        for holding in previous_step.rebalance_result.post_trade_holdings
+    ] + [
+        str(holding.quantity)
+        for holding in current_step.rebalance_result.post_trade_holdings
+    ]
+    for raw_price in raw_prices:
+        if raw_price not in {"0", "0.0"}:
+            assert raw_price not in serialized
+    for raw_quantity in raw_quantities:
+        if raw_quantity not in {"0", "0.0"}:
+            assert raw_quantity not in serialized
 
 
 def test_focused_regression_suite_passes() -> None:

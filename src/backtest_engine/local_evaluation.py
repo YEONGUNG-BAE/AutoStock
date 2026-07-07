@@ -33,7 +33,7 @@ from backtest_engine.local_run_config import (
     build_kospi_primary_monthly_run_config,
 )
 from backtest_engine.period_step import BacktestSinglePeriodStepResult
-from backtest_engine.rebalance import BacktestRebalanceResult
+from backtest_engine.rebalance import BacktestHolding, BacktestRebalanceResult
 from backtest_engine.report_bundle import (
     BacktestEvaluationReportBundle,
     render_backtest_evaluation_report_bundle,
@@ -57,6 +57,9 @@ LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
 )
 LOCAL_NAV_PERIOD_RETURN_DIAGNOSTIC_POLICY_V1 = (
     "local_monthly_walk_forward_nav_period_return_diagnostic.v1"
+)
+LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1 = (
+    "local_monthly_walk_forward_nav_valuation_component_diagnostic.v1"
 )
 
 LOCAL_NAV_ACCOUNTING_ABS_TOLERANCE_KRW = Decimal("1E-6")
@@ -115,6 +118,58 @@ class LocalNavSanityStepDiagnostic(BaseModel):
     nonzero_holding_asset_ids: tuple[str, ...]
     traded_asset_ids: tuple[str, ...]
     markets_seen: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+class LocalNavValuationComponentAssetDiagnostic(BaseModel):
+    """Sanitized per-asset NAV valuation component diagnostic."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str
+    market: str
+    had_previous_holding: bool
+    has_current_holding: bool
+    was_traded_current_step: bool
+    previous_value_krw: Decimal
+    current_value_krw: Decimal
+    value_delta_krw: Decimal
+    value_ratio: Decimal | None
+    contribution_to_nav_delta_ratio: Decimal | None
+    execution_price_ratio: Decimal | None
+    usdkrw_rate_ratio: Decimal | None
+    holding_quantity_ratio: Decimal | None
+    warnings: tuple[str, ...]
+
+
+class LocalNavValuationComponentDiagnostic(BaseModel):
+    """Sanitized NAV valuation component diagnostic for one nav point pair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    local_nav_valuation_component_diagnostic_policy: Literal[
+        "local_monthly_walk_forward_nav_valuation_component_diagnostic.v1"
+    ]
+    nav_point_index: int
+    previous_step_index: int
+    current_step_index: int
+    previous_as_of: datetime
+    current_as_of: datetime
+    previous_portfolio_value_krw: Decimal
+    current_portfolio_value_krw: Decimal
+    nav_delta_krw: Decimal
+    period_return: Decimal
+    asset_count: int
+    current_trade_count: int
+    previous_cash_krw: Decimal
+    current_cash_krw: Decimal
+    cash_delta_krw: Decimal
+    cash_delta_to_nav_delta_ratio: Decimal | None
+    component_sum_delta_krw: Decimal
+    component_sum_delta_minus_nav_delta_krw: Decimal
+    largest_positive_component_asset_id: str | None
+    largest_positive_component_delta_to_nav_delta_ratio: Decimal | None
+    asset_diagnostics: tuple[LocalNavValuationComponentAssetDiagnostic, ...]
     warnings: tuple[str, ...]
 
 
@@ -706,6 +761,373 @@ def build_local_nav_period_return_diagnostic(
         ),
         warnings=warnings,
     )
+
+
+def build_local_nav_valuation_component_diagnostic(
+    *,
+    run_config: LocalMonthlyRunConfig,
+    walk_forward_result: BacktestWalkForwardResult,
+    nav_point_index: int,
+) -> LocalNavValuationComponentDiagnostic:
+    """Build a sanitized NAV valuation component diagnostic for one nav point pair."""
+    nav_points = walk_forward_result.nav_points
+    steps = walk_forward_result.steps
+    period_specs = run_config.period_specs
+
+    if nav_point_index < 1:
+        raise ValueError(
+            f"nav_point_index must be >= 1; got {nav_point_index}."
+        )
+    if nav_point_index >= len(nav_points):
+        raise ValueError(
+            f"nav_point_index must be in [1, {len(nav_points)}); got {nav_point_index}."
+        )
+    if len(nav_points) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.nav_points length must equal "
+            "run_config.period_specs length for NAV valuation component diagnostic."
+        )
+    if len(steps) != len(period_specs):
+        raise ValueError(
+            "walk_forward_result.steps length must equal "
+            "run_config.period_specs length for NAV valuation component diagnostic."
+        )
+
+    previous_step_index = nav_point_index - 1
+    current_step_index = nav_point_index
+
+    previous_nav_point = nav_points[previous_step_index]
+    current_nav_point = nav_points[current_step_index]
+    previous_step = steps[previous_step_index]
+    current_step = steps[current_step_index]
+    previous_period_spec = period_specs[previous_step_index]
+    current_period_spec = period_specs[current_step_index]
+
+    previous_portfolio_value_krw = previous_nav_point.portfolio_value_krw
+    current_portfolio_value_krw = current_nav_point.portfolio_value_krw
+    nav_delta_krw = current_portfolio_value_krw - previous_portfolio_value_krw
+    period_return = (current_portfolio_value_krw / previous_portfolio_value_krw) - _ONE
+
+    previous_cash_krw = previous_nav_point.cash_krw
+    current_cash_krw = current_nav_point.cash_krw
+    cash_delta_krw = current_cash_krw - previous_cash_krw
+    if nav_delta_krw == _ZERO:
+        cash_delta_to_nav_delta_ratio = None
+    else:
+        cash_delta_to_nav_delta_ratio = cash_delta_krw / nav_delta_krw
+
+    current_traded_asset_ids = {
+        trade.asset_id for trade in current_step.rebalance_result.trades
+    }
+    current_trade_count = len(current_step.rebalance_result.trades)
+
+    asset_ids = _collect_valuation_component_asset_ids(
+        previous_step=previous_step,
+        current_step=current_step,
+        current_traded_asset_ids=current_traded_asset_ids,
+    )
+
+    asset_diagnostics: list[LocalNavValuationComponentAssetDiagnostic] = []
+    for asset_id in sorted(asset_ids):
+        asset_diagnostics.append(
+            _build_valuation_component_asset_diagnostic(
+                asset_id=asset_id,
+                previous_step=previous_step,
+                current_step=current_step,
+                previous_usdkrw_rate=previous_period_spec.usdkrw_rate,
+                current_usdkrw_rate=current_period_spec.usdkrw_rate,
+                nav_delta_krw=nav_delta_krw,
+                current_traded_asset_ids=current_traded_asset_ids,
+            )
+        )
+
+    asset_diagnostics_tuple = tuple(asset_diagnostics)
+    asset_value_delta_sum = sum(
+        (asset.value_delta_krw for asset in asset_diagnostics_tuple),
+        start=_ZERO,
+    )
+    component_sum_delta_krw = cash_delta_krw + asset_value_delta_sum
+    component_sum_delta_minus_nav_delta_krw = (
+        component_sum_delta_krw - nav_delta_krw
+    )
+
+    largest_positive_component_asset_id: str | None = None
+    largest_positive_component_delta: Decimal | None = None
+    for asset_diag in asset_diagnostics_tuple:
+        if asset_diag.value_delta_krw <= _ZERO:
+            continue
+        if (
+            largest_positive_component_delta is None
+            or asset_diag.value_delta_krw > largest_positive_component_delta
+        ):
+            largest_positive_component_delta = asset_diag.value_delta_krw
+            largest_positive_component_asset_id = asset_diag.asset_id
+
+    if (
+        largest_positive_component_asset_id is None
+        or nav_delta_krw == _ZERO
+    ):
+        largest_positive_component_delta_to_nav_delta_ratio = None
+    else:
+        largest_positive_component_delta_to_nav_delta_ratio = (
+            largest_positive_component_delta / nav_delta_krw
+        )
+
+    warnings = _collect_nav_valuation_component_diagnostic_warnings(
+        period_return=period_return,
+        nav_delta_krw=nav_delta_krw,
+        cash_delta_krw=cash_delta_krw,
+        component_sum_delta_krw=component_sum_delta_krw,
+        component_sum_delta_minus_nav_delta_krw=component_sum_delta_minus_nav_delta_krw,
+        current_portfolio_value_krw=current_portfolio_value_krw,
+        asset_diagnostics=asset_diagnostics_tuple,
+    )
+
+    return LocalNavValuationComponentDiagnostic(
+        local_nav_valuation_component_diagnostic_policy=(
+            LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1
+        ),
+        nav_point_index=nav_point_index,
+        previous_step_index=previous_step_index,
+        current_step_index=current_step_index,
+        previous_as_of=previous_nav_point.as_of,
+        current_as_of=current_nav_point.as_of,
+        previous_portfolio_value_krw=previous_portfolio_value_krw,
+        current_portfolio_value_krw=current_portfolio_value_krw,
+        nav_delta_krw=nav_delta_krw,
+        period_return=period_return,
+        asset_count=len(asset_diagnostics_tuple),
+        current_trade_count=current_trade_count,
+        previous_cash_krw=previous_cash_krw,
+        current_cash_krw=current_cash_krw,
+        cash_delta_krw=cash_delta_krw,
+        cash_delta_to_nav_delta_ratio=cash_delta_to_nav_delta_ratio,
+        component_sum_delta_krw=component_sum_delta_krw,
+        component_sum_delta_minus_nav_delta_krw=(
+            component_sum_delta_minus_nav_delta_krw
+        ),
+        largest_positive_component_asset_id=largest_positive_component_asset_id,
+        largest_positive_component_delta_to_nav_delta_ratio=(
+            largest_positive_component_delta_to_nav_delta_ratio
+        ),
+        asset_diagnostics=asset_diagnostics_tuple,
+        warnings=warnings,
+    )
+
+
+def _collect_valuation_component_asset_ids(
+    *,
+    previous_step: BacktestSinglePeriodStepResult,
+    current_step: BacktestSinglePeriodStepResult,
+    current_traded_asset_ids: set[str],
+) -> set[str]:
+    asset_ids: set[str] = set(current_traded_asset_ids)
+    for price_record in previous_step.execution_prices.prices:
+        asset_ids.add(price_record.asset_id)
+    for price_record in current_step.execution_prices.prices:
+        asset_ids.add(price_record.asset_id)
+    for holding in previous_step.rebalance_result.post_trade_holdings:
+        asset_ids.add(holding.asset_id)
+    for holding in current_step.rebalance_result.post_trade_holdings:
+        asset_ids.add(holding.asset_id)
+    return asset_ids
+
+
+def _holding_quantity_for_asset(
+    holdings: tuple[BacktestHolding, ...],
+    asset_id: str,
+) -> Decimal:
+    for holding in holdings:
+        if holding.asset_id == asset_id:
+            return holding.quantity
+    return _ZERO
+
+
+def _execution_price_and_market_for_asset(
+    step: BacktestSinglePeriodStepResult,
+    asset_id: str,
+) -> tuple[Decimal | None, str | None]:
+    for price_record in step.execution_prices.prices:
+        if price_record.asset_id == asset_id:
+            return price_record.execution_price, price_record.market
+    for trade in step.rebalance_result.trades:
+        if trade.asset_id == asset_id:
+            return None, trade.market
+    return None, None
+
+
+def _build_valuation_component_asset_diagnostic(
+    *,
+    asset_id: str,
+    previous_step: BacktestSinglePeriodStepResult,
+    current_step: BacktestSinglePeriodStepResult,
+    previous_usdkrw_rate: Decimal,
+    current_usdkrw_rate: Decimal,
+    nav_delta_krw: Decimal,
+    current_traded_asset_ids: set[str],
+) -> LocalNavValuationComponentAssetDiagnostic:
+    previous_quantity = _holding_quantity_for_asset(
+        previous_step.rebalance_result.post_trade_holdings,
+        asset_id,
+    )
+    current_quantity = _holding_quantity_for_asset(
+        current_step.rebalance_result.post_trade_holdings,
+        asset_id,
+    )
+    previous_execution_price, previous_market = _execution_price_and_market_for_asset(
+        previous_step,
+        asset_id,
+    )
+    current_execution_price, current_market = _execution_price_and_market_for_asset(
+        current_step,
+        asset_id,
+    )
+
+    market = current_market or previous_market
+    if market is None:
+        market = "UNKNOWN"
+
+    if previous_execution_price is not None:
+        previous_value_krw = _holding_value_krw_for_sanity(
+            previous_quantity,
+            previous_execution_price,
+            market=market,
+            usdkrw_rate=previous_usdkrw_rate,
+        )
+    else:
+        previous_value_krw = _ZERO
+
+    if current_execution_price is not None:
+        current_value_krw = _holding_value_krw_for_sanity(
+            current_quantity,
+            current_execution_price,
+            market=market,
+            usdkrw_rate=current_usdkrw_rate,
+        )
+    else:
+        current_value_krw = _ZERO
+
+    value_delta_krw = current_value_krw - previous_value_krw
+
+    if previous_value_krw == _ZERO:
+        value_ratio = None
+    else:
+        value_ratio = current_value_krw / previous_value_krw
+
+    if nav_delta_krw == _ZERO:
+        contribution_to_nav_delta_ratio = None
+    else:
+        contribution_to_nav_delta_ratio = value_delta_krw / nav_delta_krw
+
+    if (
+        previous_execution_price is None
+        or current_execution_price is None
+        or previous_execution_price == _ZERO
+    ):
+        execution_price_ratio = None
+    else:
+        execution_price_ratio = current_execution_price / previous_execution_price
+
+    if market in _FX_MARKETS:
+        if previous_usdkrw_rate == _ZERO:
+            usdkrw_rate_ratio = None
+        else:
+            usdkrw_rate_ratio = current_usdkrw_rate / previous_usdkrw_rate
+    else:
+        usdkrw_rate_ratio = None
+
+    if previous_quantity == _ZERO:
+        holding_quantity_ratio = None
+    else:
+        holding_quantity_ratio = current_quantity / previous_quantity
+
+    was_traded_current_step = asset_id in current_traded_asset_ids
+    asset_warnings = _collect_nav_valuation_component_asset_warnings(
+        market=market,
+        previous_value_krw=previous_value_krw,
+        current_value_krw=current_value_krw,
+        value_ratio=value_ratio,
+        execution_price_ratio=execution_price_ratio,
+        holding_quantity_ratio=holding_quantity_ratio,
+        was_traded_current_step=was_traded_current_step,
+    )
+
+    return LocalNavValuationComponentAssetDiagnostic(
+        asset_id=asset_id,
+        market=market,
+        had_previous_holding=previous_quantity > _ZERO,
+        has_current_holding=current_quantity > _ZERO,
+        was_traded_current_step=was_traded_current_step,
+        previous_value_krw=previous_value_krw,
+        current_value_krw=current_value_krw,
+        value_delta_krw=value_delta_krw,
+        value_ratio=value_ratio,
+        contribution_to_nav_delta_ratio=contribution_to_nav_delta_ratio,
+        execution_price_ratio=execution_price_ratio,
+        usdkrw_rate_ratio=usdkrw_rate_ratio,
+        holding_quantity_ratio=holding_quantity_ratio,
+        warnings=asset_warnings,
+    )
+
+
+def _collect_nav_valuation_component_asset_warnings(
+    *,
+    market: str,
+    previous_value_krw: Decimal,
+    current_value_krw: Decimal,
+    value_ratio: Decimal | None,
+    execution_price_ratio: Decimal | None,
+    holding_quantity_ratio: Decimal | None,
+    was_traded_current_step: bool,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if value_ratio is not None and value_ratio > Decimal("10"):
+        warnings.append("large_value_ratio")
+    if execution_price_ratio is not None and execution_price_ratio > Decimal("10"):
+        warnings.append("large_price_ratio")
+    if holding_quantity_ratio is not None and holding_quantity_ratio > Decimal("10"):
+        warnings.append("large_quantity_ratio")
+    if previous_value_krw == _ZERO and current_value_krw > _ZERO:
+        warnings.append("new_holding")
+    if previous_value_krw > _ZERO and current_value_krw == _ZERO:
+        warnings.append("closed_holding")
+    if was_traded_current_step:
+        warnings.append("traded_current_step")
+    if market in _FX_MARKETS:
+        warnings.append("fx_market_uses_usdkrw_ratio")
+    return tuple(warnings)
+
+
+def _collect_nav_valuation_component_diagnostic_warnings(
+    *,
+    period_return: Decimal,
+    nav_delta_krw: Decimal,
+    cash_delta_krw: Decimal,
+    component_sum_delta_krw: Decimal,
+    component_sum_delta_minus_nav_delta_krw: Decimal,
+    current_portfolio_value_krw: Decimal,
+    asset_diagnostics: tuple[LocalNavValuationComponentAssetDiagnostic, ...],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if period_return > Decimal("1.00"):
+        warnings.append("positive_nav_spike")
+    if _is_material_nav_accounting_delta(
+        accounting_delta_krw=component_sum_delta_minus_nav_delta_krw,
+        post_trade_portfolio_value_krw=current_portfolio_value_krw,
+    ):
+        warnings.append("component_sum_delta_does_not_match_nav_delta")
+    if nav_delta_krw > _ZERO:
+        for asset_diag in asset_diagnostics:
+            if (
+                asset_diag.value_delta_krw > _ZERO
+                and asset_diag.contribution_to_nav_delta_ratio is not None
+                and asset_diag.contribution_to_nav_delta_ratio > Decimal("0.80")
+            ):
+                warnings.append("single_asset_dominates_nav_delta")
+                break
+        if abs(cash_delta_krw) / abs(nav_delta_krw) > Decimal("0.50"):
+            warnings.append("cash_delta_material")
+    return tuple(warnings)
 
 
 def _collect_nav_period_return_diagnostic_warnings(

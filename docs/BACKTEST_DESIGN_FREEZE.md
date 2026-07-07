@@ -1260,3 +1260,25 @@ Rules:
 - existing stale output files under sibling ``autostock-data/outputs`` are not
   valid current evidence
 - no S&P-relative project conclusion exists yet
+
+### Phase 2e-10 Sanitized NAV Valuation Component Diagnostic Patch
+
+Phase 2e-9 diagnosed ``nav_point_index=121`` as a positive NAV spike. Trade
+notional ratio and holdings list did not explain the magnitude.
+
+This phase adds sanitized per-asset valuation component diagnostics.
+
+Rules:
+
+- ``LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1`` governs per-nav-point
+  sanitized valuation component diagnostics
+- diagnostics include aggregate KRW component values, value ratios, contribution
+  ratios, execution price ratios, USDKRW ratios, quantity ratios, asset IDs,
+  markets, counts, and warnings
+- diagnostics exclude raw CSV rows, source records, source names, raw execution
+  prices, raw quantities, config/secrets, and investment conclusions
+- NAV sanity thresholds are not weakened
+- evidence export remains blocked until NAV sanity passes
+- existing stale output files under sibling ``autostock-data/outputs`` are not
+  valid current evidence
+- no S&P-relative project conclusion exists yet
