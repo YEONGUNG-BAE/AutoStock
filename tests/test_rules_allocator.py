@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -16,6 +17,18 @@ from backtest_engine import (  # noqa: E402
     BacktestAssetFeature,
     BacktestFeatureSnapshot,
     allocate_rules_only_v1,
+)
+from backtest_engine.rules_allocator import (  # noqa: E402
+    RULES_ALLOCATOR_V2_DEFENSIVE_TARGET_WEIGHTS,
+    RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_DEFENSIVE,
+    RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_NORMAL,
+    RULES_ALLOCATOR_V2_MIN_US_WEIGHT_NORMAL,
+    RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS,
+    RULES_ALLOCATOR_V2_POLICY,
+    RulesAllocatorV2StateInput,
+    RulesAllocatorV2TargetWeights,
+    allocate_rules_v2_target_weights,
+    resolve_rules_allocator_v2_state,
 )
 
 DECISION_TIME = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)
@@ -214,6 +227,178 @@ def test_output_version_and_decision_time_match_contract() -> None:
     assert target.decision_time == snapshot.decision_time
 
 
+def test_rules_allocator_v1_policy_string_remains_unchanged() -> None:
+    assert RULES_ALLOCATOR_V1 == "rules_allocator.v1"
+
+
+def test_v1_representative_outputs_remain_unchanged() -> None:
+    risk_on_snapshot = _snapshot(
+        _fixture_asset("asset_A"),
+        _fixture_asset("asset_B"),
+        _fixture_asset("asset_C"),
+    )
+    risk_off_snapshot = _snapshot(
+        _fixture_asset("asset_A", risk_on=False),
+        _fixture_asset("asset_B", risk_on=False),
+        _fixture_asset("asset_C"),
+    )
+    assert _weights_by_id(risk_on_snapshot) == {
+        "asset_A": Decimal("0.70"),
+        "asset_B": Decimal("0.15"),
+        "asset_C": Decimal("0.10"),
+        "cash": Decimal("0.05"),
+    }
+    assert _weights_by_id(risk_off_snapshot) == {
+        "asset_A": Decimal("0.35"),
+        "asset_B": Decimal("0.05"),
+        "asset_C": Decimal("0.10"),
+        "cash": Decimal("0.50"),
+    }
+
+
+def test_rules_allocator_v2_policy_matches_contract() -> None:
+    assert RULES_ALLOCATOR_V2_POLICY == (
+        "local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1"
+    )
+
+
+def test_rules_allocator_v2_normal_target_weights_match_contract() -> None:
+    assert RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS == (
+        ("asset_us", Decimal("0.70")),
+        ("asset_kr", Decimal("0.15")),
+        ("asset_gold", Decimal("0.10")),
+        ("cash", Decimal("0.05")),
+    )
+
+
+def test_rules_allocator_v2_defensive_target_weights_match_contract() -> None:
+    assert RULES_ALLOCATOR_V2_DEFENSIVE_TARGET_WEIGHTS == (
+        ("asset_us", Decimal("0.50")),
+        ("asset_kr", Decimal("0.10")),
+        ("asset_gold", Decimal("0.25")),
+        ("cash", Decimal("0.15")),
+    )
+
+
+def test_rules_allocator_v2_constants_are_decimal_not_float() -> None:
+    constants = (
+        *(weight for _, weight in RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS),
+        *(weight for _, weight in RULES_ALLOCATOR_V2_DEFENSIVE_TARGET_WEIGHTS),
+        RULES_ALLOCATOR_V2_MIN_US_WEIGHT_NORMAL,
+        RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_NORMAL,
+        RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_DEFENSIVE,
+    )
+    assert all(isinstance(value, Decimal) for value in constants)
+    assert not any(isinstance(value, float) for value in constants)
+
+
+def test_rules_allocator_v2_weight_sums_and_caps_match_contract() -> None:
+    normal = dict(RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS)
+    defensive = dict(RULES_ALLOCATOR_V2_DEFENSIVE_TARGET_WEIGHTS)
+    assert sum(normal.values(), Decimal("0")) == Decimal("1.00")
+    assert sum(defensive.values(), Decimal("0")) == Decimal("1.00")
+    assert normal["asset_us"] >= RULES_ALLOCATOR_V2_MIN_US_WEIGHT_NORMAL
+    assert (
+        normal["asset_gold"] + normal["cash"]
+        <= RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_NORMAL
+    )
+    assert (
+        defensive["asset_gold"] + defensive["cash"]
+        <= RULES_ALLOCATOR_V2_MAX_CASH_GOLD_WEIGHT_DEFENSIVE
+    )
+
+
+def test_rules_allocator_v2_state_model_is_frozen_and_extra_forbidden() -> None:
+    state = RulesAllocatorV2StateInput()
+    with pytest.raises(ValidationError):
+        RulesAllocatorV2StateInput(extra_field=True)
+    with pytest.raises(ValidationError):
+        state.trend_risk_off = True  # type: ignore[misc]
+
+
+def test_rules_allocator_v2_default_state_resolves_to_normal() -> None:
+    assert resolve_rules_allocator_v2_state(RulesAllocatorV2StateInput()) == "normal"
+
+
+def test_rules_allocator_v2_trend_risk_off_resolves_to_defensive() -> None:
+    state = RulesAllocatorV2StateInput(trend_risk_off=True)
+    assert resolve_rules_allocator_v2_state(state) == "defensive"
+
+
+def test_rules_allocator_v2_relative_drawdown_guard_resolves_to_defensive() -> None:
+    state = RulesAllocatorV2StateInput(relative_drawdown_guard_active=True)
+    assert resolve_rules_allocator_v2_state(state) == "defensive"
+
+
+def test_rules_allocator_v2_relative_recovery_overrides_relative_drawdown() -> None:
+    state = RulesAllocatorV2StateInput(
+        relative_drawdown_guard_active=True,
+        relative_recovery_active=True,
+    )
+    assert resolve_rules_allocator_v2_state(state) == "normal"
+
+
+def test_rules_allocator_v2_extended_guard_prevents_relative_drawdown_only_defense() -> None:
+    state = RulesAllocatorV2StateInput(
+        relative_drawdown_guard_active=True,
+        extended_defense_guard_active=True,
+    )
+    assert resolve_rules_allocator_v2_state(state) == "normal"
+
+
+def test_rules_allocator_v2_trend_risk_off_can_remain_defensive_with_extended_guard() -> None:
+    state = RulesAllocatorV2StateInput(
+        trend_risk_off=True,
+        extended_defense_guard_active=True,
+    )
+    assert resolve_rules_allocator_v2_state(state) == "defensive"
+
+
+def _v2_weights_by_id(
+    target: RulesAllocatorV2TargetWeights,
+) -> dict[str, Decimal]:
+    return {weight.asset_id: weight.weight for weight in target.weights}
+
+
+def test_rules_allocator_v2_normal_allocation_returns_normal_target_weights() -> None:
+    target = allocate_rules_v2_target_weights()
+    assert target.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert _v2_weights_by_id(target) == dict(RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS)
+
+
+def test_rules_allocator_v2_defensive_allocation_returns_defensive_target_weights() -> None:
+    target = allocate_rules_v2_target_weights(
+        state=RulesAllocatorV2StateInput(trend_risk_off=True)
+    )
+    assert _v2_weights_by_id(target) == dict(
+        RULES_ALLOCATOR_V2_DEFENSIVE_TARGET_WEIGHTS
+    )
+
+
+def test_rules_allocator_v2_custom_cash_asset_id_is_mapped() -> None:
+    target = allocate_rules_v2_target_weights(cash_asset_id="cash_krw")
+    assert _v2_weights_by_id(target) == {
+        "asset_us": Decimal("0.70"),
+        "asset_kr": Decimal("0.15"),
+        "asset_gold": Decimal("0.10"),
+        "cash_krw": Decimal("0.05"),
+    }
+
+
+def test_rules_allocator_v2_allocation_is_deterministic_across_repeated_calls() -> None:
+    state = RulesAllocatorV2StateInput(relative_drawdown_guard_active=True)
+    assert allocate_rules_v2_target_weights(state=state) == allocate_rules_v2_target_weights(
+        state=state
+    )
+
+
+def test_rules_allocator_v2_does_not_mutate_input_state() -> None:
+    state = RulesAllocatorV2StateInput(relative_drawdown_guard_active=True)
+    before = state.model_dump()
+    allocate_rules_v2_target_weights(state=state)
+    assert state.model_dump() == before
+
+
 def test_rules_allocator_has_no_forbidden_imports_or_calls() -> None:
     source_paths = [
         Path("src/backtest_engine/rules_allocator.py"),
@@ -259,3 +444,55 @@ def test_rules_allocator_has_no_forbidden_imports_or_calls() -> None:
 
         for fragment in forbidden_call_fragments:
             assert fragment not in text
+
+
+def test_rules_allocator_v2_source_has_no_forbidden_runtime_or_data_access() -> None:
+    path = Path("src/backtest_engine/rules_allocator.py")
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+
+    forbidden_import_roots = {
+        "backtest_data",
+        "scout",
+        "allocator",
+        "risk",
+        "broker",
+        "orders",
+        "emergency",
+        "composition",
+        "runtime",
+        "live",
+        "paper",
+        "yfinance",
+        "fred",
+        "requests",
+        "httpx",
+        "urllib",
+        "socket",
+        "websocket",
+        "websockets",
+        "aiohttp",
+        "random",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots = {alias.name.split(".")[0] for alias in node.names}
+            assert roots.isdisjoint(forbidden_import_roots)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            assert node.module.split(".")[0] not in forbidden_import_roots
+        elif isinstance(node, ast.Constant):
+            assert not isinstance(node.value, float)
+
+    forbidden_fragments = {
+        "datetime.now",
+        "datetime.utcnow",
+        "date.today",
+        "Path(",
+        "open(",
+        "read_csv",
+        "yfinance",
+        "requests",
+        "ScoutInputBuilder",
+    }
+    for fragment in forbidden_fragments:
+        assert fragment not in text

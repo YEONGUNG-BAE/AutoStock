@@ -788,3 +788,19 @@ def test_phase_2f_2_design_freeze_and_hypothesis_pointer(
             "does not claim that V2 has been implemented",
         ),
     )
+
+
+def test_phase_2f_3_design_freeze_update(freeze_text: str) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-3 Rules Allocator V2 Pure Implementation",
+            "pure V2 target-weight function",
+            "contract constants and state-resolution semantics",
+            "V2 is not connected to local evaluation yet",
+            "V2 is not selectable in local run config yet",
+            "V1 remains unchanged",
+            "No evidence run or deployment conclusion exists",
+            "integrate V2 behind an explicit local run config switch",
+        ),
+    )

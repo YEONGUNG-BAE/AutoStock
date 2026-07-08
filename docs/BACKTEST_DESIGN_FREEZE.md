@@ -1382,3 +1382,13 @@ Phase 2f-2 adds an implementation contract only in
 V1 remains frozen as a failed local-evidence candidate. V2 implementation must
 be separate, versioned, and evidence-gated against the S&P benchmark and static
 neutral baseline.
+
+### Phase 2f-3 Rules Allocator V2 Pure Implementation
+
+Phase 2f-3 adds a pure V2 target-weight function that satisfies the contract
+constants and state-resolution semantics from Phase 2f-2.
+
+V2 is not connected to local evaluation yet. V2 is not selectable in local run
+config yet. V1 remains unchanged. No evidence run or deployment conclusion
+exists. The next phase must integrate V2 behind an explicit local run config
+switch.
