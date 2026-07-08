@@ -1364,3 +1364,12 @@ Future redesign must be hypothesis/version/evidence driven. Do not tune weights
 ad hoc or optimize on the same evidence without a versioned hypothesis. Future
 candidate changes require a backtest rerun, comparison against the S&P benchmark
 and static neutral baseline, and sanitized evidence export.
+
+### Phase 2f-1 Versioned Rules Redesign Hypothesis Spec
+
+Phase 2f-1 adds a hypothesis-only v2 redesign spec in
+``docs/RULES_REDESIGN_HYPOTHESIS_V2.md``. Current v1 remains frozen as a failed
+local-evidence candidate.
+
+No implementation is authorized yet. Future implementation must be versioned and
+evidence-gated against the S&P benchmark and static neutral baseline.

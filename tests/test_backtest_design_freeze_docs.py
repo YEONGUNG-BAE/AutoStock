@@ -13,6 +13,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FREEZE_DOC = REPO_ROOT / "docs" / "BACKTEST_DESIGN_FREEZE.md"
 GATE_DOC = REPO_ROOT / "docs" / "LOCAL_EVIDENCE_GATE_REVIEW.md"
+REDESIGN_DOC = REPO_ROOT / "docs" / "RULES_REDESIGN_HYPOTHESIS_V2.md"
 PLAN_DOC = REPO_ROOT / "docs" / "BENCHMARK_DATA_AND_BACKTEST_PLAN.md"
 SCOUT_RULE = REPO_ROOT / ".cursor" / "rules" / "04-scout-date-id-and-data.mdc"
 
@@ -27,6 +28,12 @@ def freeze_text() -> str:
 def gate_text() -> str:
     assert GATE_DOC.is_file(), "local evidence gate review doc must exist"
     return GATE_DOC.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def redesign_text() -> str:
+    assert REDESIGN_DOC.is_file(), "rules redesign hypothesis v2 doc must exist"
+    return REDESIGN_DOC.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -447,5 +454,142 @@ def test_phase_2f_0_design_freeze_update(freeze_text: str) -> None:
             "research gate result, not investment advice",
             "frozen as a failed local-evidence candidate",
             "Future redesign must be hypothesis/version/evidence driven",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_context_and_identifiers(
+    redesign_text: str,
+) -> None:
+    assert redesign_text.startswith("# Rules Redesign Hypothesis V2")
+    _assert_tokens(
+        redesign_text,
+        (
+            "Phase 2f-0 froze the current rules allocator as a failed local-evidence candidate",
+            "underperformed both the S&P 500 TR KRW benchmark terminal return",
+            "static neutral baseline terminal return",
+            "hypothesis spec only",
+            "No implementation is authorized by this document alone",
+            "No deployment or investment recommendation exists",
+            "failed_candidate: local_monthly_rules_allocator_v1",
+            "failed_candidate_status: frozen_failed_local_evidence_candidate",
+            "candidate_id: local_monthly_rules_allocator_v2_hypothesis",
+            "candidate_status: hypothesis_only_not_implemented",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_core_problem_statement(
+    redesign_text: str,
+) -> None:
+    _assert_tokens(
+        redesign_text,
+        (
+            "materially lower terminal wealth than both the benchmark and the static neutral baseline",
+            "working hypothesis",
+            "over-penalized equity participation",
+            "too defensive relative to the S&P benchmark",
+            "not a proven causal claim",
+            "Lower drawdown cannot compensate for terminal wealth underperformance",
+            "evaluated by terminal wealth first, not drawdown first",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_h1_to_h5(redesign_text: str) -> None:
+    _assert_tokens(
+        redesign_text,
+        (
+            "H1: Increase S&P-core participation so the allocator is not structurally underweight US equity in long bull markets",
+            "H2: Treat risk-off as a temporary risk-budget reduction, not a broad long-term retreat from the benchmark",
+            "H3: Use benchmark-relative drawdown and benchmark-relative recovery triggers in addition to absolute trend signals",
+            "H4: Keep static neutral baseline as a mandatory comparator for every future evidence run",
+            "H5: Any tactical overlay must improve terminal wealth after costs, not merely reduce volatility",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_non_goals_and_envelope(
+    redesign_text: str,
+) -> None:
+    _assert_tokens(
+        redesign_text,
+        (
+            "No stock selection",
+            "No LLM/news signal yet",
+            "No live/paper deployment",
+            "No tuning weights on the same evidence without a versioned protocol",
+            "No changing USDKRW/data repair logic",
+            "No changing benchmark metric math",
+            "No weakening dataset/NAV sanity gates",
+            "No claim that lower MDD alone is success",
+            "S&P-core dominant baseline",
+            "Tactical satellite overlays",
+            "Risk-off capped by explicit relative-performance guard",
+            "Maximum cash/gold drag budget",
+            "Required minimum US-equity participation unless evidence supports otherwise",
+            "Relative drawdown recovery logic",
+            "Cost-aware turnover limits",
+            "Do not assign final weights in this phase",
+            "Do not implement any of these directions in this phase",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_acceptance_gates(redesign_text: str) -> None:
+    _assert_tokens(
+        redesign_text,
+        (
+            "Gate A: v2 terminal return must exceed S&P 500 TR KRW benchmark terminal return",
+            "Gate B: v2 terminal return must exceed static neutral baseline terminal return",
+            "Gate C: v2 terminal excess return must exceed rules v1 terminal excess return",
+            "Gate D: v2 must pass dataset continuity, NAV sanity, frequency-aware metrics, and static baseline evidence export",
+            "Gate E: v2 must not rely on lower drawdown alone to claim success",
+            "Gate F: v2 must report costs, turnover proxy if available, max relative drawdown, and rules-minus-static comparisons",
+        ),
+    )
+
+
+def test_rules_redesign_hypothesis_v2_anti_overfit_and_prohibitions(
+    redesign_text: str,
+) -> None:
+    _assert_tokens(
+        redesign_text,
+        (
+            "No repeated ad hoc retuning on the same repaired local evidence",
+            "Any parameter change requires a version bump",
+            "Any parameter change requires a stated hypothesis",
+            "Rerun must compare against the S&P benchmark and static neutral baseline",
+            "Final evaluation must be documented before paper/live consideration",
+            "validation/holdout split",
+            "No investment recommendation",
+            "No deployment approval",
+            "No live/paper activation",
+            "No claim that any security should be bought or sold",
+            "No claim that lower drawdown alone is success",
+            "No claim that the v2 hypothesis is expected to beat S&P before evidence",
+        ),
+    )
+
+
+def test_phase_2f_1_design_freeze_and_gate_review_pointer(
+    freeze_text: str,
+    gate_text: str,
+) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-1 Versioned Rules Redesign Hypothesis Spec",
+            "hypothesis-only v2 redesign spec",
+            "Current v1 remains frozen as a failed local-evidence candidate",
+            "No implementation is authorized yet",
+            "Future implementation must be versioned and evidence-gated against the S&P benchmark and static neutral baseline",
+        ),
+    )
+    _assert_tokens(
+        gate_text,
+        (
+            "docs/RULES_REDESIGN_HYPOTHESIS_V2.md",
+            "this pointer does not change the local gate outcome",
         ),
     )

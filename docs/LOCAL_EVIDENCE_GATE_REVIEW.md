@@ -70,6 +70,10 @@ on this local evidence. This is a research gate outcome, not investment advice.
   comparison against the S&P benchmark and static neutral baseline, and evidence
   export.
 
+The versioned redesign hypothesis spec is recorded in
+`docs/RULES_REDESIGN_HYPOTHESIS_V2.md`; this pointer does not change the local
+gate outcome above.
+
 ## Candidate Redesign Hypotheses
 
 These are hypotheses only, not implementation instructions:
