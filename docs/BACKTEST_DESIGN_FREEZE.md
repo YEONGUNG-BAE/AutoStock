@@ -1350,3 +1350,17 @@ Rules:
 - exported static baseline fields are sanitized numeric evidence only
 - no pass/fail, deployment, recommendation, investment advice, or S&P-relative
   project conclusion exists yet
+
+### Phase 2f-0 Local Evidence Gate Review and Redesign Freeze
+
+Phase 2e-16 produced static-baseline local evidence for the current rules
+allocator candidate. The current rules allocator did not meet local terminal
+wealth gates versus the S&P benchmark or the static neutral baseline.
+
+This is a research gate result, not investment advice. The current rules
+allocator is frozen as a failed local-evidence candidate.
+
+Future redesign must be hypothesis/version/evidence driven. Do not tune weights
+ad hoc or optimize on the same evidence without a versioned hypothesis. Future
+candidate changes require a backtest rerun, comparison against the S&P benchmark
+and static neutral baseline, and sanitized evidence export.
