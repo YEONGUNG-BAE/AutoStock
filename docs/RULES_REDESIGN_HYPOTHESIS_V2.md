@@ -28,6 +28,10 @@ candidate_id: local_monthly_rules_allocator_v2_hypothesis
 candidate_status: hypothesis_only_not_implemented
 ```
 
+The future implementation contract is recorded in
+`docs/RULES_V2_IMPLEMENTATION_CONTRACT.md`. This pointer does not change the
+hypothesis-only status and does not claim that V2 has been implemented.
+
 ## Core Problem Statement
 
 Using the Phase 2e-16 local evidence context, the current rules allocator had

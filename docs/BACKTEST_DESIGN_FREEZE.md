@@ -1373,3 +1373,12 @@ local-evidence candidate.
 
 No implementation is authorized yet. Future implementation must be versioned and
 evidence-gated against the S&P benchmark and static neutral baseline.
+
+### Phase 2f-2 Rules V2 Implementation Contract Spec
+
+Phase 2f-2 adds an implementation contract only in
+``docs/RULES_V2_IMPLEMENTATION_CONTRACT.md``. No allocator code is changed.
+
+V1 remains frozen as a failed local-evidence candidate. V2 implementation must
+be separate, versioned, and evidence-gated against the S&P benchmark and static
+neutral baseline.

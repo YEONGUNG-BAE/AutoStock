@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FREEZE_DOC = REPO_ROOT / "docs" / "BACKTEST_DESIGN_FREEZE.md"
 GATE_DOC = REPO_ROOT / "docs" / "LOCAL_EVIDENCE_GATE_REVIEW.md"
 REDESIGN_DOC = REPO_ROOT / "docs" / "RULES_REDESIGN_HYPOTHESIS_V2.md"
+V2_CONTRACT_DOC = REPO_ROOT / "docs" / "RULES_V2_IMPLEMENTATION_CONTRACT.md"
 PLAN_DOC = REPO_ROOT / "docs" / "BENCHMARK_DATA_AND_BACKTEST_PLAN.md"
 SCOUT_RULE = REPO_ROOT / ".cursor" / "rules" / "04-scout-date-id-and-data.mdc"
 
@@ -34,6 +35,12 @@ def gate_text() -> str:
 def redesign_text() -> str:
     assert REDESIGN_DOC.is_file(), "rules redesign hypothesis v2 doc must exist"
     return REDESIGN_DOC.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def v2_contract_text() -> str:
+    assert V2_CONTRACT_DOC.is_file(), "rules v2 implementation contract doc must exist"
+    return V2_CONTRACT_DOC.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -591,5 +598,193 @@ def test_phase_2f_1_design_freeze_and_gate_review_pointer(
         (
             "docs/RULES_REDESIGN_HYPOTHESIS_V2.md",
             "this pointer does not change the local gate outcome",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_status_and_identity(
+    v2_contract_text: str,
+) -> None:
+    assert v2_contract_text.startswith("# Rules V2 Implementation Contract")
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "implementation contract",
+            "not implementation",
+            "authorizes a future implementation phase only after this contract is committed and reviewed",
+            "does not authorize deployment, paper trading, live trading, or investment action",
+            "does not change the Phase 2f-0 gate result",
+            "preserves V1 as a frozen failed local-evidence candidate",
+            "candidate_id: local_monthly_rules_allocator_v2_contract",
+            "candidate_status: implementation_contract_only_not_implemented",
+            "supersedes_for_research: local_monthly_rules_allocator_v1",
+            "Do not delete or mutate V1",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_objectives(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "Primary objective remains terminal wealth above the S&P 500 TR KRW benchmark",
+            "Secondary objective is terminal wealth above the static neutral baseline",
+            "Lower drawdown alone is not success",
+            "Tactical overlays must improve net terminal wealth after costs",
+            "Future V2 must be evaluated against the S&P benchmark and static neutral baseline",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_design_envelope(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "S&P-core dominant monthly rules allocator",
+            "US equity is the dominant risky allocation",
+            "US equity should not be structurally underweight the S&P benchmark",
+            "KR equity and gold are satellite allocations",
+            "Satellite allocations must not dominate terminal wealth behavior",
+            "Cash and gold together must have an explicit cap",
+            "temporary risk-budget reduction",
+            "Benchmark-relative drawdown and recovery state must be considered",
+            "Risk-off logic must have an explicit re-entry/recovery condition",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_policy_constants(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            'RULES_ALLOCATOR_V2_CONTRACT_POLICY = "local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1"',
+            "NORMAL_TARGET_WEIGHTS",
+            "asset_us: 0.70",
+            "asset_kr: 0.15",
+            "asset_gold: 0.10",
+            "cash: 0.05",
+            "DEFENSIVE_TARGET_WEIGHTS",
+            "asset_us: 0.50",
+            "asset_kr: 0.10",
+            "asset_gold: 0.25",
+            "cash: 0.15",
+            "MIN_US_WEIGHT_NORMAL: 0.65",
+            "MAX_CASH_GOLD_WEIGHT_NORMAL: 0.20",
+            "MAX_CASH_GOLD_WEIGHT_DEFENSIVE: 0.40",
+            "Normal target is S&P-core dominant",
+            "Cash minimum remains 0.05",
+            "Defensive state reduces but does not abandon US equity",
+            "Defensive cash+gold is capped",
+            "fixed before implementation to avoid ad hoc retuning",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_state_logic(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "normal_state",
+            "default state unless risk trigger is active",
+            "defensive_state",
+            "temporary risk-budget reduction state",
+            "risk_trigger",
+            "must not be purely absolute-drawdown-only",
+            "relative_recovery_trigger",
+            "must allow re-entry toward normal state",
+            "extended_defense_guard",
+            "must prevent indefinite defensive positioning",
+            "Do not implement state logic in this phase",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_future_boundaries(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "Add V2 without mutating V1 behavior",
+            "Keep V1 tests passing",
+            "Expose V2 with explicit policy string",
+            "Make V2 selectable by local evaluation config only in a later explicit phase",
+            "Keep dataset/NAV/frequency/static-baseline sanity gates",
+            "Keep evidence export sanitized",
+            "Add tests proving V1 unchanged",
+            "Add tests proving V2 target weights satisfy the contract",
+            "Add tests proving V2 does not use LLM/news/scout/runtime/live modules",
+            "Not change benchmark metric math",
+            "Not change data repair logic",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_evidence_gates(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "Gate A: V2 terminal return must exceed S&P 500 TR KRW benchmark terminal return",
+            "Gate B: V2 terminal return must exceed static neutral baseline terminal return",
+            "Gate C: V2 terminal excess return must exceed rules V1 terminal excess return",
+            "Gate D: V2 must pass dataset continuity, NAV sanity, frequency-aware metrics, and static baseline evidence export",
+            "Gate E: V2 must not rely on lower drawdown alone to claim success",
+            "Gate F: V2 must report costs, turnover proxy if available, max relative drawdown, and rules-minus-static comparisons",
+        ),
+    )
+
+
+def test_rules_v2_implementation_contract_anti_overfit_and_prohibitions(
+    v2_contract_text: str,
+) -> None:
+    _assert_tokens(
+        v2_contract_text,
+        (
+            "Constants are fixed before implementation",
+            "Any parameter change after evidence requires a new policy version",
+            "Any parameter change requires a stated hypothesis",
+            "No repeated ad hoc retuning on repaired local evidence",
+            "Future validation/holdout split must be documented before use",
+            "No same-history retune loop",
+            "No investment recommendation",
+            "No deployment approval",
+            "No live/paper activation",
+            "No claim that V2 will beat S&P before evidence",
+            "No claim that lower MDD alone is success",
+            "No claim that any security should be bought or sold",
+        ),
+    )
+
+
+def test_phase_2f_2_design_freeze_and_hypothesis_pointer(
+    freeze_text: str,
+    redesign_text: str,
+) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-2 Rules V2 Implementation Contract Spec",
+            "adds an implementation contract only",
+            "No allocator code is changed",
+            "V1 remains frozen as a failed local-evidence candidate",
+            "V2 implementation must be separate, versioned, and evidence-gated",
+        ),
+    )
+    _assert_tokens(
+        redesign_text,
+        (
+            "docs/RULES_V2_IMPLEMENTATION_CONTRACT.md",
+            "does not change the hypothesis-only status",
+            "does not claim that V2 has been implemented",
         ),
     )
