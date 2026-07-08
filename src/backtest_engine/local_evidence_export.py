@@ -174,8 +174,12 @@ def _build_metrics_payload(
     run_config = result.run_config
     walk_forward = result.walk_forward_result
     metrics = result.benchmark_relative_result.metrics
+    static_result = result.static_neutral_baseline_result
+    static_walk_forward = static_result.walk_forward_result
+    static_metrics = static_result.benchmark_relative_result.metrics
     period_specs = run_config.period_specs
     nav_points = walk_forward.nav_points
+    static_nav_points = static_walk_forward.nav_points
 
     return {
         "local_evidence_export_policy": LOCAL_EVIDENCE_EXPORT_POLICY_V1,
@@ -200,6 +204,31 @@ def _build_metrics_payload(
         ),
         "terminal_excess_return": _decimal_to_json(metrics.excess_return_percent),
         "max_relative_drawdown": _decimal_to_json(metrics.relative_drawdown_percent),
+        "static_neutral_baseline_policy": (
+            static_result.local_static_neutral_baseline_policy
+        ),
+        "static_terminal_strategy_return": _decimal_to_json(
+            static_metrics.bot_total_return_percent
+        ),
+        "static_terminal_benchmark_return": _decimal_to_json(
+            static_metrics.benchmark_total_return_percent
+        ),
+        "static_terminal_excess_return": _decimal_to_json(
+            static_metrics.excess_return_percent
+        ),
+        "static_max_relative_drawdown": _decimal_to_json(
+            static_metrics.relative_drawdown_percent
+        ),
+        "static_final_portfolio_value_krw": _decimal_to_json(
+            static_nav_points[-1].portfolio_value_krw
+        ),
+        "static_total_cost_krw": _decimal_to_json(static_walk_forward.total_cost_krw),
+        "rules_minus_static_terminal_return": _decimal_to_json(
+            metrics.bot_total_return_percent - static_metrics.bot_total_return_percent
+        ),
+        "rules_minus_static_excess_return": _decimal_to_json(
+            metrics.excess_return_percent - static_metrics.excess_return_percent
+        ),
         "warnings": list(result.warnings),
     }
 
@@ -225,6 +254,12 @@ def _build_manifest_payload(
             "report_bundle_policy": result.report_bundle.report_bundle_policy,
             "benchmark_adapter_policy": (
                 result.benchmark_relative_result.benchmark_adapter_policy
+            ),
+            "static_neutral_baseline_policy": (
+                result.static_neutral_baseline_result.local_static_neutral_baseline_policy
+            ),
+            "static_benchmark_adapter_policy": (
+                result.static_neutral_baseline_result.benchmark_relative_result.benchmark_adapter_policy
             ),
         },
         "warnings": list(result.warnings),

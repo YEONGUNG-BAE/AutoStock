@@ -1328,3 +1328,25 @@ Rules:
 - benchmark return, excess return, relative drawdown, capture, and beta math are
   unchanged
 - no evidence interpretation or S&P-relative project conclusion exists yet
+
+### Phase 2e-15 Local Static Neutral Baseline Patch
+
+Phase 2e-14 produced frequency-aware repaired-data local evidence. Evidence
+interpretation still requires comparison against a deterministic static neutral
+baseline before any project-level conclusion can be considered.
+
+Rules:
+
+- static neutral baseline policy is
+  ``local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1``
+- static neutral baseline uses fixed US 0.60 / KR 0.20 / GOLD 0.15 /
+  CASH 0.05 weights
+- weights are frozen and not optimized to current evidence
+- static baseline uses the same local monthly dataset, period specs, execution
+  schedule, cost model, NAV sanity, benchmark alignment, and
+  ``periods_per_year=12`` benchmark metric frequency as the rules dry-run
+- static baseline is non-tactical and uses no moving-average, rules, LLM, or
+  runtime decision logic
+- exported static baseline fields are sanitized numeric evidence only
+- no pass/fail, deployment, recommendation, investment advice, or S&P-relative
+  project conclusion exists yet

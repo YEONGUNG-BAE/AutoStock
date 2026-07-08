@@ -138,9 +138,13 @@ def render_local_dry_run_summary(
     run_config = result.run_config
     walk_forward = result.walk_forward_result
     metrics = result.benchmark_relative_result.metrics
+    static_result = result.static_neutral_baseline_result
+    static_walk_forward = static_result.walk_forward_result
+    static_metrics = static_result.benchmark_relative_result.metrics
 
     period_specs = run_config.period_specs
     nav_points = walk_forward.nav_points
+    static_nav_points = static_walk_forward.nav_points
 
     lines = [
         "AutoStock local monthly evaluation dry-run",
@@ -167,6 +171,39 @@ def render_local_dry_run_summary(
         f"terminal_benchmark_return: {metrics.benchmark_total_return_percent}",
         f"terminal_excess_return: {metrics.excess_return_percent}",
         f"max_relative_drawdown: {metrics.relative_drawdown_percent}",
+        (
+            "static_neutral_baseline_policy: "
+            f"{static_result.local_static_neutral_baseline_policy}"
+        ),
+        (
+            "static_final_portfolio_value_krw: "
+            f"{static_nav_points[-1].portfolio_value_krw}"
+        ),
+        f"static_total_cost_krw: {static_walk_forward.total_cost_krw}",
+        (
+            "static_terminal_strategy_return: "
+            f"{static_metrics.bot_total_return_percent}"
+        ),
+        (
+            "static_terminal_benchmark_return: "
+            f"{static_metrics.benchmark_total_return_percent}"
+        ),
+        (
+            "static_terminal_excess_return: "
+            f"{static_metrics.excess_return_percent}"
+        ),
+        (
+            "static_max_relative_drawdown: "
+            f"{static_metrics.relative_drawdown_percent}"
+        ),
+        (
+            "rules_minus_static_terminal_return: "
+            f"{metrics.bot_total_return_percent - static_metrics.bot_total_return_percent}"
+        ),
+        (
+            "rules_minus_static_excess_return: "
+            f"{metrics.excess_return_percent - static_metrics.excess_return_percent}"
+        ),
         "warnings:",
     ]
     for warning in result.warnings:

@@ -21,6 +21,7 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_dry_run_cli import render_local_dry_run_summary  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
     run_local_monthly_evaluation_dry_run,
 )
 from backtest_engine.local_evidence_export import (  # noqa: E402
@@ -345,6 +346,36 @@ def test_metrics_json_contains_required_fields(tmp_path: Path) -> None:
     )
     assert metrics["terminal_excess_return"] == str(metrics_obj.excess_return_percent)
     assert metrics["max_relative_drawdown"] == str(metrics_obj.relative_drawdown_percent)
+    static_result = result.static_neutral_baseline_result
+    static_metrics = static_result.benchmark_relative_result.metrics
+    static_walk = static_result.walk_forward_result
+    assert (
+        metrics["static_neutral_baseline_policy"]
+        == LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1
+    )
+    assert metrics["static_terminal_strategy_return"] == str(
+        static_metrics.bot_total_return_percent
+    )
+    assert metrics["static_terminal_benchmark_return"] == str(
+        static_metrics.benchmark_total_return_percent
+    )
+    assert metrics["static_terminal_excess_return"] == str(
+        static_metrics.excess_return_percent
+    )
+    assert metrics["static_max_relative_drawdown"] == str(
+        static_metrics.relative_drawdown_percent
+    )
+    assert metrics["static_final_portfolio_value_krw"] == str(
+        static_walk.nav_points[-1].portfolio_value_krw
+    )
+    assert metrics["static_total_cost_krw"] == str(static_walk.total_cost_krw)
+    assert metrics["rules_minus_static_terminal_return"] == str(
+        metrics_obj.bot_total_return_percent
+        - static_metrics.bot_total_return_percent
+    )
+    assert metrics["rules_minus_static_excess_return"] == str(
+        metrics_obj.excess_return_percent - static_metrics.excess_return_percent
+    )
     assert metrics["warnings"] == list(result.warnings)
 
 
@@ -389,7 +420,46 @@ def test_manifest_json_contains_export_policy_and_generated_from_policies(
         generated_from["benchmark_adapter_policy"]
         == result.benchmark_relative_result.benchmark_adapter_policy
     )
+    assert (
+        generated_from["static_neutral_baseline_policy"]
+        == result.static_neutral_baseline_result.local_static_neutral_baseline_policy
+    )
+    assert (
+        generated_from["static_benchmark_adapter_policy"]
+        == result.static_neutral_baseline_result.benchmark_relative_result.benchmark_adapter_policy
+    )
     assert manifest["statement"] == "research evidence only; not an investment conclusion"
+
+
+def test_metrics_json_excludes_decision_conclusion_and_recommendation_fields(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root, output_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    export_local_dry_run_evidence(
+        repo_root=repo_root,
+        result=result,
+        output_root=output_root,
+    )
+    metrics = json.loads(
+        (output_root / METRICS_JSON_FILENAME).read_text(encoding="utf-8")
+    )
+    forbidden_fields = {
+        "pass",
+        "fail",
+        "passed",
+        "failed",
+        "deployment_decision",
+        "recommendation",
+        "investment_advice",
+        "project_conclusion",
+        "beats_sp500",
+        "beat_sp500",
+    }
+    assert set(metrics).isdisjoint(forbidden_fields)
 
 
 @pytest.mark.parametrize(
