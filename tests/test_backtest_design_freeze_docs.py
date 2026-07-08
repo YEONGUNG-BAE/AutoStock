@@ -820,3 +820,19 @@ def test_phase_2f_4_design_freeze_update(freeze_text: str) -> None:
             "No real evidence run or deployment conclusion exists",
         ),
     )
+
+
+def test_phase_2f_5_design_freeze_update(freeze_text: str) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-5 V2 Local Evidence CLI and Sanitized Attribution Patch",
+            "Default CLI behavior remains V1",
+            "opt into V2 by",
+            "explicit `--rules-allocator-version`",
+            "Sanitized evidence export metrics JSON and manifest `generated_from` metadata include",
+            "rules_allocator_version",
+            "rules_allocator_v2_state_policy",
+            "No real evidence run or deployment conclusion exists",
+        ),
+    )

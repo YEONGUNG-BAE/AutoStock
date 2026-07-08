@@ -21,8 +21,13 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_dry_run_cli import render_local_dry_run_summary  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
     run_local_monthly_evaluation_dry_run,
+)
+from backtest_engine.local_run_config import (  # noqa: E402
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
 )
 from backtest_engine.local_evidence_export import (  # noqa: E402
     LOCAL_EVIDENCE_EXPORT_POLICY_V1,
@@ -377,6 +382,101 @@ def test_metrics_json_contains_required_fields(tmp_path: Path) -> None:
         metrics_obj.excess_return_percent - static_metrics.excess_return_percent
     )
     assert metrics["warnings"] == list(result.warnings)
+
+
+def test_metrics_json_includes_rules_allocator_version(tmp_path: Path) -> None:
+    repo_root, data_root, output_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+    )
+    export_local_dry_run_evidence(
+        repo_root=repo_root,
+        result=result,
+        output_root=output_root,
+    )
+    metrics = json.loads(
+        (output_root / METRICS_JSON_FILENAME).read_text(encoding="utf-8")
+    )
+    assert metrics["rules_allocator_version"] == result.run_config.rules_allocator_version
+    assert "rules_allocator_v2_state_policy" in metrics
+
+
+def test_v1_export_rules_allocator_version_and_v2_state_policy(tmp_path: Path) -> None:
+    repo_root, data_root, output_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    )
+    export_local_dry_run_evidence(
+        repo_root=repo_root,
+        result=result,
+        output_root=output_root,
+    )
+    metrics = json.loads(
+        (output_root / METRICS_JSON_FILENAME).read_text(encoding="utf-8")
+    )
+    assert metrics["rules_allocator_version"] == LOCAL_RULES_ALLOCATOR_VERSION_V1
+    assert metrics["rules_allocator_v2_state_policy"] is None
+
+
+def test_v2_export_rules_allocator_version_and_v2_state_policy(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root, output_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+    export_local_dry_run_evidence(
+        repo_root=repo_root,
+        result=result,
+        output_root=output_root,
+    )
+    metrics = json.loads(
+        (output_root / METRICS_JSON_FILENAME).read_text(encoding="utf-8")
+    )
+    assert metrics["rules_allocator_version"] == LOCAL_RULES_ALLOCATOR_VERSION_V2
+    assert metrics["rules_allocator_v2_state_policy"] == (
+        LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY
+    )
+
+
+def test_manifest_generated_from_includes_allocator_attribution(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root, output_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+    export_local_dry_run_evidence(
+        repo_root=repo_root,
+        result=result,
+        output_root=output_root,
+    )
+    manifest = json.loads(
+        (output_root / MANIFEST_JSON_FILENAME).read_text(encoding="utf-8")
+    )
+    generated_from = manifest["generated_from"]
+    assert generated_from["rules_allocator_version"] == LOCAL_RULES_ALLOCATOR_VERSION_V2
+    assert generated_from["rules_allocator_v2_state_policy"] == (
+        LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY
+    )
+
+
+def test_output_filenames_remain_unchanged(tmp_path: Path) -> None:
+    _export_default(tmp_path)
+    output_root = tmp_path / "autostock-data" / "outputs"
+    output_files = sorted(path.name for path in output_root.iterdir() if path.is_file())
+    assert output_files == [
+        MANIFEST_JSON_FILENAME,
+        METRICS_JSON_FILENAME,
+        SUMMARY_MARKDOWN_FILENAME,
+    ]
 
 
 def test_manifest_json_contains_export_policy_and_generated_from_policies(

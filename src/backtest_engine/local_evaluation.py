@@ -140,6 +140,21 @@ _STATIC_NEUTRAL_RESEARCH_ONLY_WARNING = (
 LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY = (
     "local_monthly_rules_allocator_v2_static_normal_state.v1"
 )
+
+
+def resolve_local_rules_allocator_v2_state_policy(
+    rules_allocator_version: str,
+) -> str | None:
+    """Map a local rules allocator version to its V2 state policy attribution."""
+    if rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V1:
+        return None
+    if rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2:
+        return LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY
+    raise ValueError(
+        "rules_allocator_version must be a supported local rules allocator version."
+    )
+
+
 _RULES_ALLOCATOR_V2_STATIC_NORMAL_WARNING = (
     "local rules allocator v2 uses static normal-state integration; "
     "relative recovery state machine is not implemented yet"

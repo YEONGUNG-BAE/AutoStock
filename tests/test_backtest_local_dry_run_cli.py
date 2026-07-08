@@ -29,8 +29,13 @@ from backtest_engine.local_evidence_export import (  # noqa: E402
 )
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LocalMonthlyEvaluationDryRunResult,
     run_local_monthly_evaluation_dry_run,
+)
+from backtest_engine.local_run_config import (  # noqa: E402
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
 )
 
 MODULE_PATH = (
@@ -207,6 +212,8 @@ def test_build_arg_parser_accepts_allowed_args() -> None:
             "--export-output-root",
             "/tmp/autostock-outputs",
             "--overwrite-export",
+            "--rules-allocator-version",
+            LOCAL_RULES_ALLOCATOR_VERSION_V2,
         ]
     )
     assert args.repo_root == Path("/tmp/AutoStock")
@@ -220,6 +227,175 @@ def test_build_arg_parser_accepts_allowed_args() -> None:
     assert args.show_markdown_preview is True
     assert args.export_output_root == Path("/tmp/autostock-outputs")
     assert args.overwrite_export is True
+    assert args.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2
+
+
+def test_build_arg_parser_exposes_rules_allocator_version() -> None:
+    parser = build_arg_parser()
+    action = next(
+        action
+        for action in parser._actions
+        if action.dest == "rules_allocator_version"
+    )
+    assert "--rules-allocator-version" in action.option_strings
+    assert action.default == LOCAL_RULES_ALLOCATOR_VERSION_V1
+    assert set(action.choices) == {
+        LOCAL_RULES_ALLOCATOR_VERSION_V1,
+        LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    }
+
+
+def test_default_cli_run_passes_v1_to_dry_run(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_dry_run_cli.run_local_monthly_evaluation_dry_run"
+    ) as mocked:
+        mocked.return_value = run_local_monthly_evaluation_dry_run(
+            repo_root=repo_root,
+            data_root=data_root,
+        )
+        exit_code = main(_cli_argv(repo_root, data_root))
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["rules_allocator_version"] == (
+        LOCAL_RULES_ALLOCATOR_VERSION_V1
+    )
+    assert exit_code == 0
+
+
+def test_explicit_v1_cli_run_passes_v1(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_dry_run_cli.run_local_monthly_evaluation_dry_run"
+    ) as mocked:
+        mocked.return_value = run_local_monthly_evaluation_dry_run(
+            repo_root=repo_root,
+            data_root=data_root,
+        )
+        exit_code = main(
+            _cli_argv(
+                repo_root,
+                data_root,
+                "--rules-allocator-version",
+                LOCAL_RULES_ALLOCATOR_VERSION_V1,
+            )
+        )
+    assert mocked.call_args.kwargs["rules_allocator_version"] == (
+        LOCAL_RULES_ALLOCATOR_VERSION_V1
+    )
+    assert exit_code == 0
+
+
+def test_explicit_v2_cli_run_passes_v2(tmp_path: Path) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with patch(
+        "backtest_engine.local_dry_run_cli.run_local_monthly_evaluation_dry_run"
+    ) as mocked:
+        mocked.return_value = run_local_monthly_evaluation_dry_run(
+            repo_root=repo_root,
+            data_root=data_root,
+            rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+        )
+        exit_code = main(
+            _cli_argv(
+                repo_root,
+                data_root,
+                "--rules-allocator-version",
+                LOCAL_RULES_ALLOCATOR_VERSION_V2,
+            )
+        )
+    assert mocked.call_args.kwargs["rules_allocator_version"] == (
+        LOCAL_RULES_ALLOCATOR_VERSION_V2
+    )
+    assert exit_code == 0
+
+
+def test_unknown_allocator_version_exits_nonzero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            _cli_argv(
+                repo_root,
+                data_root,
+                "--rules-allocator-version",
+                "rules_allocator.unknown",
+            )
+        )
+    captured = capsys.readouterr()
+    assert exc_info.value.code != 0
+    assert "rules-allocator-version" in captured.err.lower()
+
+
+def test_summary_includes_rules_allocator_version(tmp_path: Path) -> None:
+    result = _run_dry_run(tmp_path)
+    summary = render_local_dry_run_summary(result)
+    assert (
+        f"rules_allocator_version: {result.run_config.rules_allocator_version}"
+        in summary
+    )
+
+
+def test_summary_includes_rules_allocator_v2_state_policy_for_v1(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path)
+    summary = render_local_dry_run_summary(result)
+    assert "rules_allocator_v2_state_policy: None" in summary
+
+
+def test_summary_includes_rules_allocator_v2_state_policy_for_v2(
+    tmp_path: Path,
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    result = run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+    summary = render_local_dry_run_summary(result)
+    assert (
+        f"rules_allocator_v2_state_policy: {LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY}"
+        in summary
+    )
+
+
+def test_cli_output_filenames_unchanged_with_export(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    output_root = tmp_path / "autostock-data" / "outputs"
+    exit_code = main(
+        _cli_argv(
+            repo_root,
+            data_root,
+            "--export-output-root",
+            str(output_root),
+            "--rules-allocator-version",
+            LOCAL_RULES_ALLOCATOR_VERSION_V2,
+        )
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert f"summary_markdown_path: {output_root / SUMMARY_MARKDOWN_FILENAME}" in captured.out
+    assert f"metrics_json_path: {output_root / METRICS_JSON_FILENAME}" in captured.out
+    assert f"manifest_json_path: {output_root / MANIFEST_JSON_FILENAME}" in captured.out
+
+
+def test_cli_output_does_not_print_source_names_or_raw_csv(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    csv_text = (data_root / "monthly/sp500tr_monthly.csv").read_text(encoding="utf-8")
+    exit_code = main(_cli_argv(repo_root, data_root))
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    for line in csv_text.splitlines()[1:]:
+        assert line not in captured.out
+    assert "synthetic" not in captured.out.lower()
 
 
 @pytest.mark.parametrize("forbidden_arg", FORBIDDEN_CLI_ARGS)
@@ -278,6 +454,7 @@ def test_main_passes_repo_root_data_root_and_options(tmp_path: Path) -> None:
         fee_bps=Decimal("12"),
         kr_sell_tax_bps=Decimal("20"),
         fx_spread_bps=Decimal("18"),
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V1,
     )
     assert exit_code == 0
 

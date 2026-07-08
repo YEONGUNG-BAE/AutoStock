@@ -43,6 +43,7 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     build_local_nav_period_return_diagnostic,
     build_local_nav_sanity_step_diagnostic,
     build_local_nav_valuation_component_diagnostic,
+    resolve_local_rules_allocator_v2_state_policy,
     run_local_monthly_evaluation_dry_run,
     run_local_static_neutral_baseline,
     validate_local_monthly_walk_forward_nav_sanity,
@@ -326,6 +327,24 @@ def test_v2_local_monthly_evaluation_passes_nav_sanity_on_synthetic_data(
     assert result.benchmark_relative_result.benchmark_adapter_policy == (
         "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
     )
+
+
+def test_resolve_local_rules_allocator_v2_state_policy_maps_v1_to_none() -> None:
+    assert (
+        resolve_local_rules_allocator_v2_state_policy(LOCAL_RULES_ALLOCATOR_VERSION_V1)
+        is None
+    )
+
+
+def test_resolve_local_rules_allocator_v2_state_policy_maps_v2_to_static_normal() -> None:
+    assert resolve_local_rules_allocator_v2_state_policy(
+        LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    ) == LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY
+
+
+def test_resolve_local_rules_allocator_v2_state_policy_rejects_unknown() -> None:
+    with pytest.raises(ValueError, match="rules_allocator_version"):
+        resolve_local_rules_allocator_v2_state_policy("rules_allocator.unknown")
 
 
 def test_calls_assemble_local_monthly_dataset(tmp_path: Path) -> None:

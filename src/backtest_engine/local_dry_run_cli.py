@@ -17,7 +17,12 @@ from pathlib import Path
 
 from backtest_engine.local_evaluation import (
     LocalMonthlyEvaluationDryRunResult,
+    resolve_local_rules_allocator_v2_state_policy,
     run_local_monthly_evaluation_dry_run,
+)
+from backtest_engine.local_run_config import (
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
 )
 from backtest_engine.local_evidence_export import export_local_dry_run_evidence
 
@@ -115,6 +120,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace existing evidence export files in the output root.",
     )
+    parser.add_argument(
+        "--rules-allocator-version",
+        choices=(
+            LOCAL_RULES_ALLOCATOR_VERSION_V1,
+            LOCAL_RULES_ALLOCATOR_VERSION_V2,
+        ),
+        default=LOCAL_RULES_ALLOCATOR_VERSION_V1,
+        help=(
+            "Local rules allocator version for the dry-run "
+            f"(default: {LOCAL_RULES_ALLOCATOR_VERSION_V1})."
+        ),
+    )
     return parser
 
 
@@ -146,11 +163,17 @@ def render_local_dry_run_summary(
     nav_points = walk_forward.nav_points
     static_nav_points = static_walk_forward.nav_points
 
+    v2_state_policy = resolve_local_rules_allocator_v2_state_policy(
+        run_config.rules_allocator_version,
+    )
+
     lines = [
         "AutoStock local monthly evaluation dry-run",
         f"policy: {result.local_monthly_evaluation_dry_run_policy}",
         f"dataset_policy: {dataset.local_monthly_dataset_policy}",
         f"run_config_policy: {run_config.local_monthly_run_config_policy}",
+        f"rules_allocator_version: {run_config.rules_allocator_version}",
+        f"rules_allocator_v2_state_policy: {v2_state_policy}",
         f"period_count: {len(period_specs)}",
         f"nav_point_count: {len(nav_points)}",
         f"benchmark_point_count: {len(dataset.benchmark_points)}",
@@ -248,6 +271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             fee_bps=args.fee_bps,
             kr_sell_tax_bps=args.kr_sell_tax_bps,
             fx_spread_bps=args.fx_spread_bps,
+            rules_allocator_version=args.rules_allocator_version,
         )
     except Exception as exc:  # noqa: BLE001 - operator CLI must surface failure safely
         print(f"local dry-run failed: {exc}", file=sys.stderr)

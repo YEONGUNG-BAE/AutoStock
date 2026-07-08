@@ -14,7 +14,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backtest_engine.local_evaluation import LocalMonthlyEvaluationDryRunResult
+from backtest_engine.local_evaluation import (
+    LocalMonthlyEvaluationDryRunResult,
+    resolve_local_rules_allocator_v2_state_policy,
+)
 
 LOCAL_EVIDENCE_EXPORT_POLICY_V1 = "sanitized_local_dry_run_evidence_export.v1"
 
@@ -180,6 +183,9 @@ def _build_metrics_payload(
     period_specs = run_config.period_specs
     nav_points = walk_forward.nav_points
     static_nav_points = static_walk_forward.nav_points
+    v2_state_policy = resolve_local_rules_allocator_v2_state_policy(
+        run_config.rules_allocator_version,
+    )
 
     return {
         "local_evidence_export_policy": LOCAL_EVIDENCE_EXPORT_POLICY_V1,
@@ -188,6 +194,8 @@ def _build_metrics_payload(
         ),
         "dataset_policy": dataset.local_monthly_dataset_policy,
         "run_config_policy": run_config.local_monthly_run_config_policy,
+        "rules_allocator_version": run_config.rules_allocator_version,
+        "rules_allocator_v2_state_policy": v2_state_policy,
         "period_count": len(period_specs),
         "nav_point_count": len(nav_points),
         "benchmark_point_count": len(dataset.benchmark_points),
@@ -236,6 +244,9 @@ def _build_metrics_payload(
 def _build_manifest_payload(
     result: LocalMonthlyEvaluationDryRunResult,
 ) -> dict[str, object]:
+    v2_state_policy = resolve_local_rules_allocator_v2_state_policy(
+        result.run_config.rules_allocator_version,
+    )
     return {
         "local_evidence_export_policy": LOCAL_EVIDENCE_EXPORT_POLICY_V1,
         "output_filenames": {
@@ -251,6 +262,8 @@ def _build_manifest_payload(
             "local_monthly_run_config_policy": (
                 result.run_config.local_monthly_run_config_policy
             ),
+            "rules_allocator_version": result.run_config.rules_allocator_version,
+            "rules_allocator_v2_state_policy": v2_state_policy,
             "report_bundle_policy": result.report_bundle.report_bundle_policy,
             "benchmark_adapter_policy": (
                 result.benchmark_relative_result.benchmark_adapter_policy

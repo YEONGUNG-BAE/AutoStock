@@ -1402,3 +1402,13 @@ V2 opt-in local integration uses static normal-state target weights only:
 US 0.70 / KR 0.15 / GOLD 0.10 / cash 0.05. The relative recovery state machine
 is not implemented yet. Static neutral baseline remains separate and unchanged.
 No real evidence run or deployment conclusion exists.
+
+### Phase 2f-5 V2 Local Evidence CLI and Sanitized Attribution Patch
+
+Phase 2f-5 exposes the explicit local rules allocator version switch through
+the local dry-run CLI and adds sanitized allocator-version attribution to local
+evidence export. Default CLI behavior remains V1. Operators may opt into V2 by
+passing an explicit `--rules-allocator-version` value. Sanitized evidence
+export metrics JSON and manifest `generated_from` metadata include
+`rules_allocator_version` and `rules_allocator_v2_state_policy`. No real evidence
+run or deployment conclusion exists.
