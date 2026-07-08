@@ -33,6 +33,7 @@ from backtest_engine import (  # noqa: E402
     RollingLongMaAssetConfig,
     run_single_period_rules_rebalance_step,
 )
+from backtest_engine.rules_allocator import RULES_ALLOCATOR_V2_POLICY  # noqa: E402
 from domain import DateId, DateIdSourceRecord, FactType  # noqa: E402
 
 DECISION_TIME = datetime(2020, 4, 30, 0, 0, tzinfo=UTC)
@@ -175,6 +176,39 @@ def _records_with_execution(
     return (*_signal_records(), *extra_execution)
 
 
+def _v2_asset_configs() -> tuple[RollingLongMaAssetConfig, ...]:
+    return (
+        _config(asset_id="asset_us", symbol="SP500TR", market="US"),
+        _config(asset_id="asset_kr", symbol="KOSPI", market="KR"),
+        _config(asset_id="asset_gold", symbol="GLD", market="US"),
+    )
+
+
+def _v2_records_with_execution() -> tuple[DateIdSourceRecord, ...]:
+    records: list[DateIdSourceRecord] = []
+    suffix = 1
+    for symbol, market in (
+        ("SP500TR", "US"),
+        ("KOSPI", "KR"),
+        ("GLD", "US"),
+    ):
+        for base_record in _records_with_execution(_execution_record()):
+            payload_date = base_record.payload["date"]
+            yymmdd = payload_date[2:4] + payload_date[5:7] + payload_date[8:10]
+            records.append(
+                _record(
+                    date_id=f"{yymmdd}-{suffix}",
+                    payload_date=payload_date,
+                    source_timestamp=base_record.source_timestamp,
+                    close_adjusted=base_record.payload["close_adjusted"],
+                    symbol=symbol,
+                    market=market,
+                )
+            )
+            suffix += 1
+    return tuple(records)
+
+
 def _run_step(
     source: InMemoryDateIdSourceReader | Iterable[DateIdSourceRecord],
     *,
@@ -261,6 +295,30 @@ def test_uses_decision_time_for_signal_side_as_of_decision() -> None:
 
     assert result.decision.feature_snapshot.decision_time == DECISION_TIME
     assert result.decision.feature_snapshot.assets[0].as_of <= DECISION_TIME
+
+
+def test_v2_period_step_uses_static_normal_target_weights() -> None:
+    result = run_single_period_rules_rebalance_step(
+        _v2_records_with_execution(),
+        decision_time=DECISION_TIME,
+        intended_execution_time=INTENDED_EXECUTION_TIME,
+        rolling_asset_configs=_v2_asset_configs(),
+        portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        usdkrw_rate=USDKRW,
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+
+    assert result.decision.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert result.decision.target_weights.decision_time == DECISION_TIME
+    assert {weight.asset_id: weight.weight for weight in result.decision.target_weights.weights} == {
+        "asset_us": Decimal("0.70"),
+        "asset_kr": Decimal("0.15"),
+        "asset_gold": Decimal("0.10"),
+        "cash": Decimal("0.05"),
+    }
 
 
 def test_uses_intended_execution_time_for_execution_price_selection() -> None:

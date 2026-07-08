@@ -804,3 +804,19 @@ def test_phase_2f_3_design_freeze_update(freeze_text: str) -> None:
             "integrate V2 behind an explicit local run config switch",
         ),
     )
+
+
+def test_phase_2f_4_design_freeze_update(freeze_text: str) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-4 Explicit Local Rules Allocator Version Switch",
+            "integrates V2 behind an explicit local run config switch only",
+            "Default local monthly behavior remains V1",
+            "V2 opt-in local integration uses static normal-state target weights only",
+            "US 0.70 / KR 0.15 / GOLD 0.10 / cash 0.05",
+            "relative recovery state machine is not implemented yet",
+            "Static neutral baseline remains separate and unchanged",
+            "No real evidence run or deployment conclusion exists",
+        ),
+    )

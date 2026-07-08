@@ -30,6 +30,7 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_NAV_SANITY_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V2,
     LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1,
+    LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
     LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1,
     LocalMonthlyEvaluationDryRunResult,
@@ -50,6 +51,8 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     _is_material_nav_accounting_delta,
 )
 from backtest_engine.local_run_config import (  # noqa: E402
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
@@ -58,6 +61,7 @@ from backtest_engine.rebalance import (  # noqa: E402
     BacktestTrade,
     _canonical_total_cost_krw,
 )
+from backtest_engine.rules_allocator import RULES_ALLOCATOR_V2_POLICY  # noqa: E402
 from backtest_engine.walk_forward import (  # noqa: E402
     BacktestNavPoint,
     BacktestWalkForwardResult,
@@ -208,6 +212,19 @@ def _run_dry_run(tmp_path: Path) -> LocalMonthlyEvaluationDryRunResult:
     )
 
 
+def _run_dry_run_with_allocator_version(
+    tmp_path: Path,
+    *,
+    rules_allocator_version: str,
+) -> LocalMonthlyEvaluationDryRunResult:
+    repo_root, data_root = _prepare_default_layout(tmp_path)
+    return run_local_monthly_evaluation_dry_run(
+        repo_root=repo_root,
+        data_root=data_root,
+        rules_allocator_version=rules_allocator_version,
+    )
+
+
 def test_builds_local_monthly_evaluation_dry_run_result_from_synthetic_csvs(
     tmp_path: Path,
 ) -> None:
@@ -221,6 +238,94 @@ def test_builds_local_monthly_evaluation_dry_run_result_from_synthetic_csvs(
     assert result.walk_forward_result.steps
     assert result.benchmark_relative_result.metrics
     assert result.report_bundle.markdown_report.strip()
+
+
+def test_default_local_monthly_evaluation_uses_rules_allocator_v1(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path)
+    assert result.run_config.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V1
+    assert {
+        step.decision.allocator_version for step in result.walk_forward_result.steps
+    } == {LOCAL_RULES_ALLOCATOR_VERSION_V1}
+
+
+def test_explicit_v2_local_monthly_evaluation_uses_v2_policy(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run_with_allocator_version(
+        tmp_path,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+    first_decision = result.walk_forward_result.steps[0].decision
+
+    assert result.run_config.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2
+    assert first_decision.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert first_decision.target_weights.decision_time == first_decision.decision_time
+    assert {weight.asset_id: weight.weight for weight in first_decision.target_weights.weights} == {
+        "asset_us": Decimal("0.70"),
+        "asset_kr": Decimal("0.15"),
+        "asset_gold": Decimal("0.10"),
+        "cash": Decimal("0.05"),
+    }
+
+
+def test_v2_local_monthly_evaluation_warning_is_v2_only(tmp_path: Path) -> None:
+    warning = (
+        "local rules allocator v2 uses static normal-state integration; "
+        "relative recovery state machine is not implemented yet"
+    )
+    v1_root = tmp_path / "v1"
+    v2_root = tmp_path / "v2"
+    v1_root.mkdir()
+    v2_root.mkdir()
+    v1 = _run_dry_run_with_allocator_version(
+        v1_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    )
+    v2 = _run_dry_run_with_allocator_version(
+        v2_root,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+
+    assert warning not in v1.warnings
+    assert warning in v2.warnings
+    assert LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY == (
+        "local_monthly_rules_allocator_v2_static_normal_state.v1"
+    )
+
+
+def test_v2_local_monthly_evaluation_keeps_static_neutral_baseline_separate(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run_with_allocator_version(
+        tmp_path,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+
+    assert isinstance(result.static_neutral_baseline_result, LocalStaticNeutralBaselineResult)
+    assert {
+        step.decision.allocator_version
+        for step in result.static_neutral_baseline_result.walk_forward_result.steps
+    } == {LOCAL_RULES_ALLOCATOR_VERSION_V1}
+    assert (
+        result.static_neutral_baseline_result.benchmark_relative_result.benchmark_adapter_policy
+        == "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
+    )
+
+
+def test_v2_local_monthly_evaluation_passes_nav_sanity_on_synthetic_data(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run_with_allocator_version(
+        tmp_path,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+
+    assert any("NAV passed deterministic sanity" in warning for warning in result.warnings)
+    assert result.benchmark_relative_result.benchmark_adapter_policy == (
+        "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
+    )
 
 
 def test_calls_assemble_local_monthly_dataset(tmp_path: Path) -> None:

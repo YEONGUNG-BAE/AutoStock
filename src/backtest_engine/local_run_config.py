@@ -20,7 +20,9 @@ from backtest_engine.local_dataset import (
     LocalMonthlyDatasetAssemblyResult,
 )
 from backtest_engine.rebalance import COST_MODEL_V1, BacktestCostModel, BacktestPortfolioState
+from backtest_engine.rules_allocator import RULES_ALLOCATOR_V2_POLICY
 from backtest_engine.rolling_features import RollingLongMaAssetConfig
+from backtest_engine.step_contract import RULES_ALLOCATOR_V1
 from backtest_engine.walk_forward import BacktestPeriodSpec
 from domain._datetime import require_timezone_aware_datetime
 from domain.source import DateIdSourceRecord
@@ -28,6 +30,8 @@ from domain.source import DateIdSourceRecord
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1 = "kospi_primary_monthly_rules_config.v1"
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2 = "kospi_primary_monthly_rules_config.v2"
 LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3 = "kospi_primary_monthly_rules_config.v3"
+LOCAL_RULES_ALLOCATOR_VERSION_V1 = RULES_ALLOCATOR_V1
+LOCAL_RULES_ALLOCATOR_VERSION_V2 = RULES_ALLOCATOR_V2_POLICY
 
 _FIRST_DAY_OF_MONTH_WARNING_SUBSTRING = "first day of month"
 
@@ -66,6 +70,10 @@ class LocalMonthlyRunConfig(BaseModel):
     cash_asset_id: str
     cash_min_weight: Decimal
     rolling_lookback_count: int
+    rules_allocator_version: Literal[
+        "rules_allocator.v1",
+        "local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1",
+    ]
     warnings: tuple[str, ...]
 
     @field_validator("rolling_lookback_count", mode="before")
@@ -91,6 +99,19 @@ class LocalMonthlyRunConfig(BaseModel):
         if parsed < ZERO or parsed > ONE:
             raise ValueError("cash_min_weight must be between 0 and 1.")
         return parsed
+
+    @field_validator("rules_allocator_version", mode="before")
+    @classmethod
+    def validate_rules_allocator_version(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("rules_allocator_version must be a string.")
+        normalized = value.strip()
+        if normalized not in {
+            LOCAL_RULES_ALLOCATOR_VERSION_V1,
+            LOCAL_RULES_ALLOCATOR_VERSION_V2,
+        }:
+            raise ValueError("rules_allocator_version must be a supported local rules allocator version.")
+        return normalized
 
     @model_validator(mode="after")
     def validate_run_config(self) -> Self:
@@ -129,8 +150,11 @@ def build_kospi_primary_monthly_run_config(
     fee_bps: Decimal = Decimal("10"),
     kr_sell_tax_bps: Decimal = Decimal("23"),
     fx_spread_bps: Decimal = Decimal("15"),
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> LocalMonthlyRunConfig:
     """Build a frozen KOSPI-primary monthly run config from an assembled dataset."""
+    allocator_version = _validate_local_rules_allocator_version(rules_allocator_version)
+
     if dataset.local_monthly_dataset_policy not in (
         LOCAL_MONTHLY_DATASET_POLICY_V1,
         LOCAL_MONTHLY_DATASET_POLICY_V2,
@@ -219,8 +243,21 @@ def build_kospi_primary_monthly_run_config(
         cash_asset_id=cash_asset_id,
         cash_min_weight=cash_floor,
         rolling_lookback_count=rolling_lookback_count,
+        rules_allocator_version=allocator_version,
         warnings=warnings,
     )
+
+
+def _validate_local_rules_allocator_version(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("rules_allocator_version must be a string.")
+    normalized = value.strip()
+    if normalized not in {
+        LOCAL_RULES_ALLOCATOR_VERSION_V1,
+        LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    }:
+        raise ValueError("rules_allocator_version must be a supported local rules allocator version.")
+    return normalized
 
 
 def _validate_kospi_primary_weight_feasibility(

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import datetime
 from decimal import Decimal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -53,8 +54,20 @@ class RulesAllocatorV2TargetWeights(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    decision_time: datetime | None = None
     allocator_version: str
     weights: tuple[BacktestTargetWeight, ...]
+
+    @field_validator("decision_time", mode="before")
+    @classmethod
+    def validate_decision_time(cls, value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            raise ValueError("decision_time must be a timezone-aware datetime.")
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("decision_time must be a timezone-aware datetime.")
+        return value
 
     @field_validator("allocator_version", mode="before")
     @classmethod
@@ -102,6 +115,7 @@ def allocate_rules_v2_target_weights(
     *,
     state: RulesAllocatorV2StateInput | None = None,
     cash_asset_id: str = "cash",
+    decision_time: datetime | None = None,
 ) -> RulesAllocatorV2TargetWeights:
     """Return pure V2 target weights without integration or data access."""
 
@@ -114,6 +128,7 @@ def allocate_rules_v2_target_weights(
         else RULES_ALLOCATOR_V2_NORMAL_TARGET_WEIGHTS
     )
     return RulesAllocatorV2TargetWeights(
+        decision_time=decision_time,
         allocator_version=RULES_ALLOCATOR_V2_POLICY,
         weights=tuple(
             BacktestTargetWeight(

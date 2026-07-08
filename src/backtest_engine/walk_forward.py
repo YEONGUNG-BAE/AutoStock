@@ -22,6 +22,7 @@ from backtest_engine.period_step import (
 )
 from backtest_engine.rebalance import BacktestCostModel, BacktestPortfolioState
 from backtest_engine.rolling_features import RollingLongMaAssetConfig
+from backtest_engine.step_contract import RULES_ALLOCATOR_V1
 from domain._datetime import require_timezone_aware_datetime
 from domain.source import DateIdSourceRecord
 
@@ -211,6 +212,7 @@ def run_explicit_schedule_rules_walk_forward_nav(
     cost_model: BacktestCostModel,
     cash_asset_id: str,
     cash_min_weight: Decimal,
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> BacktestWalkForwardResult:
     """Run explicit-schedule walk-forward NAV over frozen one-period steps.
 
@@ -251,6 +253,7 @@ def run_explicit_schedule_rules_walk_forward_nav(
             usdkrw_rate=period.usdkrw_rate,
             cash_asset_id=cash_asset_id,
             cash_min_weight=cash_min_weight,
+            rules_allocator_version=rules_allocator_version,
         )
         steps.append(step)
         nav_points.append(

@@ -23,6 +23,7 @@ from backtest_engine import (  # noqa: E402
     build_single_step_rules_decision,
     make_rules_only_single_step_decision,
 )
+from backtest_engine.rules_allocator import RULES_ALLOCATOR_V2_POLICY  # noqa: E402
 from domain import DateId, DateIdSourceRecord, FactType  # noqa: E402
 
 DECISION_TIME = datetime(2020, 4, 30, 0, 0, tzinfo=UTC)
@@ -116,6 +117,7 @@ def _decision(
     asset_configs: tuple[RollingLongMaAssetConfig, ...] = (_config(),),
     decision_time: datetime = DECISION_TIME,
     intended_execution_time: datetime = INTENDED_EXECUTION_TIME,
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> BacktestSingleStepDecision:
     return make_rules_only_single_step_decision(
         source,
@@ -124,6 +126,7 @@ def _decision(
         rolling_asset_configs=asset_configs,
         cash_asset_id="cash",
         cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=rules_allocator_version,
     )
 
 
@@ -296,10 +299,10 @@ def test_artifact_rejects_allocator_version_mismatch_with_target_weights() -> No
         )
 
 
-def test_artifact_rejects_allocator_version_other_than_rules_allocator_v1() -> None:
+def test_artifact_rejects_unknown_allocator_version() -> None:
     decision = _decision(_monthly_records())
 
-    with pytest.raises(ValidationError, match="allocator_version must be rules_allocator.v1"):
+    with pytest.raises(ValidationError, match="supported rules allocator version"):
         BacktestSingleStepDecision(
             decision_time=decision.decision_time,
             intended_execution_time=decision.intended_execution_time,
@@ -309,6 +312,32 @@ def test_artifact_rejects_allocator_version_other_than_rules_allocator_v1() -> N
             feature_snapshot=decision.feature_snapshot,
             target_weights=decision.target_weights,
         )
+
+
+def test_v2_single_step_uses_static_normal_target_weights_and_period_decision_time() -> None:
+    decision = _decision(
+        (
+            *_monthly_records(symbol="SP500TR", market="US"),
+            *_monthly_records(symbol="KOSPI", market="KR"),
+            *_monthly_records(symbol="GLD", market="US"),
+        ),
+        asset_configs=(
+            _config(asset_id="asset_us", symbol="SP500TR", market="US"),
+            _config(asset_id="asset_kr", symbol="KOSPI", market="KR"),
+            _config(asset_id="asset_gold", symbol="GLD", market="US"),
+        ),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+
+    assert decision.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert decision.target_weights.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert decision.target_weights.decision_time == DECISION_TIME
+    assert {weight.asset_id: weight.weight for weight in decision.target_weights.weights} == {
+        "asset_us": Decimal("0.70"),
+        "asset_kr": Decimal("0.15"),
+        "asset_gold": Decimal("0.10"),
+        "cash": Decimal("0.05"),
+    }
 
 
 def test_no_execution_nav_or_benchmark_fields_are_produced() -> None:

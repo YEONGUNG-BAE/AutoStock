@@ -23,7 +23,13 @@ from backtest_engine.rolling_features import (
     RollingLongMaAssetConfig,
     build_snapshot_configs_with_rolling_long_ma,
 )
-from backtest_engine.rules_allocator import allocate_rules_only_v1
+from backtest_engine.rules_allocator import (
+    RULES_ALLOCATOR_V2_POLICY,
+    RulesAllocatorV2StateInput,
+    RulesAllocatorV2TargetWeights,
+    allocate_rules_only_v1,
+    allocate_rules_v2_target_weights,
+)
 from backtest_engine.snapshot_builder import (
     SnapshotAssetConfig,
     build_feature_snapshot_from_source_records,
@@ -47,7 +53,7 @@ class BacktestSingleStepDecision(BaseModel):
     observation_spacing_reports: tuple[ObservationSpacingReport, ...]
     snapshot_asset_configs: tuple[SnapshotAssetConfig, ...]
     feature_snapshot: BacktestFeatureSnapshot
-    target_weights: BacktestTargetWeights
+    target_weights: BacktestTargetWeights | RulesAllocatorV2TargetWeights
 
     @field_validator("decision_time", "intended_execution_time", mode="before")
     @classmethod
@@ -60,8 +66,10 @@ class BacktestSingleStepDecision(BaseModel):
         if not isinstance(value, str):
             raise ValueError("allocator_version must be a string.")
         normalized = value.strip()
-        if normalized != RULES_ALLOCATOR_V1:
-            raise ValueError(f"allocator_version must be {RULES_ALLOCATOR_V1}.")
+        if normalized not in {RULES_ALLOCATOR_V1, RULES_ALLOCATOR_V2_POLICY}:
+            raise ValueError(
+                "allocator_version must be a supported rules allocator version."
+            )
         return normalized
 
     @model_validator(mode="after")
@@ -102,9 +110,11 @@ def make_rules_only_single_step_decision(
     rolling_asset_configs: Iterable[RollingLongMaAssetConfig],
     cash_asset_id: str,
     cash_min_weight: Decimal,
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> BacktestSingleStepDecision:
     """Build one deterministic rules-only decision artifact for one timestamp."""
 
+    allocator_version = _validate_rules_allocator_version(rules_allocator_version)
     configs = tuple(rolling_asset_configs)
     step_source: InMemoryDateIdSourceReader | tuple[DateIdSourceRecord, ...]
     if isinstance(source, InMemoryDateIdSourceReader):
@@ -129,7 +139,14 @@ def make_rules_only_single_step_decision(
         cash_asset_id=cash_asset_id,
         cash_min_weight=cash_min_weight,
     )
-    target_weights = allocate_rules_only_v1(feature_snapshot)
+    if allocator_version == RULES_ALLOCATOR_V2_POLICY:
+        target_weights = allocate_rules_v2_target_weights(
+            state=RulesAllocatorV2StateInput(),
+            cash_asset_id=cash_asset_id,
+            decision_time=decision_time,
+        )
+    else:
+        target_weights = allocate_rules_only_v1(feature_snapshot)
 
     return BacktestSingleStepDecision(
         decision_time=decision_time,
@@ -150,6 +167,7 @@ def build_single_step_rules_decision(
     asset_configs: Iterable[RollingLongMaAssetConfig],
     cash_asset_id: str,
     cash_min_weight: Decimal,
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> BacktestSingleStepDecision:
     """Compatibility wrapper for the Phase 2c-3 public builder."""
 
@@ -160,7 +178,17 @@ def build_single_step_rules_decision(
         rolling_asset_configs=asset_configs,
         cash_asset_id=cash_asset_id,
         cash_min_weight=cash_min_weight,
+        rules_allocator_version=rules_allocator_version,
     )
+
+
+def _validate_rules_allocator_version(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("rules_allocator_version must be a string.")
+    normalized = value.strip()
+    if normalized not in {RULES_ALLOCATOR_V1, RULES_ALLOCATOR_V2_POLICY}:
+        raise ValueError("rules_allocator_version must be a supported rules allocator version.")
+    return normalized
 
 
 def _parse_timezone_aware_datetime(value: Any, *, field_name: str) -> datetime:

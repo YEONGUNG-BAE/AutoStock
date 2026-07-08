@@ -32,6 +32,7 @@ from backtest_engine import (  # noqa: E402
     run_explicit_schedule_rules_walk_forward_nav,
     run_single_period_rules_rebalance_step,
 )
+from backtest_engine.rules_allocator import RULES_ALLOCATOR_V2_POLICY  # noqa: E402
 from domain import DateId, DateIdSourceRecord, FactType  # noqa: E402
 
 INITIAL_AS_OF = datetime(2020, 4, 1, 0, 0, tzinfo=UTC)
@@ -212,6 +213,59 @@ def _run_walk_forward(
     )
 
 
+def _v2_asset_configs() -> tuple[RollingLongMaAssetConfig, ...]:
+    return (
+        _config(
+            asset_id="asset_us",
+            symbol="SP500TR",
+            market="US",
+            risk_on_weight=Decimal("0.55"),
+            risk_off_weight=Decimal("0.30"),
+        ),
+        _config(
+            asset_id="asset_kr",
+            symbol="KOSPI",
+            market="KR",
+            risk_on_weight=Decimal("0.20"),
+            risk_off_weight=Decimal("0.05"),
+            max_weight=Decimal("0.40"),
+        ),
+        _config(
+            asset_id="asset_gold",
+            symbol="GLD",
+            market="US",
+            risk_on_weight=Decimal("0.15"),
+            risk_off_weight=Decimal("0.20"),
+            max_weight=Decimal("0.35"),
+        ),
+    )
+
+
+def _v2_records() -> tuple[DateIdSourceRecord, ...]:
+    records: list[DateIdSourceRecord] = []
+    suffix = 1
+    for symbol, market in (
+        ("SP500TR", "US"),
+        ("KOSPI", "KR"),
+        ("GLD", "US"),
+    ):
+        for base_record in _two_period_records():
+            payload_date = base_record.payload["date"]
+            yymmdd = payload_date[2:4] + payload_date[5:7] + payload_date[8:10]
+            records.append(
+                _record(
+                    date_id=f"{yymmdd}-{suffix}",
+                    payload_date=payload_date,
+                    source_timestamp=base_record.source_timestamp,
+                    close_adjusted=base_record.payload["close_adjusted"],
+                    symbol=symbol,
+                    market=market,
+                )
+            )
+            suffix += 1
+    return tuple(records)
+
+
 def test_builds_walk_forward_result_from_synthetic_records() -> None:
     result = _run_walk_forward(_two_period_records())
 
@@ -290,6 +344,81 @@ def test_uses_explicit_usdkrw_rate_per_period() -> None:
 
     assert result.steps[0].rebalance_result.trades[0].usdkrw_rate == USDKRW_PERIOD_1
     assert result.steps[1].rebalance_result.trades[0].usdkrw_rate == USDKRW_PERIOD_2
+
+
+def test_v2_walk_forward_uses_static_normal_target_weights() -> None:
+    result = run_explicit_schedule_rules_walk_forward_nav(
+        _v2_records(),
+        period_specs=_period_specs()[:1],
+        rolling_asset_configs=_v2_asset_configs(),
+        initial_portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+    decision = result.steps[0].decision
+
+    assert decision.allocator_version == RULES_ALLOCATOR_V2_POLICY
+    assert decision.target_weights.decision_time == PERIOD_1_DECISION
+    assert {weight.asset_id: weight.weight for weight in decision.target_weights.weights} == {
+        "asset_us": Decimal("0.70"),
+        "asset_kr": Decimal("0.15"),
+        "asset_gold": Decimal("0.10"),
+        "cash": Decimal("0.05"),
+    }
+
+
+def test_v2_walk_forward_is_deterministic() -> None:
+    first = run_explicit_schedule_rules_walk_forward_nav(
+        _v2_records(),
+        period_specs=_period_specs()[:1],
+        rolling_asset_configs=_v2_asset_configs(),
+        initial_portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+    second = run_explicit_schedule_rules_walk_forward_nav(
+        _v2_records(),
+        period_specs=_period_specs()[:1],
+        rolling_asset_configs=_v2_asset_configs(),
+        initial_portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+
+    assert first == second
+
+
+def test_v1_and_v2_walk_forward_target_weights_differ_when_switch_is_effective() -> None:
+    v1 = run_explicit_schedule_rules_walk_forward_nav(
+        _v2_records(),
+        period_specs=_period_specs()[:1],
+        rolling_asset_configs=_v2_asset_configs(),
+        initial_portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+    )
+    v2 = run_explicit_schedule_rules_walk_forward_nav(
+        _v2_records(),
+        period_specs=_period_specs()[:1],
+        rolling_asset_configs=_v2_asset_configs(),
+        initial_portfolio_state=_portfolio(),
+        cost_model=_cost_model(),
+        cash_asset_id="cash",
+        cash_min_weight=Decimal("0.05"),
+        rules_allocator_version=RULES_ALLOCATOR_V2_POLICY,
+    )
+
+    assert v1.steps[0].decision.allocator_version != v2.steps[0].decision.allocator_version
+    assert v1.steps[0].decision.target_weights.weights != (
+        v2.steps[0].decision.target_weights.weights
+    )
 
 
 def test_changing_period_usdkrw_changes_trade_quantities() -> None:

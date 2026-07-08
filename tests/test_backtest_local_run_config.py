@@ -25,6 +25,8 @@ from backtest_engine.local_run_config import (  # noqa: E402
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V1,
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V2,
     LOCAL_MONTHLY_RUN_CONFIG_POLICY_V3,
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
@@ -843,6 +845,72 @@ def test_max_possible_non_cash_total_is_095(tmp_path: Path) -> None:
     )
     assert max_non_cash_total == Decimal("0.95")
     assert max_non_cash_total + result.cash_min_weight == Decimal("1.00")
+
+
+def test_local_monthly_run_config_has_rules_allocator_version(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset)
+    assert result.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V1
+
+
+def test_default_rules_allocator_version_is_v1(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(dataset=dataset)
+    assert result.rules_allocator_version == "rules_allocator.v1"
+
+
+def test_explicit_rules_allocator_v1_is_accepted(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    )
+    assert result.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V1
+
+
+def test_explicit_rules_allocator_v2_is_accepted(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    result = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+    assert result.rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2
+
+
+@pytest.mark.parametrize("version", ("unknown_allocator.v1", ""))
+def test_unknown_or_empty_rules_allocator_version_is_rejected(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    with pytest.raises(ValueError, match="rules_allocator_version"):
+        build_kospi_primary_monthly_run_config(
+            dataset=dataset,
+            rules_allocator_version=version,
+        )
+
+
+def test_only_allocator_version_changes_between_v1_and_v2_configs(tmp_path: Path) -> None:
+    dataset = _assemble_kospi_primary_dataset(tmp_path)
+    v1 = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    )
+    v2 = build_kospi_primary_monthly_run_config(
+        dataset=dataset,
+        rules_allocator_version=LOCAL_RULES_ALLOCATOR_VERSION_V2,
+    )
+
+    assert v1.rules_allocator_version != v2.rules_allocator_version
+    assert v1.dataset == v2.dataset
+    assert v1.period_specs == v2.period_specs
+    assert v1.rolling_asset_configs == v2.rolling_asset_configs
+    assert v1.cost_model == v2.cost_model
+    assert v1.initial_portfolio_state == v2.initial_portfolio_state
+    assert v1.cash_asset_id == v2.cash_asset_id
+    assert v1.cash_min_weight == v2.cash_min_weight
+    assert v1.rolling_lookback_count == v2.rolling_lookback_count
+    assert v1.warnings == v2.warnings
 
 
 _DECISION_TIME = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)

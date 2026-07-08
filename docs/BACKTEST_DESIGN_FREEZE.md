@@ -1392,3 +1392,13 @@ V2 is not connected to local evaluation yet. V2 is not selectable in local run
 config yet. V1 remains unchanged. No evidence run or deployment conclusion
 exists. The next phase must integrate V2 behind an explicit local run config
 switch.
+
+### Phase 2f-4 Explicit Local Rules Allocator Version Switch
+
+Phase 2f-4 integrates V2 behind an explicit local run config switch only.
+Default local monthly behavior remains V1.
+
+V2 opt-in local integration uses static normal-state target weights only:
+US 0.70 / KR 0.15 / GOLD 0.10 / cash 0.05. The relative recovery state machine
+is not implemented yet. Static neutral baseline remains separate and unchanged.
+No real evidence run or deployment conclusion exists.

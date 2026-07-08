@@ -36,6 +36,7 @@ from backtest_engine.single_step import (
     BacktestSingleStepDecision,
     make_rules_only_single_step_decision,
 )
+from backtest_engine.step_contract import RULES_ALLOCATOR_V1
 from domain._datetime import require_timezone_aware_datetime
 from domain.source import DateIdSourceRecord
 
@@ -113,6 +114,7 @@ def run_single_period_rules_rebalance_step(
     usdkrw_rate: Decimal,
     cash_asset_id: str,
     cash_min_weight: Decimal,
+    rules_allocator_version: str = RULES_ALLOCATOR_V1,
 ) -> BacktestSinglePeriodStepResult:
     """Compose one rules-only rebalance period from source records.
 
@@ -135,6 +137,7 @@ def run_single_period_rules_rebalance_step(
         rolling_asset_configs=rolling_asset_configs,
         cash_asset_id=cash_asset_id,
         cash_min_weight=cash_min_weight,
+        rules_allocator_version=rules_allocator_version,
     )
     execution_prices = select_execution_prices_for_single_step_decision(
         step_source,

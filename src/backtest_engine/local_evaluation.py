@@ -32,6 +32,8 @@ from backtest_engine.local_dataset import (
     default_local_monthly_instrument_specs_for_kospi_primary,
 )
 from backtest_engine.local_run_config import (
+    LOCAL_RULES_ALLOCATOR_VERSION_V1,
+    LOCAL_RULES_ALLOCATOR_VERSION_V2,
     LocalMonthlyRunConfig,
     build_kospi_primary_monthly_run_config,
 )
@@ -134,6 +136,13 @@ _STATIC_NEUTRAL_FIXED_WEIGHTS_WARNING = (
 _STATIC_NEUTRAL_RESEARCH_ONLY_WARNING = (
     "local static neutral baseline result is research evidence only; "
     "it is not an investment conclusion"
+)
+LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY = (
+    "local_monthly_rules_allocator_v2_static_normal_state.v1"
+)
+_RULES_ALLOCATOR_V2_STATIC_NORMAL_WARNING = (
+    "local rules allocator v2 uses static normal-state integration; "
+    "relative recovery state machine is not implemented yet"
 )
 
 LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1: tuple[tuple[str, Decimal], ...] = (
@@ -1589,6 +1598,7 @@ def run_local_monthly_evaluation_dry_run(
     fee_bps: Decimal = Decimal("10"),
     kr_sell_tax_bps: Decimal = Decimal("23"),
     fx_spread_bps: Decimal = Decimal("15"),
+    rules_allocator_version: str = LOCAL_RULES_ALLOCATOR_VERSION_V1,
 ) -> LocalMonthlyEvaluationDryRunResult:
     """Run an in-memory local monthly real-data evaluation dry-run."""
     resolved_repo_root = repo_root.resolve()
@@ -1620,6 +1630,7 @@ def run_local_monthly_evaluation_dry_run(
         fee_bps=fee_bps,
         kr_sell_tax_bps=kr_sell_tax_bps,
         fx_spread_bps=fx_spread_bps,
+        rules_allocator_version=rules_allocator_version,
     )
 
     walk_forward_result = run_explicit_schedule_rules_walk_forward_nav(
@@ -1630,6 +1641,7 @@ def run_local_monthly_evaluation_dry_run(
         cost_model=run_config.cost_model,
         cash_asset_id=run_config.cash_asset_id,
         cash_min_weight=run_config.cash_min_weight,
+        rules_allocator_version=run_config.rules_allocator_version,
     )
 
     nav_sanity_warnings = validate_local_monthly_walk_forward_nav_sanity(
@@ -1664,6 +1676,7 @@ def run_local_monthly_evaluation_dry_run(
         run_config_warnings=run_config.warnings,
         nav_sanity_warnings=nav_sanity_warnings,
         static_neutral_baseline_warnings=static_neutral_baseline_result.warnings,
+        rules_allocator_version=run_config.rules_allocator_version,
     )
 
     return LocalMonthlyEvaluationDryRunResult(
@@ -1686,11 +1699,14 @@ def _collect_warnings(
     run_config_warnings: tuple[str, ...],
     nav_sanity_warnings: tuple[str, ...],
     static_neutral_baseline_warnings: tuple[str, ...],
+    rules_allocator_version: str = LOCAL_RULES_ALLOCATOR_VERSION_V1,
 ) -> tuple[str, ...]:
     combined = list(dataset_warnings)
     combined.extend(run_config_warnings)
     combined.extend(nav_sanity_warnings)
     combined.extend(static_neutral_baseline_warnings)
+    if rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2:
+        combined.append(_RULES_ALLOCATOR_V2_STATIC_NORMAL_WARNING)
     combined.append(_RESEARCH_ONLY_WARNING)
     combined.append(_KOSPI_PROXY_WARNING)
     combined.append(_BENCHMARK_CALENDAR_ALIGNMENT_WARNING)
