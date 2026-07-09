@@ -1574,3 +1574,83 @@ Safety:
 - no investment recommendation
 - no buy/sell recommendation
 - no runtime allocation change during evidence collection
+
+### Phase 2f-10 Forward Paper Evidence Contract Freeze
+
+Phase 2f-10 freezes the forward paper evidence contract selected by Phase 2f-9
+Path B - Forward paper protocol.
+
+The repaired full local history has already been used for V1 failure analysis,
+V2 design, V2 gate review, and post-V2 path selection. Therefore the next clean
+validation route, if research continues, is prospective forward paper evidence
+collected after design choices are frozen.
+
+Candidate identity:
+
+- candidate_allocator_version:
+  `local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1`
+- candidate_state_policy:
+  `local_monthly_rules_allocator_v2_static_normal_state.v1`
+- candidate_classification: V2 static-normal forward paper candidate
+
+Comparator set:
+
+- primary benchmark: S&P 500 TR KRW-unhedged benchmark
+- secondary comparator: implemented US60 static neutral baseline,
+  `local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1`
+- secondary comparator: product-relative v1 neutral static baseline,
+  `static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1`
+- prior failed baseline: V1 rules frozen failed local evidence candidate
+
+Observation window:
+
+- prospective forward observation window: 2026-08 through 2027-07 inclusive
+- minimum completed monthly observations: 12
+- no final pass/fail gate may be declared before the full 12 monthly
+  observations are complete
+- if repository data availability mechanics cannot safely support that exact
+  window, the forward window starts with the first fully prospective monthly
+  decision/evaluation cycle after this contract is committed and still requires
+  12 completed monthly observations
+- do not shorten the window after seeing evidence
+
+Primary forward gate:
+
+- candidate net terminal wealth must exceed S&P 500 TR KRW-unhedged terminal
+  wealth over the predeclared forward observation window
+
+Secondary gates:
+
+- must beat implemented US60 static neutral comparator
+- must beat product-relative v1 neutral static comparator
+- must improve over V1 rules reference
+- must pass dataset sanity checks
+- must pass NAV sanity checks
+- must pass frequency-aware benchmark alignment checks
+- static comparator outputs must remain separate
+
+Failure conditions:
+
+- failure to beat S&P primary benchmark means no project-level success
+- lower drawdown alone is not success
+- beating V1 alone is not success
+- beating product-relative v1 neutral alone is not success
+- beating US60 static alone is not success
+- incomplete observation window is pending, not pass
+
+Anti-overfit rules:
+
+- no V3/V4 same-history retuning during the forward window
+- no candidate allocator changes during the forward window
+- no target metric changes during the forward window
+- no comparator changes during the forward window
+- no observation window shortening after seeing results
+- all failed or incomplete evidence must remain recorded
+
+Safety boundary:
+
+- no deployment approval from this contract
+- no investment recommendation from this contract
+- no buy/sell recommendation from this contract
+- no runtime allocation change from this contract
+- no live trading authorization from this contract
