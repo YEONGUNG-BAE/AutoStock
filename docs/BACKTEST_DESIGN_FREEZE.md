@@ -1654,3 +1654,122 @@ Safety boundary:
 - no buy/sell recommendation from this contract
 - no runtime allocation change from this contract
 - no live trading authorization from this contract
+
+### Phase 2f-11 Forward Paper Monthly Evidence Template Freeze
+
+Phase 2f-10 froze the forward paper evidence contract. Phase 2f-11 freezes the
+monthly evidence reporting format before any forward evidence is collected.
+
+The template is for sanitized monthly reporting only. A monthly report is
+PENDING until the full 12-month observation window is complete. No monthly
+report can create deployment approval, investment recommendation, buy/sell
+recommendation, or runtime allocation change.
+
+Required monthly report fields:
+
+- report_month
+- observation_index
+- observation_window
+- candidate_allocator_version
+- candidate_state_policy
+- primary_benchmark
+- secondary_comparators
+- candidate_monthly_return
+- primary_benchmark_monthly_return
+- implemented_us60_static_monthly_return
+- product_relative_v1_neutral_monthly_return
+- candidate_cumulative_return_to_date
+- primary_benchmark_cumulative_return_to_date
+- implemented_us60_static_cumulative_return_to_date
+- product_relative_v1_neutral_cumulative_return_to_date
+- candidate_minus_primary_benchmark_to_date
+- candidate_minus_us60_static_to_date
+- candidate_minus_product_relative_v1_to_date
+- nav_sanity_status
+- dataset_sanity_status
+- frequency_alignment_status
+- static_comparator_separation_status
+- evidence_status
+- caveats
+
+Allowed evidence_status values:
+
+- PENDING_MONTHLY_OBSERVATION
+- PENDING_FULL_WINDOW
+- BLOCKED_DATA_QUALITY
+- BLOCKED_NAV_SANITY
+- BLOCKED_FREQUENCY_ALIGNMENT
+- COMPLETE_FULL_WINDOW_READY_FOR_GATE_REVIEW
+
+Monthly interpretation rules:
+
+- A single month cannot be PASS.
+- A partial window cannot be PASS.
+- A partial window can only be PENDING or BLOCKED.
+- Outperformance before 12 completed observations is provisional only.
+- Underperformance before 12 completed observations is recorded but does not
+  become final failure unless a predeclared blocker is triggered.
+- Final pass/fail review requires all 12 monthly observations.
+- Failure to beat the S&P primary benchmark over the full window means no
+  project-level success.
+- Lower drawdown alone is not success.
+
+Sanitization rules:
+
+- do not paste raw CSV rows
+- do not paste source records
+- do not paste source names
+- do not paste raw FX values
+- do not paste secrets
+- do not paste config/config.toml
+- do not paste full raw evidence artifacts
+- report only sanitized metrics and statuses
+
+Operator report skeleton:
+
+```text
+Phase 2f-forward monthly report
+
+Report identity:
+- report_month:
+- observation_index:
+- observation_window:
+- evidence_status:
+
+Candidate:
+- candidate_allocator_version:
+- candidate_state_policy:
+
+Comparators:
+- primary_benchmark:
+- implemented_us60_static_policy:
+- product_relative_v1_neutral_policy:
+
+Sanitized monthly metrics:
+- candidate_monthly_return:
+- primary_benchmark_monthly_return:
+- implemented_us60_static_monthly_return:
+- product_relative_v1_neutral_monthly_return:
+
+Sanitized cumulative metrics to date:
+- candidate_cumulative_return_to_date:
+- primary_benchmark_cumulative_return_to_date:
+- implemented_us60_static_cumulative_return_to_date:
+- product_relative_v1_neutral_cumulative_return_to_date:
+- candidate_minus_primary_benchmark_to_date:
+- candidate_minus_us60_static_to_date:
+- candidate_minus_product_relative_v1_to_date:
+
+Sanity statuses:
+- nav_sanity_status:
+- dataset_sanity_status:
+- frequency_alignment_status:
+- static_comparator_separation_status:
+
+Caveats:
+- monthly evidence is pending until 12 observations complete
+- no deployment approval
+- no investment recommendation
+- no buy/sell recommendation
+- no runtime allocation change
+```
