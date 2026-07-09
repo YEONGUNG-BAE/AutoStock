@@ -29,6 +29,7 @@ from backtest_engine.local_evidence_export import (  # noqa: E402
 )
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1,
     LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LocalMonthlyEvaluationDryRunResult,
     run_local_monthly_evaluation_dry_run,
@@ -553,6 +554,28 @@ def test_summary_includes_max_relative_drawdown(tmp_path: Path) -> None:
     assert f"max_relative_drawdown: {metrics.relative_drawdown_percent}" in summary
 
 
+def test_summary_includes_product_relative_v1_neutral_baseline_fields(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path)
+    product_relative_result = result.product_relative_v1_neutral_baseline_result
+    product_relative_metrics = product_relative_result.benchmark_relative_result.metrics
+    product_relative_walk = product_relative_result.walk_forward_result
+    summary = render_local_dry_run_summary(result)
+    assert (
+        "product_relative_v1_neutral_baseline_policy: "
+        f"{LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1}"
+    ) in summary
+    assert (
+        "product_relative_v1_final_portfolio_value_krw: "
+        f"{product_relative_walk.nav_points[-1].portfolio_value_krw}"
+    ) in summary
+    assert (
+        "product_relative_v1_terminal_strategy_return: "
+        f"{product_relative_metrics.bot_total_return_percent}"
+    ) in summary
+
+
 def test_summary_includes_research_only_warning(tmp_path: Path) -> None:
     result = _run_dry_run(tmp_path)
     summary = render_local_dry_run_summary(result)
@@ -862,7 +885,15 @@ def test_focused_regression_suite_passes() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root / "src")
     completed = subprocess.run(
-        ["uv", "run", "pytest", *FOCUSED_TEST_FILES, "-q", "-k", "not focused_regression"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *FOCUSED_TEST_FILES,
+            "-q",
+            "-k",
+            "not focused_regression",
+        ],
         cwd=repo_root,
         env=env,
         capture_output=True,

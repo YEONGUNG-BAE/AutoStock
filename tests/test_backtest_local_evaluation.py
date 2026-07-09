@@ -30,6 +30,8 @@ from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_NAV_SANITY_POLICY_V1,
     LOCAL_NAV_SANITY_POLICY_V2,
     LOCAL_NAV_VALUATION_COMPONENT_DIAGNOSTIC_POLICY_V1,
+    LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1,
+    LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_WEIGHTS_V1,
     LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
     LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1,
@@ -408,7 +410,7 @@ def test_calls_compute_walk_forward_benchmark_relative_metrics(
             repo_root=repo_root,
             data_root=data_root,
         )
-    assert mocked.call_count == 2
+    assert mocked.call_count == 3
 
 
 def test_run_local_monthly_evaluation_dry_run_calls_alignment_helper_before_adapter(
@@ -431,7 +433,7 @@ def test_run_local_monthly_evaluation_dry_run_calls_alignment_helper_before_adap
                 data_root=data_root,
             )
     align_mock.assert_called_once()
-    assert adapter_mock.call_count == 2
+    assert adapter_mock.call_count == 3
     expected_aligned = align_local_monthly_benchmark_points_to_nav_calendar(
         **align_mock.call_args.kwargs
     )
@@ -1139,6 +1141,10 @@ def test_result_model_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None
             benchmark_relative_result=result.benchmark_relative_result,
             report_bundle=result.report_bundle,
             warnings=result.warnings,
+            static_neutral_baseline_result=result.static_neutral_baseline_result,
+            product_relative_v1_neutral_baseline_result=(
+                result.product_relative_v1_neutral_baseline_result
+            ),
             artifact_path="/tmp/forbidden",  # type: ignore[call-arg]
         )
 
@@ -3214,6 +3220,23 @@ def test_local_static_neutral_baseline_weights_are_frozen_and_sum_to_one() -> No
     assert sum(weights.values(), Decimal("0")) == Decimal("1.00")
 
 
+def test_product_relative_v1_neutral_baseline_policy_exists() -> None:
+    assert LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1 == (
+        "static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1"
+    )
+
+
+def test_product_relative_v1_neutral_baseline_weights_are_frozen_and_sum_to_one() -> None:
+    weights = dict(LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_WEIGHTS_V1)
+    assert weights == {
+        "cash": Decimal("0.20"),
+        "asset_kr": Decimal("0.40"),
+        "asset_us": Decimal("0.24"),
+        "asset_gold": Decimal("0.16"),
+    }
+    assert sum(weights.values(), Decimal("0")) == Decimal("1.00")
+
+
 def test_local_static_neutral_cash_weight_equals_local_cash_min_weight(
     tmp_path: Path,
 ) -> None:
@@ -3236,6 +3259,19 @@ def test_local_static_neutral_target_weights_do_not_change_with_signals(
 ) -> None:
     result = _run_dry_run(tmp_path).static_neutral_baseline_result
     expected = tuple(LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1)
+    for step in result.walk_forward_result.steps:
+        observed = tuple(
+            (weight.asset_id, weight.weight)
+            for weight in step.decision.target_weights.weights
+        )
+        assert observed == expected
+
+
+def test_product_relative_v1_neutral_target_weights_do_not_change_with_signals(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path).product_relative_v1_neutral_baseline_result
+    expected = tuple(LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_WEIGHTS_V1)
     for step in result.walk_forward_result.steps:
         observed = tuple(
             (weight.asset_id, weight.weight)
@@ -3273,6 +3309,17 @@ def test_local_static_neutral_uses_same_period_specs_and_cost_model(
         assert step.rebalance_result.cost_model_version == (
             result.run_config.cost_model.cost_model_version
         )
+    product_relative_walk = (
+        result.product_relative_v1_neutral_baseline_result.walk_forward_result
+    )
+    assert product_relative_walk.period_specs == result.run_config.period_specs
+    assert product_relative_walk.initial_portfolio_state == (
+        result.run_config.initial_portfolio_state
+    )
+    for step in product_relative_walk.steps:
+        assert step.rebalance_result.cost_model_version == (
+            result.run_config.cost_model.cost_model_version
+        )
 
 
 def test_local_static_neutral_produces_one_nav_point_per_period_spec(
@@ -3282,6 +3329,11 @@ def test_local_static_neutral_produces_one_nav_point_per_period_spec(
     static_walk = result.static_neutral_baseline_result.walk_forward_result
     assert len(static_walk.nav_points) == len(result.run_config.period_specs)
     assert len(static_walk.steps) == len(result.run_config.period_specs)
+    product_relative_walk = (
+        result.product_relative_v1_neutral_baseline_result.walk_forward_result
+    )
+    assert len(product_relative_walk.nav_points) == len(result.run_config.period_specs)
+    assert len(product_relative_walk.steps) == len(result.run_config.period_specs)
 
 
 def test_local_static_neutral_nav_sanity_is_called(tmp_path: Path) -> None:
@@ -3294,7 +3346,7 @@ def test_local_static_neutral_nav_sanity_is_called(tmp_path: Path) -> None:
             repo_root=repo_root,
             data_root=data_root,
         )
-    assert mocked.call_count == 2
+    assert mocked.call_count == 3
 
 
 def test_local_static_neutral_benchmark_metrics_use_periods_per_year_12(
@@ -3312,12 +3364,22 @@ def test_local_static_neutral_benchmark_metrics_use_periods_per_year_12(
             repo_root=repo_root,
             data_root=data_root,
         )
-    assert mocked.call_count == 2
+    assert mocked.call_count == 3
     assert all(call.kwargs["periods_per_year"] == Decimal("12") for call in mocked.mock_calls)
 
 
 def test_local_static_neutral_benchmark_adapter_policy_is_v2(tmp_path: Path) -> None:
     result = _run_dry_run(tmp_path).static_neutral_baseline_result
+    assert (
+        result.benchmark_relative_result.benchmark_adapter_policy
+        == "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
+    )
+
+
+def test_product_relative_v1_neutral_benchmark_adapter_policy_is_v2(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path).product_relative_v1_neutral_baseline_result
     assert (
         result.benchmark_relative_result.benchmark_adapter_policy
         == "walk_forward_nav_to_benchmark_relative_metrics.frequency_aware.v2"
@@ -3330,6 +3392,15 @@ def test_local_static_neutral_warnings_include_required_statements(
     result = _run_dry_run(tmp_path).static_neutral_baseline_result
     assert any("non-tactical and not optimized" in warning for warning in result.warnings)
     assert any("fixed weights: US 0.60, KR 0.20" in warning for warning in result.warnings)
+    assert any("research evidence only" in warning for warning in result.warnings)
+
+
+def test_product_relative_v1_neutral_warnings_include_required_statements(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path).product_relative_v1_neutral_baseline_result
+    assert any("non-tactical and not optimized" in warning for warning in result.warnings)
+    assert any("CASH 0.20, KR 0.40, US 0.24, GOLD 0.16" in warning for warning in result.warnings)
     assert any("research evidence only" in warning for warning in result.warnings)
 
 
@@ -3401,6 +3472,20 @@ def test_local_dry_run_result_includes_static_neutral_baseline(tmp_path: Path) -
     )
 
 
+def test_local_dry_run_result_includes_product_relative_v1_neutral_baseline(
+    tmp_path: Path,
+) -> None:
+    result = _run_dry_run(tmp_path)
+    assert isinstance(
+        result.product_relative_v1_neutral_baseline_result,
+        LocalStaticNeutralBaselineResult,
+    )
+    assert (
+        result.product_relative_v1_neutral_baseline_result.local_static_neutral_baseline_policy
+        == LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1
+    )
+
+
 def test_local_dry_run_report_bundle_remains_rules_benchmark_result(
     tmp_path: Path,
 ) -> None:
@@ -3411,6 +3496,9 @@ def test_local_dry_run_report_bundle_remains_rules_benchmark_result(
     assert result.report_bundle.benchmark_relative_result != (
         result.static_neutral_baseline_result.benchmark_relative_result
     )
+    assert result.report_bundle.benchmark_relative_result != (
+        result.product_relative_v1_neutral_baseline_result.benchmark_relative_result
+    )
 
 
 def test_local_dry_run_warnings_include_static_baseline_warnings(
@@ -3419,6 +3507,8 @@ def test_local_dry_run_warnings_include_static_baseline_warnings(
     result = _run_dry_run(tmp_path)
     for warning in result.static_neutral_baseline_result.warnings:
         assert warning in result.warnings
+    for warning in result.product_relative_v1_neutral_baseline_result.warnings:
+        assert warning in result.warnings
 
 
 def test_focused_regression_suite_passes() -> None:
@@ -3426,7 +3516,15 @@ def test_focused_regression_suite_passes() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root / "src")
     completed = subprocess.run(
-        ["uv", "run", "pytest", *FOCUSED_TEST_FILES, "-q"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *FOCUSED_TEST_FILES,
+            "-q",
+            "-k",
+            "not focused_regression",
+        ],
         cwd=repo_root,
         env=env,
         capture_output=True,

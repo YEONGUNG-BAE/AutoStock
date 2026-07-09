@@ -21,6 +21,7 @@ from backtest_engine.local_dataset import (  # noqa: E402
 from backtest_engine.local_dry_run_cli import render_local_dry_run_summary  # noqa: E402
 from backtest_engine.local_evaluation import (  # noqa: E402
     LOCAL_MONTHLY_EVALUATION_DRY_RUN_POLICY_V1,
+    LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1,
     LOCAL_RULES_ALLOCATOR_V2_STATIC_NORMAL_STATE_POLICY,
     LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
     run_local_monthly_evaluation_dry_run,
@@ -381,6 +382,47 @@ def test_metrics_json_contains_required_fields(tmp_path: Path) -> None:
     assert metrics["rules_minus_static_excess_return"] == str(
         metrics_obj.excess_return_percent - static_metrics.excess_return_percent
     )
+    product_relative_result = result.product_relative_v1_neutral_baseline_result
+    product_relative_metrics = product_relative_result.benchmark_relative_result.metrics
+    product_relative_walk = product_relative_result.walk_forward_result
+    assert (
+        metrics["product_relative_v1_neutral_baseline_policy"]
+        == LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1
+    )
+    assert metrics["product_relative_v1_terminal_strategy_return"] == str(
+        product_relative_metrics.bot_total_return_percent
+    )
+    assert metrics["product_relative_v1_terminal_benchmark_return"] == str(
+        product_relative_metrics.benchmark_total_return_percent
+    )
+    assert metrics["product_relative_v1_terminal_excess_return"] == str(
+        product_relative_metrics.excess_return_percent
+    )
+    assert metrics["product_relative_v1_max_relative_drawdown"] == str(
+        product_relative_metrics.relative_drawdown_percent
+    )
+    assert metrics["product_relative_v1_final_portfolio_value_krw"] == str(
+        product_relative_walk.nav_points[-1].portfolio_value_krw
+    )
+    assert metrics["product_relative_v1_total_cost_krw"] == str(
+        product_relative_walk.total_cost_krw
+    )
+    assert metrics["rules_minus_product_relative_v1_terminal_return"] == str(
+        metrics_obj.bot_total_return_percent
+        - product_relative_metrics.bot_total_return_percent
+    )
+    assert metrics["rules_minus_product_relative_v1_excess_return"] == str(
+        metrics_obj.excess_return_percent
+        - product_relative_metrics.excess_return_percent
+    )
+    assert metrics["static_minus_product_relative_v1_terminal_return"] == str(
+        static_metrics.bot_total_return_percent
+        - product_relative_metrics.bot_total_return_percent
+    )
+    assert metrics["static_minus_product_relative_v1_excess_return"] == str(
+        static_metrics.excess_return_percent
+        - product_relative_metrics.excess_return_percent
+    )
     assert metrics["warnings"] == list(result.warnings)
 
 
@@ -527,6 +569,14 @@ def test_manifest_json_contains_export_policy_and_generated_from_policies(
     assert (
         generated_from["static_benchmark_adapter_policy"]
         == result.static_neutral_baseline_result.benchmark_relative_result.benchmark_adapter_policy
+    )
+    assert (
+        generated_from["product_relative_v1_neutral_baseline_policy"]
+        == result.product_relative_v1_neutral_baseline_result.local_static_neutral_baseline_policy
+    )
+    assert (
+        generated_from["product_relative_v1_benchmark_adapter_policy"]
+        == result.product_relative_v1_neutral_baseline_result.benchmark_relative_result.benchmark_adapter_policy
     )
     assert manifest["statement"] == "research evidence only; not an investment conclusion"
 

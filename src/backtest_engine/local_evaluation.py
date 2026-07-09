@@ -78,6 +78,9 @@ LOCAL_BENCHMARK_METRIC_FREQUENCY_POLICY_V1 = (
 LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1 = (
     "local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1"
 )
+LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1 = (
+    "static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1"
+)
 LOCAL_NAV_SANITY_POLICY_V1 = "local_monthly_walk_forward_nav_sanity.v1"
 LOCAL_NAV_SANITY_POLICY_V2 = "local_monthly_walk_forward_nav_sanity.v2"
 LOCAL_NAV_SANITY_DIAGNOSTIC_POLICY_V1 = (
@@ -133,6 +136,10 @@ _STATIC_NEUTRAL_FIXED_WEIGHTS_WARNING = (
     "local static neutral baseline uses fixed weights: US 0.60, KR 0.20, "
     "GOLD 0.15, CASH 0.05"
 )
+_PRODUCT_RELATIVE_V1_NEUTRAL_FIXED_WEIGHTS_WARNING = (
+    "product-relative v1 neutral baseline uses fixed weights: CASH 0.20, "
+    "KR 0.40, US 0.24, GOLD 0.16"
+)
 _STATIC_NEUTRAL_RESEARCH_ONLY_WARNING = (
     "local static neutral baseline result is research evidence only; "
     "it is not an investment conclusion"
@@ -165,6 +172,14 @@ LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1: tuple[tuple[str, Decimal], ...] = (
     ("asset_kr", Decimal("0.20")),
     ("asset_gold", Decimal("0.15")),
     ("cash", Decimal("0.05")),
+)
+LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_WEIGHTS_V1: tuple[
+    tuple[str, Decimal], ...
+] = (
+    ("asset_us", Decimal("0.24")),
+    ("asset_kr", Decimal("0.40")),
+    ("asset_gold", Decimal("0.16")),
+    ("cash", Decimal("0.20")),
 )
 _STATIC_NEUTRAL_CASH_WEIGHT = Decimal("0.05")
 
@@ -289,7 +304,8 @@ class LocalStaticNeutralBaselineResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     local_static_neutral_baseline_policy: Literal[
-        "local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1"
+        "local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1",
+        "static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1",
     ]
     walk_forward_result: BacktestWalkForwardResult
     benchmark_relative_result: BacktestBenchmarkRelativeResult
@@ -309,6 +325,7 @@ class LocalMonthlyEvaluationDryRunResult(BaseModel):
     walk_forward_result: BacktestWalkForwardResult
     benchmark_relative_result: BacktestBenchmarkRelativeResult
     static_neutral_baseline_result: LocalStaticNeutralBaselineResult
+    product_relative_v1_neutral_baseline_result: LocalStaticNeutralBaselineResult
     report_bundle: BacktestEvaluationReportBundle
     warnings: tuple[str, ...]
 
@@ -332,14 +349,22 @@ class LocalMonthlyEvaluationDryRunResult(BaseModel):
                 "report_bundle.benchmark_relative_result must equal "
                 "benchmark_relative_result."
             )
-        if (
-            self.static_neutral_baseline_result.benchmark_relative_result.walk_forward_result
-            != self.static_neutral_baseline_result.walk_forward_result
-        ):
-            raise ValueError(
-                "static baseline benchmark_relative_result.walk_forward_result "
-                "must equal static baseline walk_forward_result."
-            )
+        static_results = (
+            ("static baseline", self.static_neutral_baseline_result),
+            (
+                "product-relative v1 neutral baseline",
+                self.product_relative_v1_neutral_baseline_result,
+            ),
+        )
+        for label, static_result in static_results:
+            if (
+                static_result.benchmark_relative_result.walk_forward_result
+                != static_result.walk_forward_result
+            ):
+                raise ValueError(
+                    f"{label} benchmark_relative_result.walk_forward_result "
+                    f"must equal {label} walk_forward_result."
+                )
         if len(self.walk_forward_result.steps) != len(self.run_config.period_specs):
             raise ValueError(
                 "walk_forward_result.steps length must equal "
@@ -360,27 +385,28 @@ class LocalMonthlyEvaluationDryRunResult(BaseModel):
                 "walk_forward_result.initial_portfolio_state must equal "
                 "run_config.initial_portfolio_state."
             )
-        if len(self.static_neutral_baseline_result.walk_forward_result.steps) != len(
-            self.run_config.period_specs
-        ):
-            raise ValueError(
-                "static baseline steps length must equal run_config.period_specs length."
-            )
-        if len(
-            self.static_neutral_baseline_result.walk_forward_result.nav_points
-        ) != len(self.run_config.period_specs):
-            raise ValueError(
-                "static baseline nav_points length must equal "
-                "run_config.period_specs length."
-            )
-        if (
-            self.static_neutral_baseline_result.walk_forward_result.initial_portfolio_state
-            != self.run_config.initial_portfolio_state
-        ):
-            raise ValueError(
-                "static baseline initial_portfolio_state must equal "
-                "run_config.initial_portfolio_state."
-            )
+        for label, static_result in static_results:
+            if len(static_result.walk_forward_result.steps) != len(
+                self.run_config.period_specs
+            ):
+                raise ValueError(
+                    f"{label} steps length must equal run_config.period_specs length."
+                )
+            if len(static_result.walk_forward_result.nav_points) != len(
+                self.run_config.period_specs
+            ):
+                raise ValueError(
+                    f"{label} nav_points length must equal "
+                    "run_config.period_specs length."
+                )
+            if (
+                static_result.walk_forward_result.initial_portfolio_state
+                != self.run_config.initial_portfolio_state
+            ):
+                raise ValueError(
+                    f"{label} initial_portfolio_state must equal "
+                    "run_config.initial_portfolio_state."
+                )
         return self
 
 
@@ -1385,6 +1411,10 @@ def run_local_static_neutral_baseline(
     dataset: LocalMonthlyDatasetAssemblyResult,
     run_config: LocalMonthlyRunConfig,
     aligned_benchmark_points: tuple[BenchmarkReturnPoint, ...],
+    baseline_policy: str = LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
+    target_weights: tuple[
+        tuple[str, Decimal], ...
+    ] = LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1,
 ) -> LocalStaticNeutralBaselineResult:
     """Run deterministic fixed-weight local monthly baseline evidence."""
     if run_config.dataset != dataset:
@@ -1393,13 +1423,16 @@ def run_local_static_neutral_baseline(
         raise ValueError(
             "aligned_benchmark_points length must equal run_config.period_specs length."
         )
-    if run_config.cash_min_weight != _STATIC_NEUTRAL_CASH_WEIGHT:
-        raise ValueError(
-            "static neutral cash weight must equal run_config.cash_min_weight."
-        )
+    if baseline_policy not in {
+        LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
+        LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1,
+    }:
+        raise ValueError("baseline_policy must be a supported static baseline policy.")
+    _validate_static_neutral_weights(target_weights=target_weights)
 
     non_cash_configs = _build_static_neutral_snapshot_asset_configs(
         run_config=run_config,
+        target_weights=target_weights,
     )
     current_portfolio_state = run_config.initial_portfolio_state
     steps: list[BacktestSinglePeriodStepResult] = []
@@ -1410,6 +1443,7 @@ def run_local_static_neutral_baseline(
             run_config=run_config,
             period_index=index,
             snapshot_asset_configs=non_cash_configs,
+            target_weights=target_weights,
         )
         execution_prices = select_execution_prices_for_single_step_decision(
             dataset.source_records,
@@ -1483,21 +1517,45 @@ def run_local_static_neutral_baseline(
     )
 
     return LocalStaticNeutralBaselineResult(
-        local_static_neutral_baseline_policy=LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1,
+        local_static_neutral_baseline_policy=baseline_policy,
         walk_forward_result=static_walk_forward_result,
         benchmark_relative_result=static_benchmark_relative_result,
         warnings=(
             *nav_sanity_warnings,
             _STATIC_NEUTRAL_NON_TACTICAL_WARNING,
-            _STATIC_NEUTRAL_FIXED_WEIGHTS_WARNING,
+            _fixed_weights_warning_for_baseline_policy(baseline_policy),
             _STATIC_NEUTRAL_RESEARCH_ONLY_WARNING,
         ),
     )
 
 
+def _validate_static_neutral_weights(
+    *,
+    target_weights: tuple[tuple[str, Decimal], ...],
+) -> None:
+    weights = dict(target_weights)
+    if len(weights) != len(target_weights):
+        raise ValueError("static neutral baseline weights must not contain duplicates.")
+    if set(weights) != {"asset_us", "asset_kr", "asset_gold", "cash"}:
+        raise ValueError("static neutral baseline weights require US, KR, GOLD, and CASH.")
+    if sum(weights.values(), _ZERO) != _ONE:
+        raise ValueError("static neutral baseline weights must sum to 1.00.")
+    if any(weight < _ZERO for weight in weights.values()):
+        raise ValueError("static neutral baseline weights must be non-negative.")
+
+
+def _fixed_weights_warning_for_baseline_policy(baseline_policy: str) -> str:
+    if baseline_policy == LOCAL_STATIC_NEUTRAL_BASELINE_POLICY_V1:
+        return _STATIC_NEUTRAL_FIXED_WEIGHTS_WARNING
+    if baseline_policy == LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1:
+        return _PRODUCT_RELATIVE_V1_NEUTRAL_FIXED_WEIGHTS_WARNING
+    raise ValueError("baseline_policy must be a supported static baseline policy.")
+
+
 def _build_static_neutral_snapshot_asset_configs(
     *,
     run_config: LocalMonthlyRunConfig,
+    target_weights: tuple[tuple[str, Decimal], ...],
 ) -> tuple[SnapshotAssetConfig, ...]:
     asset_configs = tuple(
         SnapshotAssetConfig(
@@ -1505,10 +1563,22 @@ def _build_static_neutral_snapshot_asset_configs(
             symbol=config.symbol,
             market=config.market,
             long_ma=Decimal("1"),
-            risk_on_weight=_static_weight_for_asset(config.asset_id),
-            risk_off_weight=_static_weight_for_asset(config.asset_id),
-            min_weight=_static_weight_for_asset(config.asset_id),
-            max_weight=_static_weight_for_asset(config.asset_id),
+            risk_on_weight=_static_weight_for_asset(
+                config.asset_id,
+                target_weights=target_weights,
+            ),
+            risk_off_weight=_static_weight_for_asset(
+                config.asset_id,
+                target_weights=target_weights,
+            ),
+            min_weight=_static_weight_for_asset(
+                config.asset_id,
+                target_weights=target_weights,
+            ),
+            max_weight=_static_weight_for_asset(
+                config.asset_id,
+                target_weights=target_weights,
+            ),
         )
         for config in run_config.rolling_asset_configs
     )
@@ -1523,6 +1593,7 @@ def _build_static_neutral_single_step_decision(
     run_config: LocalMonthlyRunConfig,
     period_index: int,
     snapshot_asset_configs: tuple[SnapshotAssetConfig, ...],
+    target_weights: tuple[tuple[str, Decimal], ...],
 ) -> BacktestSingleStepDecision:
     period = run_config.period_specs[period_index]
     common_periods = run_config.dataset.common_periods
@@ -1538,10 +1609,22 @@ def _build_static_neutral_single_step_decision(
                 as_of=period.decision_time,
                 current_price=Decimal("1"),
                 long_ma=Decimal("1"),
-                risk_on_weight=_static_weight_for_asset(config.asset_id),
-                risk_off_weight=_static_weight_for_asset(config.asset_id),
-                min_weight=_static_weight_for_asset(config.asset_id),
-                max_weight=_static_weight_for_asset(config.asset_id),
+                risk_on_weight=_static_weight_for_asset(
+                    config.asset_id,
+                    target_weights=target_weights,
+                ),
+                risk_off_weight=_static_weight_for_asset(
+                    config.asset_id,
+                    target_weights=target_weights,
+                ),
+                min_weight=_static_weight_for_asset(
+                    config.asset_id,
+                    target_weights=target_weights,
+                ),
+                max_weight=_static_weight_for_asset(
+                    config.asset_id,
+                    target_weights=target_weights,
+                ),
             )
             for config in snapshot_asset_configs
         ),
@@ -1557,7 +1640,8 @@ def _build_static_neutral_single_step_decision(
                 weight=weight,
             )
             for asset_id, weight in _static_weights_for_cash_asset(
-                run_config.cash_asset_id
+                run_config.cash_asset_id,
+                target_weights=target_weights,
             )
         ),
     )
@@ -1584,17 +1668,23 @@ def _build_static_neutral_single_step_decision(
 
 def _static_weights_for_cash_asset(
     cash_asset_id: str,
+    *,
+    target_weights: tuple[tuple[str, Decimal], ...],
 ) -> tuple[tuple[str, Decimal], ...]:
     if cash_asset_id == "cash":
-        return LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1
+        return target_weights
     return tuple(
         (cash_asset_id if asset_id == "cash" else asset_id, weight)
-        for asset_id, weight in LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1
+        for asset_id, weight in target_weights
     )
 
 
-def _static_weight_for_asset(asset_id: str) -> Decimal:
-    weights = dict(LOCAL_STATIC_NEUTRAL_BASELINE_WEIGHTS_V1)
+def _static_weight_for_asset(
+    asset_id: str,
+    *,
+    target_weights: tuple[tuple[str, Decimal], ...],
+) -> Decimal:
+    weights = dict(target_weights)
     if asset_id not in weights:
         raise ValueError(f"unsupported static neutral asset id: {asset_id!r}.")
     return weights[asset_id]
@@ -1681,6 +1771,13 @@ def run_local_monthly_evaluation_dry_run(
         run_config=run_config,
         aligned_benchmark_points=aligned_benchmark_points,
     )
+    product_relative_v1_neutral_baseline_result = run_local_static_neutral_baseline(
+        dataset=dataset,
+        run_config=run_config,
+        aligned_benchmark_points=aligned_benchmark_points,
+        baseline_policy=LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_POLICY_V1,
+        target_weights=LOCAL_PRODUCT_RELATIVE_V1_NEUTRAL_BASELINE_WEIGHTS_V1,
+    )
 
     report_bundle = render_backtest_evaluation_report_bundle(
         benchmark_relative_result=benchmark_relative_result,
@@ -1691,6 +1788,9 @@ def run_local_monthly_evaluation_dry_run(
         run_config_warnings=run_config.warnings,
         nav_sanity_warnings=nav_sanity_warnings,
         static_neutral_baseline_warnings=static_neutral_baseline_result.warnings,
+        product_relative_v1_neutral_baseline_warnings=(
+            product_relative_v1_neutral_baseline_result.warnings
+        ),
         rules_allocator_version=run_config.rules_allocator_version,
     )
 
@@ -1703,6 +1803,9 @@ def run_local_monthly_evaluation_dry_run(
         walk_forward_result=walk_forward_result,
         benchmark_relative_result=benchmark_relative_result,
         static_neutral_baseline_result=static_neutral_baseline_result,
+        product_relative_v1_neutral_baseline_result=(
+            product_relative_v1_neutral_baseline_result
+        ),
         report_bundle=report_bundle,
         warnings=warnings,
     )
@@ -1714,12 +1817,14 @@ def _collect_warnings(
     run_config_warnings: tuple[str, ...],
     nav_sanity_warnings: tuple[str, ...],
     static_neutral_baseline_warnings: tuple[str, ...],
+    product_relative_v1_neutral_baseline_warnings: tuple[str, ...],
     rules_allocator_version: str = LOCAL_RULES_ALLOCATOR_VERSION_V1,
 ) -> tuple[str, ...]:
     combined = list(dataset_warnings)
     combined.extend(run_config_warnings)
     combined.extend(nav_sanity_warnings)
     combined.extend(static_neutral_baseline_warnings)
+    combined.extend(product_relative_v1_neutral_baseline_warnings)
     if rules_allocator_version == LOCAL_RULES_ALLOCATOR_VERSION_V2:
         combined.append(_RULES_ALLOCATOR_V2_STATIC_NORMAL_WARNING)
     combined.append(_RESEARCH_ONLY_WARNING)

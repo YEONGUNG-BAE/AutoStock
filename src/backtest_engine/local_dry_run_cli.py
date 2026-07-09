@@ -158,10 +158,14 @@ def render_local_dry_run_summary(
     static_result = result.static_neutral_baseline_result
     static_walk_forward = static_result.walk_forward_result
     static_metrics = static_result.benchmark_relative_result.metrics
+    product_relative_result = result.product_relative_v1_neutral_baseline_result
+    product_relative_walk_forward = product_relative_result.walk_forward_result
+    product_relative_metrics = product_relative_result.benchmark_relative_result.metrics
 
     period_specs = run_config.period_specs
     nav_points = walk_forward.nav_points
     static_nav_points = static_walk_forward.nav_points
+    product_relative_nav_points = product_relative_walk_forward.nav_points
 
     v2_state_policy = resolve_local_rules_allocator_v2_state_policy(
         run_config.rules_allocator_version,
@@ -226,6 +230,50 @@ def render_local_dry_run_summary(
         (
             "rules_minus_static_excess_return: "
             f"{metrics.excess_return_percent - static_metrics.excess_return_percent}"
+        ),
+        (
+            "product_relative_v1_neutral_baseline_policy: "
+            f"{product_relative_result.local_static_neutral_baseline_policy}"
+        ),
+        (
+            "product_relative_v1_final_portfolio_value_krw: "
+            f"{product_relative_nav_points[-1].portfolio_value_krw}"
+        ),
+        (
+            "product_relative_v1_total_cost_krw: "
+            f"{product_relative_walk_forward.total_cost_krw}"
+        ),
+        (
+            "product_relative_v1_terminal_strategy_return: "
+            f"{product_relative_metrics.bot_total_return_percent}"
+        ),
+        (
+            "product_relative_v1_terminal_benchmark_return: "
+            f"{product_relative_metrics.benchmark_total_return_percent}"
+        ),
+        (
+            "product_relative_v1_terminal_excess_return: "
+            f"{product_relative_metrics.excess_return_percent}"
+        ),
+        (
+            "product_relative_v1_max_relative_drawdown: "
+            f"{product_relative_metrics.relative_drawdown_percent}"
+        ),
+        (
+            "rules_minus_product_relative_v1_terminal_return: "
+            f"{metrics.bot_total_return_percent - product_relative_metrics.bot_total_return_percent}"
+        ),
+        (
+            "rules_minus_product_relative_v1_excess_return: "
+            f"{metrics.excess_return_percent - product_relative_metrics.excess_return_percent}"
+        ),
+        (
+            "static_minus_product_relative_v1_terminal_return: "
+            f"{static_metrics.bot_total_return_percent - product_relative_metrics.bot_total_return_percent}"
+        ),
+        (
+            "static_minus_product_relative_v1_excess_return: "
+            f"{static_metrics.excess_return_percent - product_relative_metrics.excess_return_percent}"
         ),
         "warnings:",
     ]
