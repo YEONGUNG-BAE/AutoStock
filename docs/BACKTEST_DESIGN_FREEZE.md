@@ -1412,3 +1412,58 @@ passing an explicit `--rules-allocator-version` value. Sanitized evidence
 export metrics JSON and manifest `generated_from` metadata include
 `rules_allocator_version` and `rules_allocator_v2_state_policy`. No real evidence
 run or deployment conclusion exists.
+
+### Phase 2f-7 V2 Static-Normal Local Evidence Gate Review
+
+Phase 2f-7 reviewed the V2 static-normal full-history local research evidence
+after product-relative v1 neutral static comparator support was added.
+
+V2 static-normal full-history local evidence result:
+
+- improved over V1 rules
+- improved over product-relative v1 neutral static baseline
+- roughly flat/slightly better than implemented US60 static neutral baseline
+- did not beat the S&P benchmark
+
+Key sanitized metrics:
+
+- V2 static-normal:
+  - terminal_strategy_return: 1144.514042836801076876799254
+  - terminal_benchmark_return: 1308.719922162372568027027300
+  - terminal_excess_return: -164.2058793255714911502280460
+  - max_relative_drawdown: -39.51443767857596837426876100
+- implemented US60 static:
+  - terminal_strategy_return: 1140.747516803951804075925185
+  - terminal_excess_return: -167.9724053584207639511021150
+  - max_relative_drawdown: -48.44058973989600446483907708
+- product-relative v1 neutral static:
+  - terminal_strategy_return: 674.9043905005663055483993281
+  - terminal_excess_return: -633.8155316618062624786279719
+  - max_relative_drawdown: -74.51525357260667526225887945
+- V1 rules:
+  - terminal_strategy_return: 606.8516459084041211247327601
+  - terminal_excess_return: -701.8682762539684469022945399
+  - max_relative_drawdown: -63.29150318490450077920038984
+
+V2 static-normal does not satisfy the primary project objective because it does
+not beat S&P 500 TR KRW-unhedged terminal wealth. This is not project-level
+success. This is not deployment approval. This is not an investment
+recommendation. This is not evidence that any security should be bought or sold.
+
+This remains in-sample candidate evidence only because V2 was designed after
+observing V1 failure on the same repaired full local history. Clean promotion
+would require a predeclared holdout, untouched validation window, or forward
+paper evidence.
+
+Do not continue to V3/V4 same-history retuning without explicit approval and a
+new anti-overfit protocol.
+
+Next allowed paths:
+
+- Path A - stop same-history rules tuning and preserve evidence as
+  failed-to-beat-S&P research record.
+- Path B - design a predeclared holdout / untouched validation protocol before
+  any further model selection.
+- Path C - use forward paper evidence only after design choices are frozen.
+- Path D - conservative off-ramp: S&P/core passive allocation plus, at most, a
+  small research sleeve. This is a research-process rule, not investment advice.

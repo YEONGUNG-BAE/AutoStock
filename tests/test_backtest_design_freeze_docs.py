@@ -836,3 +836,47 @@ def test_phase_2f_5_design_freeze_update(freeze_text: str) -> None:
             "No real evidence run or deployment conclusion exists",
         ),
     )
+
+
+def test_phase_2f_7_design_freeze_gate_review_and_stop_rule(
+    freeze_text: str,
+) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-7 V2 Static-Normal Local Evidence Gate Review",
+            "V2 static-normal full-history local evidence result",
+            "improved over V1 rules",
+            "improved over product-relative v1 neutral static baseline",
+            "roughly flat/slightly better than implemented US60 static neutral baseline",
+            "did not beat the S&P benchmark",
+            "terminal_strategy_return: 1144.514042836801076876799254",
+            "terminal_benchmark_return: 1308.719922162372568027027300",
+            "terminal_excess_return: -164.2058793255714911502280460",
+            "max_relative_drawdown: -39.51443767857596837426876100",
+            "terminal_strategy_return: 1140.747516803951804075925185",
+            "terminal_excess_return: -167.9724053584207639511021150",
+            "max_relative_drawdown: -48.44058973989600446483907708",
+            "terminal_strategy_return: 674.9043905005663055483993281",
+            "terminal_excess_return: -633.8155316618062624786279719",
+            "max_relative_drawdown: -74.51525357260667526225887945",
+            "terminal_strategy_return: 606.8516459084041211247327601",
+            "terminal_excess_return: -701.8682762539684469022945399",
+            "max_relative_drawdown: -63.29150318490450077920038984",
+            "does not satisfy the primary project objective",
+            "does not beat S&P 500 TR KRW-unhedged terminal wealth",
+            "not project-level success",
+            "not deployment approval",
+            "not an investment recommendation",
+            "not evidence that any security should be bought or sold",
+            "in-sample candidate evidence only",
+            "V2 was designed after observing V1 failure on the same repaired full local history",
+            "predeclared holdout, untouched validation window, or forward paper evidence",
+            "Do not continue to V3/V4 same-history retuning without explicit approval and a new anti-overfit protocol",
+            "Path A - stop same-history rules tuning",
+            "Path B - design a predeclared holdout / untouched validation protocol",
+            "Path C - use forward paper evidence only after design choices are frozen",
+            "Path D - conservative off-ramp",
+            "research-process rule, not investment advice",
+        ),
+    )
