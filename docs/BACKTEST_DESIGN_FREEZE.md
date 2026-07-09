@@ -1467,3 +1467,52 @@ Next allowed paths:
 - Path C - use forward paper evidence only after design choices are frozen.
 - Path D - conservative off-ramp: S&P/core passive allocation plus, at most, a
   small research sleeve. This is a research-process rule, not investment advice.
+
+### Phase 2f-8 Predeclared Validation Protocol Design
+
+Phase 2f-8 defines the validation decision tree after V2 static-normal failed
+the primary S&P objective on same-history local evidence.
+
+Same-history V3/V4 retuning is not allowed without explicit approval and a new
+anti-overfit protocol. V2 static-normal full-history local evidence remains
+in-sample candidate evidence only.
+
+Clean promotion requires one of:
+
+1. a predeclared holdout window,
+2. an untouched validation window,
+3. forward paper evidence after design choices are frozen.
+
+Allowed next paths:
+
+- Path A - Stop rules tuning: Preserve V1/V2 results as research evidence and
+  do not continue allocator redesign.
+- Path B - Predeclared holdout protocol: Select a validation window before any
+  further model selection. Freeze all candidate rules before evaluating that
+  window. Do not use validation results to iteratively retune.
+- Path C - Forward paper protocol: Freeze design choices before observation.
+  Collect paper evidence prospectively. No runtime deployment conclusion until
+  forward evidence exists.
+- Path D - Conservative research off-ramp: Treat S&P/core passive allocation
+  plus, at most, a small research sleeve as the conservative process off-ramp.
+  This is a research-process statement, not investment advice.
+
+Minimum success criteria for any future clean validation:
+
+- Primary: net terminal wealth must exceed S&P 500 TR KRW-unhedged terminal
+  wealth.
+- Secondary: must beat implemented US60 static neutral baseline; must beat
+  product-relative v1 neutral static baseline; must improve over V1 rules; must
+  pass dataset/NAV/frequency/static-baseline sanity checks.
+- Important: lower drawdown alone is not success; no deployment approval follows
+  from in-sample evidence; no investment recommendation follows from research
+  evidence.
+
+Anti-overfit requirements before any future V3/V4 or new allocator candidate:
+
+- candidate rule family must be declared before validation
+- target metrics must be declared before validation
+- validation window must be declared before evaluation
+- no repeated tuning against the same validation window
+- all failed candidates must remain recorded
+- no runtime allocation changes during research validation
