@@ -1516,3 +1516,61 @@ Anti-overfit requirements before any future V3/V4 or new allocator candidate:
 - no repeated tuning against the same validation window
 - all failed candidates must remain recorded
 - no runtime allocation changes during research validation
+
+### Phase 2f-9 Validation Path Selection After Post-V2 Protocol Freeze
+
+Phase 2f-9 selects Path B - Forward paper protocol as the next validation path.
+
+Current factual status:
+
+- V1 failed same-history local evidence.
+- V2 static-normal improved over V1, product-relative v1 neutral static, and
+  was roughly flat/slightly better than implemented US60 static.
+- V2 static-normal did not beat the S&P 500 TR KRW-unhedged benchmark.
+- Therefore V2 static-normal is not project-level success under the primary
+  objective.
+- The result remains in-sample candidate evidence only.
+- Same-history V3/V4 retuning remains blocked unless explicitly approved under
+  a new anti-overfit protocol.
+
+Path B rationale: the current repaired full local history has already been used
+for V1 failure analysis, V2 design, and V2 gate review. Therefore it is not a
+clean untouched holdout for further model selection. Forward paper evidence is
+the cleanest next validation route if research continues.
+
+Path B - Forward paper protocol:
+
+- Freeze design choices before observation.
+- Collect prospective paper evidence only.
+- Do not change runtime allocation during collection.
+- Do not infer deployment approval from paper evidence until predeclared gates
+  are evaluated.
+
+Before evidence collection:
+
+- freeze candidate allocator version
+- freeze state policy
+- freeze comparator set
+- freeze primary metric
+- freeze secondary metrics
+- freeze evidence reporting format
+- freeze no-runtime-change rule
+
+Primary forward gate:
+
+- net terminal wealth must exceed S&P 500 TR KRW-unhedged benchmark over the
+  predeclared forward observation window
+
+Secondary gates:
+
+- must beat implemented US60 static neutral comparator
+- must beat product-relative v1 neutral static comparator
+- must preserve dataset/NAV/frequency/static-baseline sanity checks
+- lower drawdown alone is not success
+
+Safety:
+
+- no deployment approval
+- no investment recommendation
+- no buy/sell recommendation
+- no runtime allocation change during evidence collection
