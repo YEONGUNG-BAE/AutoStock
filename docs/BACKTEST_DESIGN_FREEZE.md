@@ -1853,3 +1853,85 @@ Reviewer behavior:
   present
 - mark incomplete monthly reports as PENDING_MONTHLY_OBSERVATION
 - mark sanity or protocol violations as BLOCKED
+
+### Phase 2f-13 Offline Forward Monthly Observation Harness
+
+Phase 2f-13 implements an offline shadow-portfolio observation harness for the
+frozen Phase 2f-10 through Phase 2f-12 protocol. It has two explicit stages:
+
+- PREPARE freezes the next monthly decision before that month's outcome is
+  available.
+- FINALIZE verifies the original frozen decision and evaluates exactly one
+  completed monthly observation.
+
+This is not runtime paper trading. The harness does not connect to KIS, place
+orders, start runtime or a daemon, run startup smoke, start an attended
+paper-day pilot, change runtime allocation, or read `config/config.toml`.
+
+Frozen harness identity:
+
+- candidate allocator version remains
+  `local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1`
+- candidate state policy remains
+  `local_monthly_rules_allocator_v2_static_normal_state.v1`
+- observation window remains 2026-08 through 2027-07 inclusive
+- minimum observations remains 12
+- normalized initial portfolio value is KRW 100000000
+- primary benchmark remains S&P 500 TR KRW-unhedged
+- implemented US60 static policy remains
+  `local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1`
+- product-relative V1 neutral policy remains
+  `static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1`
+
+PREPARE contract:
+
+- inputs are repository root, sibling data root, external observation output
+  root, report month, expected GitHub baseline SHA, and candidate allocator
+  version
+- decision_cutoff_period is exactly the month before report_month
+- observation_index is derived from the frozen observation window
+- input containing the observation-month outcome is rejected
+- the frozen V2 allocator creates the candidate target weights
+- both static comparator target-weight decisions are frozen separately
+- normalized initial portfolio state and cost-model identity are frozen
+- expected GitHub baseline, allocator version, state policy, observation
+  window, and observation index are recorded
+- the sanitized decision snapshot is written only outside the repository
+- canonical deterministic JSON has SHA-256 content-integrity metadata
+- overwrite is refused unless an explicit safe overwrite flag is supplied
+  before the observation period begins
+
+The PREPARE snapshot excludes raw CSV rows, source records, source names, raw
+FX values, secrets, configuration values, deployment conclusions, and
+investment conclusions.
+
+FINALIZE contract:
+
+- the original decision snapshot is required and its digest is verified
+- report month, observation index, allocator version, state policy, comparator
+  identities, cost model, expected baseline, and cutoff input digest are
+  verified
+- modified or inconsistent snapshots are rejected
+- FINALIZE uses the target weights in the snapshot and never calls the
+  allocator to recompute or replace the frozen decision
+- only the cutoff-to-report-month interval is evaluated, even if later local
+  data is present
+- candidate, primary benchmark, implemented US60 static, and product-relative
+  V1 neutral monthly returns are calculated as separate sanitized metrics
+- cumulative returns and candidate-minus-comparator differences are chained
+  from the forward-window ledger
+- dataset, NAV, monthly frequency-alignment, and static-comparator-separation
+  sanity checks are recorded
+- sanitized metrics and manifest artifacts are written only outside the
+  repository
+- missing or partial observation data emits PENDING_MONTHLY_OBSERVATION
+- a complete first observation without a blocker emits PENDING_FULL_WINDOW
+- dataset failures emit BLOCKED_DATA_QUALITY
+- NAV failures emit BLOCKED_NAV_SANITY
+- frequency failures emit BLOCKED_FREQUENCY_ALIGNMENT
+- PASS is never emitted before all 12 observations are complete
+
+The harness is isolated to `backtest_engine` offline modules. It does not
+modify runtime allocator logic, rules allocator target logic, dataset repair
+logic, benchmark metric formulas, NAV sanity thresholds, or any
+live/paper/scout/broker/risk/order/startup/daemon module.

@@ -1172,3 +1172,46 @@ def test_phase_2f_12_forward_paper_operator_readiness_checklist_freeze(
             "mark sanity or protocol violations as BLOCKED",
         ),
     )
+
+
+def test_phase_2f_13_offline_forward_monthly_observation_harness(
+    freeze_text: str,
+) -> None:
+    _assert_tokens(
+        freeze_text,
+        (
+            "Phase 2f-13 Offline Forward Monthly Observation Harness",
+            "offline shadow-portfolio observation harness",
+            "PREPARE freezes the next monthly decision before that month's outcome is available",
+            "FINALIZE verifies the original frozen decision and evaluates exactly one completed monthly observation",
+            "This is not runtime paper trading",
+            "does not connect to KIS, place orders, start runtime or a daemon, run startup smoke",
+            "change runtime allocation, or read `config/config.toml`",
+            "local_monthly_rules_allocator_v2_contract.sp_core_relative_recovery.v1",
+            "local_monthly_rules_allocator_v2_static_normal_state.v1",
+            "observation window remains 2026-08 through 2027-07 inclusive",
+            "minimum observations remains 12",
+            "normalized initial portfolio value is KRW 100000000",
+            "S&P 500 TR KRW-unhedged",
+            "local_monthly_static_neutral_baseline_us60_kr20_gold15_cash5.v1",
+            "static_v1_neutral_baseline_cash20_kr40_us24_gold16.v1",
+            "input containing the observation-month outcome is rejected",
+            "both static comparator target-weight decisions are frozen separately",
+            "sanitized decision snapshot is written only outside the repository",
+            "SHA-256 content-integrity metadata",
+            "overwrite is refused unless an explicit safe overwrite flag is supplied before the observation period begins",
+            "excludes raw CSV rows, source records, source names, raw FX values, secrets, configuration values",
+            "original decision snapshot is required and its digest is verified",
+            "never calls the allocator to recompute or replace the frozen decision",
+            "only the cutoff-to-report-month interval is evaluated",
+            "cumulative returns and candidate-minus-comparator differences",
+            "dataset, NAV, monthly frequency-alignment, and static-comparator-separation sanity checks",
+            "PENDING_MONTHLY_OBSERVATION",
+            "PENDING_FULL_WINDOW",
+            "BLOCKED_DATA_QUALITY",
+            "BLOCKED_NAV_SANITY",
+            "BLOCKED_FREQUENCY_ALIGNMENT",
+            "PASS is never emitted before all 12 observations are complete",
+            "does not modify runtime allocator logic, rules allocator target logic, dataset repair logic, benchmark metric formulas, NAV sanity thresholds",
+        ),
+    )
