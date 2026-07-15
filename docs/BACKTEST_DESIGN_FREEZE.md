@@ -1773,3 +1773,83 @@ Caveats:
 - no buy/sell recommendation
 - no runtime allocation change
 ```
+
+### Phase 2f-12 Forward Paper Operator Readiness Checklist Freeze
+
+Phase 2f-10 froze the forward paper evidence contract.
+
+Phase 2f-11 froze the monthly evidence reporting template.
+
+Phase 2f-12 freezes the operator readiness checklist before the first monthly
+forward evidence report is accepted.
+
+This phase does not authorize paper trading, live trading, runtime activation,
+startup smoke, daemon startup, or any order flow.
+
+This phase does not create deployment approval, investment recommendation,
+buy/sell recommendation, or runtime allocation change.
+
+Operator readiness checklist before accepting any monthly forward report:
+
+- expected GitHub main baseline is known:
+  `0bd6ca01773081e7b106a3d6e9180a296b9ec3fc`
+- candidate allocator version is unchanged
+- candidate state policy is unchanged
+- observation window remains 2026-08 through 2027-07 inclusive
+- minimum completed observations remains 12
+- primary benchmark remains S&P 500 TR KRW-unhedged
+- implemented US60 static comparator remains separate
+- product-relative v1 neutral comparator remains separate
+- V1 frozen failed reference remains historical reference only
+- monthly evidence template from Phase 2f-11 is used unchanged
+- no monthly PASS is allowed before 12 observations complete
+- partial monthly reports are PENDING or BLOCKED only
+- sanitization rules are followed
+- no raw CSV rows are pasted
+- no source records are pasted
+- no source names are pasted
+- no raw FX values are pasted
+- no secrets are pasted
+- config/config.toml is not read or printed
+
+Monthly report timing rules:
+
+- first eligible report_month is 2026-08
+- first monthly report is observation_index 1 of 12
+- final full-window report is observation_index 12 of 12
+- final gate review cannot occur before all 12 observations are complete
+- if data availability delays the first fully prospective monthly
+  decision/evaluation cycle, the first accepted report is still
+  observation_index 1 of 12 and the window must still contain 12 completed
+  observations
+- do not shorten the observation window after seeing evidence
+
+Monthly evidence must be BLOCKED, not PENDING or PASS, if any of these occur:
+
+- candidate allocator version changed
+- candidate state policy changed
+- comparator set changed
+- primary benchmark changed
+- target metric changed
+- observation window shortened after seeing results
+- runtime allocation changed
+- paper/live/scout/broker/risk/order modules changed as part of evidence
+  collection
+- raw unsanitized rows or secrets are required to interpret the report
+- NAV sanity fails
+- dataset sanity fails
+- frequency alignment fails
+- static comparator separation fails
+
+Reviewer behavior:
+
+- verify GitHub main baseline for any code/docs phase
+- for monthly operator evidence reports, verify GitHub main is unchanged from
+  the expected baseline unless a repo change is reported
+- evaluate only sanitized monthly evidence
+- do not demand raw files or raw data
+- do not mark PASS before the full 12-month observation window is complete
+- mark complete monthly reports as PENDING_FULL_WINDOW unless a blocker is
+  present
+- mark incomplete monthly reports as PENDING_MONTHLY_OBSERVATION
+- mark sanity or protocol violations as BLOCKED
